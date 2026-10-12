@@ -2,11 +2,11 @@
 
 <div align="center">
 
-# OpenMausBot
+# MOBOT
 
-**Your own team of AI bots, in a chat app.**
+**Your own autonomous agent platform & full-stack app builder in a chat app.**
 
-<sub>An independent, open-source project inspired by **Grok Bot** — bring-your-own-agent, local-first, on the models you already have. Not affiliated with xAI.</sub>
+<sub>An independent, open-source agentic computer platform — bring-your-own-agent, local-first, on the models you already have.</sub>
 
 Every bot in the sidebar is a real agent — Claude or Codex running locally under the hood — with its own
 personality, its own model, its own cloud computer, and its own connected apps.

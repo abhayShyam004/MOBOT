@@ -1,10 +1,10 @@
-appId: com.openmausbot.app
-productName: OpenMausBot
-artifactName: OpenMausBot-${version}-${arch}.${ext}
+appId: com.mobot.app
+productName: MOBOT
+artifactName: MOBOT-${version}-${arch}.${ext}
 
 protocols:
-  - name: OpenMausBot package install
-    schemes: [openmausbot]
+  - name: MOBOT package install
+    schemes: [mobot, openmausbot]
 
 # In-app auto-update reads latest-mac.yml + the .zip (macOS) or latest.yml +
 # the NSIS .exe (Windows) from the PUBLIC releases in this source repo.
@@ -15,7 +15,7 @@ protocols:
 # stranded on its installed version.
 publish:
   - provider: github
-    owner: milind-soni
+    owner: abhayShyam004
     repo: OpenMausBot
 
 directories:
