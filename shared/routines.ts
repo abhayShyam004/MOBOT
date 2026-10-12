@@ -71,9 +71,112 @@ export type RoutineRunStatus =
   | "cancelled"
   | "missed";
 
+export type RoutineNotificationMode =
+  | "normal"
+  | "sound"
+  | "vibrate"
+  | "sound_vibrate"
+  | "important"
+  | "silent";
+
+export type RoutineMissedRunPolicy = "run_next" | "skip" | "catch_up" | "ask";
+
+export interface RoutineTriggerConfig {
+  frequency: "once" | "daily" | "weekdays" | "weekends" | "weekly" | "interval" | "cron" | "custom";
+  timeOfDay?: string;
+  weekdays?: number[];
+  timezone?: string;
+  startDate?: number;
+  endDate?: number;
+  runCountLimit?: number;
+  runCount?: number;
+  missedRunPolicy?: RoutineMissedRunPolicy;
+}
+
+export interface RoutineWorkflowConfig {
+  userIntent?: string;
+  taskObjective?: string;
+  requirements?: Record<string, unknown>;
+  instructions?: string;
+  capabilitiesRequired?: string[];
+  sourceStrategy?: "primary_first" | "reputable" | "aggregators_for_discovery" | "any";
+  filters?: Record<string, unknown>;
+  rankingCriteria?: string[];
+  verificationRequired?: boolean;
+  freshnessWindowHours?: number;
+  deduplicationPolicy?: "strict" | "canonical_url_or_id" | "none";
+  changeDetectionOnly?: boolean;
+  minResultsThreshold?: number;
+  notifyIfEmpty?: boolean;
+}
+
+export interface RoutineDeliveryConfig {
+  notificationMode?: RoutineNotificationMode;
+  soundPreference?: string;
+  vibrationPreference?: boolean;
+  visualFlashPreference?: boolean;
+  resultSurface?: "auto" | "cards" | "table" | "summary" | "notification";
+  notificationPriority?: "normal" | "high" | "urgent";
+  quietHours?: { start: string; end: string };
+}
+
+export interface RoutineExecutionConfig {
+  model?: string;
+  provider?: string;
+  timeoutMinutes?: number;
+  maxRetries?: number;
+  retryBackoffMs?: number;
+  failurePolicy?: "record_and_alert" | "silent_retry" | "pause_routine";
+  partialResultPolicy?: "deliver_partial" | "fail_run";
+}
+
+export interface RoutineStateMemory {
+  deliveredFingerprints?: string[];
+  previousRunOutputSnippet?: string;
+  lastSnapshotHash?: string;
+  lastSnapshotContent?: string;
+  totalItemsFound?: number;
+  totalItemsDelivered?: number;
+  totalRunsCompleted?: number;
+  lastVerifiedAt?: number;
+}
+
+export interface RoutineHistorySummary {
+  lastRunAt?: number;
+  lastSuccessfulRunAt?: number;
+  lastFailureAt?: number;
+  lastDurationMs?: number;
+  lastResultSummary?: string;
+  itemsFound?: number;
+  itemsDelivered?: number;
+  lastError?: string;
+  verificationStatus?: "verified" | "unverified" | "partial";
+}
+
+export interface RoutineItemRecord {
+  id?: string;
+  title: string;
+  subtitle?: string;
+  url?: string;
+  applicationUrl?: string;
+  company?: string;
+  location?: string;
+  sourceTier?: 1 | 2 | 3;
+  sourceName?: string;
+  verified?: boolean;
+  verifiedAt?: number;
+  verificationNote?: string;
+  snippet?: string;
+  fingerprint: string;
+  isNew?: boolean;
+  metadata?: Record<string, unknown>;
+}
+
 export interface Routine {
   id: string;
   name: string;
+  description?: string;
+  taskObjective?: string;
   prompt: string;
   target: RoutineTarget;
   botId: string;
@@ -88,6 +191,12 @@ export interface Routine {
   sourceThreadId?: string;
   resultsThreadId?: string;
   nextRunAt: number | null;
+  triggerConfig?: RoutineTriggerConfig;
+  workflowConfig?: RoutineWorkflowConfig;
+  deliveryConfig?: RoutineDeliveryConfig;
+  executionConfig?: RoutineExecutionConfig;
+  stateMemory?: RoutineStateMemory;
+  historySummary?: RoutineHistorySummary;
   createdAt: number;
   updatedAt: number;
 }
@@ -124,12 +233,21 @@ export interface RoutineRun {
   attention?: string;
   cost?: number | null;
   denials?: string[];
+  itemsFound?: number;
+  itemsDelivered?: number;
+  deliveredFingerprints?: string[];
+  verificationStatus?: "verified" | "unverified" | "partial";
+  changeDetected?: boolean;
+  suppressedNotification?: boolean;
+  structuredResults?: RoutineItemRecord[];
   createdAt: number;
   seenAt?: number;
 }
 
 export interface RoutineInput {
   name: string;
+  description?: string;
+  taskObjective?: string;
   prompt: string;
   target?: RoutineTarget;
   botId: string;
@@ -143,5 +261,11 @@ export interface RoutineInput {
   attachments?: RoutineContextAttachment[];
   /** Omission preserves routing; null creates a new dedicated results task. */
   resultsThreadId?: string | null;
+  triggerConfig?: RoutineTriggerConfig;
+  workflowConfig?: RoutineWorkflowConfig;
+  deliveryConfig?: RoutineDeliveryConfig;
+  executionConfig?: RoutineExecutionConfig;
+  stateMemory?: RoutineStateMemory;
 }
+
 

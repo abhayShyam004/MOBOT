@@ -150,6 +150,7 @@ import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread
 import { CapabilitiesManager } from "./capabilities/capabilities-manager.ts";
 import { DeviceFileManager } from "./capabilities/device-files.ts";
 import { SmartRecapService, DailyBriefingService, CompletionCardGenerator } from "./capabilities/delight-services.ts";
+import { UniversalSearchService, QuickCaptureService, SmartLinkService, SystemServicesBridge } from "./capabilities/system-services.ts";
 import { augmentedPath, findCliCandidates, resetPathCache } from "./env-path.ts";
 import { registerEnginesBinDir } from "./engine-install.ts";
 import { appendUsage, parseUsageRange, readUsage, summarizeUsage, usageCsv, USAGE_GROUPINGS, flushUsageLedger, type UsageGroupBy, type UsageTrigger } from "./usage-ledger.ts";
@@ -4970,7 +4971,7 @@ bus.subscribe((event: RuntimeEvent) => {
         // A failed peer turn stays a chip too. The bot that delegated is woken
         // with the failure and answers the person in its own thread — buzzing
         // here as well would ring twice for one piece of news.
-        if ((!routineRun || routineRun.status === "completed") && !internal && !computerSelectionTurns.get(event.threadId)?.selected) {
+        if ((!routineRun || (routineRun.status === "completed" && !routineRun.suppressedNotification)) && !internal && !computerSelectionTurns.get(event.threadId)?.selected) {
           // the frame carries the bot's avatar so every desktop client can
           // show the notification under that bot's own face
           const completionDetail = routineRun
@@ -7335,8 +7336,10 @@ function syncRoutineRunToSource(run: RoutineRun): string | null {
   // Merely queueing/running is ambient progress. Attention and terminal
   // states become unread in the conversation where the user asked for them.
   if (statusChanged && ["waiting", "completed", "failed", "missed"].includes(run.status)) {
-    if (source.group) store.patchGroup(source.group.id, { unread: true });
-    else store.patchTask(source.bot.id, sourceThreadId, { unread: true });
+    if (!run.suppressedNotification) {
+      if (source.group) store.patchGroup(source.group.id, { unread: true });
+      else store.patchTask(source.bot.id, sourceThreadId, { unread: true });
+    }
   }
   return sourceThreadId;
 }
@@ -13993,6 +13996,46 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         shareText: body.shareText,
       });
       return json(res, 200, cardResult);
+    }
+
+    // ── Phase VI: System Services & Integrations (Universal Search, Quick Capture, Smart Links, Bridge) ────
+    if (method === "GET" && path === "/api/system/search") {
+      const q = url.searchParams.get("q") || "";
+      const cat = (url.searchParams.get("category") || "all") as any;
+      const searchService = new UniversalSearchService(store, routines ?? undefined);
+      const result = searchService.search(q, { category: cat });
+      return json(res, 200, result);
+    }
+
+    if (method === "POST" && path === "/api/system/quick-capture") {
+      const body = (await readBody(req)) || {};
+      const captureService = new QuickCaptureService(store);
+      const packet = captureService.processCapture(body);
+      return json(res, 200, packet);
+    }
+
+    if (method === "POST" && path === "/api/system/smart-link/analyze") {
+      const body = (await readBody(req)) || {};
+      const targetUrl = typeof body.url === "string" ? body.url : "";
+      if (!targetUrl) {
+        return json(res, 400, { error: "url parameter is required" });
+      }
+      const linkService = new SmartLinkService();
+      const analysis = await linkService.analyzeUrl(targetUrl);
+      return json(res, 200, analysis);
+    }
+
+    if (method === "GET" && path === "/api/system/calendar/overview") {
+      const bridge = new SystemServicesBridge(defaultCapabilityRegistry);
+      const overview = await bridge.getCalendarOverview();
+      return json(res, 200, overview);
+    }
+
+    if (method === "GET" && path === "/api/system/contacts/search") {
+      const q = url.searchParams.get("q") || "";
+      const bridge = new SystemServicesBridge(defaultCapabilityRegistry);
+      const result = await bridge.searchContacts(q);
+      return json(res, 200, result);
     }
 
     // ── bots ──

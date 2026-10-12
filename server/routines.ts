@@ -10,6 +10,19 @@ import { redactSecretsInText } from "./redact.ts";
 import type { GroupGoalRunStatus } from "../shared/group-goal-run.ts";
 import type { RoutineRequestOperation } from "../shared/routine-request.ts";
 import { normalizeCronSchedule, nextCronRuns, type RoutineCronSchedule } from "../shared/routine-schedule.ts";
+import type {
+  RoutineTriggerConfig,
+  RoutineWorkflowConfig,
+  RoutineDeliveryConfig,
+  RoutineExecutionConfig,
+  RoutineStateMemory,
+  RoutineHistorySummary,
+  RoutineItemRecord,
+} from "../shared/routines.ts";
+import {
+  RoutineExecutionPromptBuilder,
+  RoutinePostExecutionProcessor,
+} from "./capabilities/routine-engine.ts";
 
 export interface RoutineIntervalWindow {
   start: string;
@@ -78,6 +91,8 @@ export type RoutineRunStatus =
 export interface Routine {
   id: string;
   name: string;
+  description?: string;
+  taskObjective?: string;
   prompt: string;
   target: RoutineTarget;
   /** A bot routine's owner, or the lead coordinator for a room goal. */
@@ -101,6 +116,12 @@ export interface Routine {
   /** Stable visible report destination; execution still gets a fresh task. */
   resultsThreadId?: string;
   nextRunAt: number | null;
+  triggerConfig?: RoutineTriggerConfig;
+  workflowConfig?: RoutineWorkflowConfig;
+  deliveryConfig?: RoutineDeliveryConfig;
+  executionConfig?: RoutineExecutionConfig;
+  stateMemory?: RoutineStateMemory;
+  historySummary?: RoutineHistorySummary;
   createdAt: number;
   updatedAt: number;
 }
@@ -117,43 +138,35 @@ export interface RoutineRun {
   timeoutMinutes?: number;
   attachments?: RoutineContextAttachment[];
   target: RoutineTarget;
-  /** Exact terminal room outcome. `status` remains the scheduler lifecycle
-   * while this preserves blocked/needs-input/limit semantics and closes the
-   * cross-file crash-recovery gap with the room's goal card. */
   goalStatus?: RoutineGoalStatus;
-  /** Snapshot the room as well as the coordinator so edited definitions do
-   * not redirect already-queued team work. */
   groupId?: string;
   botId: string;
   runOn: RoutineRunOn;
   scheduledFor: number;
   status: RoutineRunStatus;
   manual: boolean;
-  /** First tick a queued run was skipped because its target bot or room was
-   * busy. Deferral behind a busy target is unbounded, so this timestamp is
-   * what surfaces the wait instead of leaving the run looking freshly queued. */
   deferredAt?: number;
-  /** When the one-per-run deferral notice was raised, so restarts and repeat
-   * ticks stay quiet. */
   deferredNoticeAt?: number;
-  /** Why this receipt exists. Kept optional so version-1 files migrate in place. */
   triggerSource?: RoutineRunTrigger;
   webhookId?: string;
   deliveryId?: string;
-  /** Snapshot the routine's reporting destination. Execution remains on the
-   * separate `threadId` so recurring work never contaminates chat context. */
   sourceThreadId?: string;
-  /** Snapshot of the chosen destination, never redirected by later edits. */
   resultsThreadId?: string;
   threadId?: string;
   startedAt?: number;
   finishedAt?: number;
   output?: string;
-  /** Human-readable reason the detached execution is waiting. */
   attention?: string;
   error?: string;
   cost?: number | null;
   denials?: string[];
+  itemsFound?: number;
+  itemsDelivered?: number;
+  deliveredFingerprints?: string[];
+  verificationStatus?: "verified" | "unverified" | "partial";
+  changeDetected?: boolean;
+  suppressedNotification?: boolean;
+  structuredResults?: RoutineItemRecord[];
   createdAt: number;
   seenAt?: number;
 }
@@ -193,6 +206,8 @@ type RoutineRequestCommitFor<Action extends RoutineRequestOperation["action"]> =
 
 export interface RoutineInput {
   name: string;
+  description?: string;
+  taskObjective?: string;
   prompt: string;
   target?: RoutineTarget;
   botId: string;
@@ -208,6 +223,11 @@ export interface RoutineInput {
   continuity?: boolean;
   /** Omission preserves routing; null creates a new dedicated results task. */
   resultsThreadId?: string | null;
+  triggerConfig?: RoutineTriggerConfig;
+  workflowConfig?: RoutineWorkflowConfig;
+  deliveryConfig?: RoutineDeliveryConfig;
+  executionConfig?: RoutineExecutionConfig;
+  stateMemory?: RoutineStateMemory;
 }
 
 interface RoutineFile {
@@ -729,6 +749,13 @@ function sanitizeInput(input: RoutineInput, after: number): Omit<Routine, "id" |
     ...(timeoutMinutes === undefined ? {} : { timeoutMinutes }),
     attachments,
     ...(continuity ? { continuity: true } : {}),
+    ...(input.description ? { description: input.description } : {}),
+    ...(input.taskObjective ? { taskObjective: input.taskObjective } : {}),
+    ...(input.triggerConfig ? { triggerConfig: input.triggerConfig } : {}),
+    ...(input.workflowConfig ? { workflowConfig: input.workflowConfig } : {}),
+    ...(input.deliveryConfig ? { deliveryConfig: input.deliveryConfig } : {}),
+    ...(input.executionConfig ? { executionConfig: input.executionConfig } : {}),
+    ...(input.stateMemory ? { stateMemory: input.stateMemory } : {}),
   };
 }
 
@@ -1361,6 +1388,23 @@ export class RoutineManager {
           await this.options.interruptTurn?.(run.botId, threadId, run.runOn ?? "maus").catch(() => {});
         }
       }
+      // Check routine end conditions (endDate and runCountLimit)
+      for (const routine of this.routines) {
+        if (!routine.enabled) continue;
+        if (routine.triggerConfig?.endDate && now >= routine.triggerConfig.endDate) {
+          routine.enabled = false;
+          routine.nextRunAt = null;
+          routine.updatedAt = Math.max(now, routine.updatedAt + 1);
+        } else if (
+          routine.triggerConfig?.runCountLimit &&
+          (routine.triggerConfig.runCount || 0) >= routine.triggerConfig.runCountLimit
+        ) {
+          routine.enabled = false;
+          routine.nextRunAt = null;
+          routine.updatedAt = Math.max(now, routine.updatedAt + 1);
+        }
+      }
+
       const dueRoutines = this.routines.filter(
         (routine) => routine.enabled && routine.nextRunAt != null && routine.nextRunAt <= now,
       );
@@ -1382,6 +1426,9 @@ export class RoutineManager {
             if (!overlapping) {
               const run = this.newRun(routine, scheduledFor, false, allocations);
               if (late > CATCH_UP_MS) {
+                if (routine.triggerConfig?.missedRunPolicy === "skip") {
+                  continue;
+                }
                 run.status = "missed";
                 run.finishedAt = now;
                 run.error = "This computer was offline for more than 12 hours after the scheduled time";
@@ -1508,10 +1555,16 @@ export class RoutineManager {
               (message) => this.failThread(task.threadId, message),
             );
           } else {
+            const routineDef = this.routines.find((r) => r.id === run.routineId);
+            const isUpgradedWorkflow = Boolean(routineDef && (routineDef.workflowConfig || routineDef.taskObjective));
+            const executionPrompt = isUpgradedWorkflow && routineDef
+              ? RoutineExecutionPromptBuilder.buildPrompt(routineDef, { now: this.now(), manualRun: run.manual })
+              : composeExecutionPrompt(prompt, run.attachments, this.continuityCarry(run));
+
             await this.options.startTurn(
               run.botId,
               task.threadId,
-              composeExecutionPrompt(prompt, run.attachments, this.continuityCarry(run)),
+              executionPrompt,
               run.runOn ?? "maus",
               triggerSource,
               (message) => this.failThread(task.threadId, message),
@@ -1572,7 +1625,40 @@ export class RoutineManager {
       const pending = this.options.hasPendingDelegations?.(event.threadId) === true;
       run.status = pending ? "waiting" : "completed";
       run.attention = pending ? "Waiting for delegated work to finish" : undefined;
-      if (!pending) run.finishedAt = this.now();
+      if (!pending) {
+        run.finishedAt = this.now();
+        const routine = this.routines.find((r) => r.id === run.routineId);
+        if (routine) {
+          const processed = RoutinePostExecutionProcessor.processCompletedRun(routine, run);
+          run.itemsFound = processed.itemsFound;
+          run.itemsDelivered = processed.itemsDelivered;
+          run.suppressedNotification = processed.suppressNotification;
+          run.verificationStatus = processed.verificationStatus;
+          run.deliveredFingerprints = processed.deliveredFingerprints;
+
+          if (routine.triggerConfig) {
+            routine.triggerConfig.runCount = (routine.triggerConfig.runCount || 0) + 1;
+            if (
+              (routine.triggerConfig.runCountLimit && routine.triggerConfig.runCount >= routine.triggerConfig.runCountLimit) ||
+              (routine.triggerConfig.endDate && this.now() >= routine.triggerConfig.endDate)
+            ) {
+              routine.enabled = false;
+              routine.nextRunAt = null;
+              routine.updatedAt = this.now();
+            }
+          }
+
+          routine.historySummary = {
+            lastRunAt: this.now(),
+            lastSuccessfulRunAt: this.now(),
+            lastDurationMs: run.startedAt ? this.now() - run.startedAt : undefined,
+            lastResultSummary: processed.summary,
+            itemsFound: processed.itemsFound,
+            itemsDelivered: processed.itemsDelivered,
+            verificationStatus: processed.verificationStatus,
+          };
+        }
+      }
       run.error = undefined;
     } else {
       return null;
@@ -1633,6 +1719,13 @@ export class RoutineManager {
     run.attention = undefined;
     run.error = redactSecretsInText(message).slice(0, 500);
     run.finishedAt = this.now();
+    const routine = this.routines.find((r) => r.id === run.routineId);
+    if (routine) {
+      if (!routine.historySummary) routine.historySummary = {};
+      routine.historySummary.lastRunAt = this.now();
+      routine.historySummary.lastFailureAt = this.now();
+      routine.historySummary.lastError = run.error;
+    }
     this.save();
     this.emitRun(run);
     this.options.onRunFailed?.(cloneRun(run));

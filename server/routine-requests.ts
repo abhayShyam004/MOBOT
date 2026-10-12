@@ -882,6 +882,8 @@ function cardCopy(
 function inputFromDefinition(definition: RoutineRequestDefinition, botId: string, now: number): RoutineInput {
   return {
     name: definition.name,
+    description: definition.description,
+    taskObjective: definition.taskObjective,
     prompt: definition.instructions,
     botId,
     runOn: definition.runOn,
@@ -890,6 +892,10 @@ function inputFromDefinition(definition: RoutineRequestDefinition, botId: string
     durationMinutes: definition.durationMinutes,
     ...(definition.timeoutMinutes === undefined ? {} : { timeoutMinutes: definition.timeoutMinutes }),
     ...(definition.continuity ? { continuity: true } : {}),
+    ...(definition.triggerConfig ? { triggerConfig: definition.triggerConfig } : {}),
+    ...(definition.workflowConfig ? { workflowConfig: definition.workflowConfig } : {}),
+    ...(definition.deliveryConfig ? { deliveryConfig: definition.deliveryConfig } : {}),
+    ...(definition.executionConfig ? { executionConfig: definition.executionConfig } : {}),
   };
 }
 
@@ -900,12 +906,18 @@ function updateFromChanges(
 ): Partial<RoutineInput> {
   const patch: Partial<RoutineInput> = {};
   if (changes.name !== undefined) patch.name = changes.name;
+  if (changes.description !== undefined) patch.description = changes.description;
+  if (changes.taskObjective !== undefined) patch.taskObjective = changes.taskObjective;
   if (changes.instructions !== undefined) patch.prompt = changes.instructions;
   if (changes.schedule !== undefined) patch.schedule = schedulePatch(changes.schedule, now, currentSchedule);
   if (changes.runOn !== undefined) patch.runOn = changes.runOn;
   if (changes.durationMinutes !== undefined) patch.durationMinutes = changes.durationMinutes;
   if (changes.timeoutMinutes !== undefined) patch.timeoutMinutes = changes.timeoutMinutes;
   if (changes.continuity !== undefined) patch.continuity = changes.continuity;
+  if (changes.triggerConfig !== undefined) patch.triggerConfig = changes.triggerConfig;
+  if (changes.workflowConfig !== undefined) patch.workflowConfig = changes.workflowConfig;
+  if (changes.deliveryConfig !== undefined) patch.deliveryConfig = changes.deliveryConfig;
+  if (changes.executionConfig !== undefined) patch.executionConfig = changes.executionConfig;
   return patch;
 }
 

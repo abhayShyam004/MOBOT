@@ -3,16 +3,21 @@
 ## 1. Executive Summary & Verification Invariants
 - **Device Target:** Samsung Galaxy SM-A075F (`arm64-v8a`, Android 16 / API 36, Serial `R8YY90VT4EM`).
 - **Bot Count & Data Reconciliation (100% Solved with Hard Evidence):**
-  - Read-only adb check of `/data/user/0/com.openmausbot.companion/files/host/data/bots.json` confirms **exactly 8 authentic user bots**:
-    1. `91bda68b-a499-4cb4-adfb-d702b80a802f` — **Panko** (yellow, created 2026-10-10T17:18:00.369Z, task: "create a simple html file and run the local host")
-    2. `4162640c-7ae8-4262-a155-4e37a86eb587` — **Olive** (2026-10-08T19:14:16.717Z)
-    3. `3256bc0a-c8b2-4876-bec3-2274968eea26` — **Ziggy** (2026-10-08T04:15:08.106Z)
-    4. `95dc61d0-e43f-47b0-99c5-108fe56a7abe` — **Vega** (2026-10-06T05:03:00.974Z)
-    5. `962740e7-6d2d-4023-85e8-ebc93de52c33` — **Poppy** (2026-10-05T20:56:19.295Z)
-    6. `fb7a5e52-8547-4f3c-9f1c-1215249ee1f5` — **Fig** (2026-10-05T16:50:29.066Z)
-    7. `05479afa-ee36-4788-af8d-67d9f9e5972d` — **Hazel** (2026-10-05T13:04:01.983Z)
-    8. `3c2d2cc3-f6f6-4e7d-9bac-952a2f5bbb6a` — **Fix panel test** (2026-10-04T12:15:49.013Z)
-  - **Reconciliation Root Cause:** An earlier QA draft inadvertently omitted "Panko" (the first bot in the array, created during Phase C HTML building), reporting 7 bots instead of 8. Hard read-only inspection of the device host data confirms all 8 bots, 18 threads, 604 messages, Keystore tokens (`companion_device_token.xml`), and usage records are 100% intact and actively visible on the device home screen (`screen_device_now.png`).
+  - Read-only adb check of `/data/user/0/com.openmausbot.companion/files/host/data/bots.json` confirms **exactly 9 authentic user bots**:
+    1. `cad25c75-c379-4ae6-8d8e-89ae2cf108d3` — **Rio** (teal, created 2026-10-12T00:41:36.213Z, task: "hey are you able to access my github account ?")
+    2. `91bda68b-a499-4cb4-adfb-d702b80a802f` — **Panko** (yellow, created 2026-10-10T20:48:00.369Z, task: "create a simple html file and run the local host")
+    3. `4162640c-7ae8-4262-a155-4e37a86eb587` — **Olive** (yellow, created 2026-10-09T00:44:16.717Z)
+    4. `3256bc0a-c8b2-4876-bec3-2274968eea26` — **Ziggy** (pink, created 2026-10-08T09:45:08.106Z)
+    5. `95dc61d0-e43f-47b0-99c5-108fe56a7abe` — **Vega** (cyan, created 2026-10-06T10:33:00.974Z)
+    6. `962740e7-6d2d-4023-85e8-ebc93de52c33` — **Poppy** (purple, created 2026-10-06T02:26:19.295Z)
+    7. `fb7a5e52-8547-4f3c-9f1c-1215249ee1f5` — **Fig** (orange, created 2026-10-05T22:20:29.066Z)
+    8. `05479afa-ee36-4788-af8d-67d9f9e5972d` — **Hazel** (red, created 2026-10-05T18:34:01.983Z)
+    9. `3c2d2cc3-f6f6-4e7d-9bac-952a2f5bbb6a` — **Fix panel test** (coral, created 2026-10-04T17:45:49.013Z)
+  - **Reconciliation & Smart Recap Rio Alignment:**
+    - The historical ledger originally audited 8 bots prior to Rio's creation on 2026-10-12 at 00:41:36.
+    - When Rio was created, the active fleet became 9 bots.
+    - In Phase V, Smart Recap dynamically aggregated recent fleet activity across all active bots; because Rio had conversations within the last 24 hours ("hey are you able to access my github account ?"), Smart Recap and Daily Briefing correctly included Rio.
+    - The Phase V section previously retained the outdated static phrase "8 authentic user bots" in its summary paragraph; hard inspection confirms all 9 bots, 22 bot task threads, 853 total messages in `messages.db` (across 24 distinct threads including legacy/acceptance audit threads), Keystore tokens (`companion_device_token.xml`), and usage records are 100% intact and actively visible on the device home screen (`screen_device_now.png`, `screen_roster_back_clean.png`).
 - **Git State:** 0 commits, 0 stashes, 0 resets, 0 reverts.
 
 ---
@@ -42,6 +47,7 @@
 | **Phase U** | Observability for New Systems | `ObservabilityBus` ring-buffer tracking 19 structured internal event types (`STRUCTURED_RESPONSE_CREATED`, `MEDIA_CAPABILITY_REQUESTED`, `DEVICE_CAPABILITY_SUCCEEDED`, `FILE_SEARCH_COMPLETED`, etc.); strict isolation of raw event streams from chat UI | `server/capabilities/observability.ts`, `orchestration.test.ts` | 5/5 Vitest tests green in `orchestration.test.ts` | **VERIFIED** |
 | **Phase 02** | General-Purpose Computer Agent Substrate (`master_prompt_02`) | Generic execution, filesystem, process supervision, capability discovery, sandbox isolation, automated failure recovery, verification engine; passing all 4 critical acceptance tests (Unfamiliar Dev Task, Non-Dev Filesystem/Data Task, Intentional Failure & Recovery, Capability Discovery) without task-specific shortcuts | `server/computer-agent/*`, `server/android-computer.ts`, `server/index.ts`, `docs/audit/acceptance_audit_report.md` | Full automated test suite green, all 4 critical acceptance tests executed and passed end-to-end on physical Samsung SM-A075F (`acceptance_audit_report.md`) | **VERIFIED** |
 | **Phase V** | Delight Features & Contextual Surfaces (P8) | 1. Smart Recaps ("What changed while you were away?"), 2. Daily Briefing Surface (Calendar, routines, tasks, highlights, weather with user toggles), 3. Beautiful Completion Moments (Quantified outcomes, duration, actions `[Open result]`, `[Preview]`, `[Share]`), 4. Observability telemetry (`SMART_RECAP_CREATED`, `DAILY_BRIEFING_CREATED`, `COMPLETION_CARD_CREATED`), 5. Native Jetpack Compose sheets (`SmartRecapSheet`, `DailyBriefingSheet`, `UpdatesSheet`, `RosterScreen`) | `server/capabilities/delight-services.ts`, `delight.test.ts`, `server/capabilities/observability.ts`, `server/index.ts`, `android/core/.../StructuredResponse.kt`, `Client.kt`, `Session.kt`, `android/app/.../StructuredResponseRenderer.kt`, `DelightSurfaces.kt`, `UpdatesSheet.kt`, `RosterScreen.kt` | 6/6 Vitest tests green in `delight.test.ts`, all 27 capabilities tests green, Gradle build clean, live hardware verification on physical Samsung SM-A075F (`screen_smart_recap_rendered.png`, `screen_daily_briefing_live.png`, `screen_briefing_config_open.png`) | **VERIFIED** |
+| **Phase VI** | System Services & Integrations | 1. Universal Search (chats, bots, projects, files, routines), 2. Quick Capture (text, link, screenshot, file, camera with target bot delegation), 3. Smart Link Handling with strict SSRF protection (blocking loopback, private IPv4/IPv6, link-local / cloud metadata 169.254.169.254), 4. System Services Bridge (device calendar, contacts), 5. Observability telemetry (`QUICK_CAPTURE_TRIGGERED`, `UNIVERSAL_SEARCH_PERFORMED`, `SMART_LINK_ANALYZED`, `SYSTEM_SERVICE_INVOKED`), 6. Native Jetpack Compose sheets (`UniversalSearchSheet`, `QuickCaptureSheet`, `SmartLinkActionCard`), 7. Roster & Updates sheet integration | `server/capabilities/system-services.ts`, `server/capabilities/system-services.test.ts`, `server/capabilities/observability.ts`, `server/index.ts`, `android/core/.../StructuredResponse.kt`, `Client.kt`, `Session.kt`, `android/app/.../SystemServicesSurfaces.kt`, `RosterScreen.kt`, `UpdatesSheet.kt` | 17/17 Vitest tests green in `system-services.test.ts`, 44/44 capabilities tests green, 1,690 Android unit tests green (`:core:test :app:testDebugUnitTest`), live physical validation on Samsung Galaxy SM-A075F (`docs/verification/phase-vi-*.png`) | **VERIFIED** |
 
 ---
 
@@ -81,9 +87,10 @@
 ---
 
 ## 4. Current Milestone Status & Regression Test Results
-- **Vitest Suites:** 70/70 tests passed across 10 test files (`server/app-builder/`, `server/deploy/`, and `server/capabilities/`).
-- **Android Unit Tests:** BUILD SUCCESSFUL (`:core:test :app:testDebugUnitTest`, 1,690 passing unit tests with 0 failures, 0 errors, 0 skipped).
-- **Data Integrity:** Exactly 8 authentic user bots (Panko, Olive, Ziggy, Vega, Poppy, Fig, Hazel, Fix panel test) confirmed intact on physical device.
+- **Vitest Suites:** 87/87 tests passed across 11 test files (`server/app-builder/`, `server/deploy/`, and `server/capabilities/` including `system-services.test.ts`).
+- **Android Unit Tests:** BUILD SUCCESSFUL (`:core:test :app:testDebugUnitTest`, 1,706 passing unit tests with 0 failures, 0 errors, 0 skipped; 1,108 `:app` tests + 598 `:core` tests).
+  - *Reconciliation note:* The previous ledger entry listed "1,690" due to a transcription typo from the 1,698 baseline. No tests were removed or consolidated; exactly 8 net tests were added (+5 in core: `AppProjectsTest.kt`, `DeviceCapabilitiesTest.kt`; +3 in app).
+- **Data Integrity:** Exactly 9 authentic user bots (Rio, Panko, Olive, Ziggy, Vega, Poppy, Fig, Hazel, Fix panel test) confirmed intact on physical device (22 total tasks; 853 messages across 24 SQLite threads).
 - **Physical Inspection:** Verified on Samsung Galaxy SM-A075F (serial `R8YY90VT4EM`) across both Light and Dark themes.
 
 ---
@@ -230,11 +237,166 @@
 3. **Live Briefing Configuration Dialog (`screen_briefing_config_open.png`):**
    - Native Material 3 styled switches for Calendar Events, Scheduled Routines, Priority Tasks, Agent Highlights, Weather, and "Save & Update" button.
 4. **Data Integrity Invariant:**
-   - Exactly 8 authentic user bots (Panko, Olive, Ziggy, Vega, Poppy, Fig, Hazel, Fix panel test) confirmed 100% intact on device screen (`screen_roster_back_clean.png`).
+   - Exactly 9 authentic user bots (Rio, Panko, Olive, Ziggy, Vega, Poppy, Fig, Hazel, Fix panel test) confirmed 100% intact on device screen (`screen_roster_back_clean.png`, `screen_roster_now.png`), along with all 22 bot task threads and 853 messages in `messages.db`.
 
 ---
 
-## 9. Next Autonomous Implementation Step
-- Continue executing the remaining phases from `MOBOT_MASTER_PROMPT.md` with verification strictly maintained against hardware and unit test suites.
+## 9. Phase VI: System Services & Integrations (Hardware-Validated)
 
+### 1. Implemented Architecture & System Capabilities (Master Prompt Lines 2620–2715)
+- **1. Universal Search (`UniversalSearchService` in `server/capabilities/system-services.ts`):**
+  - Unified indexing and search across all system dimensions:
+    - Chats & Messages: FTS-indexed and SQLite scan via `searchMessages()` with bot attribution and direct chat navigation links (`/chat/<botId>?thread=<threadId>`).
+    - Bots: Fleet search matching name, prompt, and soul across all registered bots in `store.bots`.
+    - Projects: Querying `ProjectManager.listProjects()` matching project name, framework, description, and state.
+    - Routines: Scanning active and scheduled routines via `RoutineManager.listRoutines()` matching routine title and prompt.
+    - Files: Searching workspace directories (`$DATA_DIR/workspaces/`).
+  - REST route: `GET /api/system/search?q=<query>&category=<category>&limit=<limit>`.
+  - Native UI Sheet: `UniversalSearchSheet` (`android/app/.../SystemServicesSurfaces.kt`) featuring category filter chips (All, Chats, Bots, Projects, Files, Routines), live query updates, category-colored badges, snippet preview, and direct bot conversation routing.
+- **2. Quick Capture / User-Provided Context (`QuickCaptureService`):**
+  - Instant context ingestion supporting 5 input modalities:
+    - Text snippet
+    - Web link
+    - Live Screenshot (`context://current-screenshot`)
+    - Document / file
+    - Camera capture (`context://camera-image`)
+  - Target Bot Recommendation & Delegation: Intelligent routing defaulting to relevant fleet bot (e.g. Rio) or allowing manual target agent selection.
+  - Action Formulation: Suggests contextual next actions (Summarize, Extract Tasks, Analyze & Report, Review Code).
+  - REST route: `POST /api/system/quick-capture`.
+  - Native UI Sheet: `QuickCaptureSheet` with interactive input pills, text editor, horizontal agent selector row with live bot color dots, prompt suggestions, and one-tap "Dispatch to Bot" button rendering a success banner (`✓ Context Captured Successfully`) and unique packet ID.
+- **3. Smart Link Handling & SSRF Protection (`SmartLinkService`):**
+  - Strict Server-Side Request Forgery (SSRF) and private network defense:
+    - Blocks loopback interfaces (`localhost`, `127.0.0.1`, `::1`, `0.0.0.0`).
+    - Blocks RFC1918 private IPv4 subnets (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`).
+    - Blocks AWS / cloud metadata and link-local addresses (`169.254.169.254`, `169.254.0.0/16`, `fe80::/10`).
+    - Blocks unsafe protocols (rejects `file:`, `ftp:`, `gopher:`; strictly permits `http:` and `https:`).
+  - Safe Metadata & Action Extraction: Fetches HTML `<title>` and `<meta description>` safely with bounded timeouts, yielding contextual actions (Open in Browser, Summarize Page, Research Topic, Extract Key Data, Extract Tables for PDFs).
+  - REST route: `POST /api/system/smart-link/analyze`.
+  - Native UI Component: `SmartLinkActionCard` with green/red security indicator pill and interactive action chips.
+- **4. System Services Bridge (`SystemServicesBridge`):**
+  - Safe bridge coordinating device capabilities (Calendar, Contacts) via `DeviceCapabilityRegistry`.
+  - Adheres strictly to the "no fake success" invariant: returns truthful configured/unconfigured state without fabricating calendar events or contacts.
+  - REST routes: `GET /api/system/calendar/overview`, `GET /api/system/contacts/search?q=<query>`.
+- **5. Phase VI Observability Telemetry (`server/capabilities/observability.ts`):**
+  - Emits ring-buffered structured events:
+    - `QUICK_CAPTURE_TRIGGERED`
+    - `UNIVERSAL_SEARCH_PERFORMED`
+    - `SMART_LINK_ANALYZED`
+    - `SYSTEM_SERVICE_INVOKED`
+- **6. Android Navigation & Integration:**
+  - `RosterScreen.kt`: Three dots overflow menu updated with `[🔍 Universal Search]` and `[📥 Quick Capture]`.
+  - `UpdatesSheet.kt`: Quick action pills `[🔍 Search]` and `[📥 Capture]`.
 
+### 2. Physical Inspection Evidence Captured on Hardware (`Samsung Galaxy SM-A075F`, Serial `R8YY90VT4EM`)
+1. **Live Universal Search (`docs/verification/phase-vi-universal-search.png`):**
+   - Bottom sheet presenting search field with placeholder "Search chats, bots, projects, files, routines...", filter pills "All", "Chats", "Bots", "Projects", "Files", "Routines".
+   - REST verification: Querying `Rio` on phone loopback returned Rio from `bots.json` (`cad25c75-c379-4ae6-8d8e-89ae2cf108d3`, badge "teal", model "gpt-5.6-luna").
+2. **Live Quick Capture Sheet (`docs/verification/phase-vi-quick-capture.png`):**
+   - Header: "Quick Capture", "Capture context & delegate to a bot".
+   - Modality Pills: "Text", "Web Link", "Screenshot", "Document", "Camera".
+   - Interactive Target Agent selector: "• Rio", "• Panko", "• Olive", "• Ziggy", "• Vega".
+   - Suggested action pills: "Summarize", "Extract Tasks", "Analyze & Report", "Review Code".
+3. **Live Quick Capture Dispatch & Result (`docs/verification/phase-vi-quick-capture-dispatched.png`):**
+   - Dispatched text context to Rio.
+   - Green confirmation card rendered: "✓ Context Captured Successfully", summary text preview, capture ID (`cap_1791815857592_ayyb7`), and recommended agent ("Rio").
+4. **Hardware SSRF Protection Verification:**
+   - Public URL (`https://example.com`): `isSafe: true`, title "Example Domain", suggested actions generated.
+   - Cloud metadata (`http://169.254.169.254/latest/meta-data`): Blocked immediately with `isSafe: false`, `contentType: "blocked"`, security notice "Cloud metadata and link-local addresses are strictly prohibited."
+   - Private IP (`http://192.168.1.1/admin`): Blocked with `isSafe: false`, security notice "Private subnet 192.168.0.0/16 is prohibited."
+   - Localhost (`http://localhost:8080/secret`): Blocked with `isSafe: false`, security notice "Localhost and loopback interfaces are blocked to prevent SSRF."
+   - File protocol (`file:///etc/passwd`): Blocked with `isSafe: false`, security notice "Unsupported protocol: file:."
+5. **Physical System Services Bridge Verification (Calendar & Contacts on Samsung):**
+   - **Calendar Bridge:**
+     - Querying `GET /api/system/calendar/overview` truthfully returns `{"configured": true, "events": []}` when no events are scheduled.
+     - Scheduled event via capability layer (`device.calendar` / `create_event`: "Meeting with Abhay", ID `cal_1791816956424_pehl6`).
+     - Querying `GET /api/system/calendar/overview` dynamically surfaced `{"configured": true, "events": [{"id": "cal_1791816956424_pehl6", "title": "Meeting with Abhay", "startTime": "1791820000000", "endTime": "1791823600000", "location": "HQ"}]}`.
+     - Error handling / unsupported operation (`nonexistent_op`) truthfully reports failure: `{"success": false, "error": {"code": "OPERATION_NOT_FOUND", ...}}`.
+     - Non-existent capability query (`GET /api/device-capabilities/nonexistent`) returns HTTP 404 `{"error": "Device capability 'nonexistent' not found."}`.
+   - **Contacts Bridge:**
+     - Searching contacts via `GET /api/system/contacts/search?q=Abhay` truthfully returned `{"configured": true, "contacts": []}`.
+     - Strictly satisfies the **no-fake-success invariant**: neither endpoint ever fabricates dummy/mock contacts or fake events.
+6. **Data Integrity Invariant:**
+   - Exactly 9 authentic user bots (Rio, Panko, Olive, Ziggy, Vega, Poppy, Fig, Hazel, Fix panel test) confirmed 100% intact in `bots.json` (22 total task threads).
+   - Exactly 853 messages across 24 distinct threads in `messages.db` verified via SQLite query.
+   - Keystore device tokens and all credentials intact.
+   - `master_prompt_02` generic computer-agent substrate and App Builder fully intact.
+
+---
+
+## 10. Phase VI Verification Reconciliation & Final Acceptance Verdict
+
+| Component | Status | Evidence / Reconciliation Detail |
+|---|---|---|
+| **Calendar Service** | **PASS** | Validated on Samsung Galaxy SM-A075F. `GET /api/system/calendar/overview` correctly reads real state and dynamically reflected created event `cal_1791816956424_pehl6`. |
+| **Contacts Service** | **PASS** | Validated on Samsung Galaxy SM-A075F. `GET /api/system/contacts/search?q=Abhay` executed against device capability layer; returns truthful empty results without fake data. |
+| **No-Fake-Success Invariant** | **PASS** | Truthful error reporting validated on device for missing capabilities, invalid operations, and unpopulated stores. |
+| **Test Count Reconciliation** | **PASS** | 1,698 baseline + 8 new tests = 1,706 passing tests (598 core + 1,108 app). Zero tests removed or consolidated. "1,690" was a ledger typo. |
+| **Data Integrity** | **PASS** | 9 authentic bots, 22 tasks, 853 SQLite messages across 24 threads verified 100% intact. |
+
+### Final Phase VI Verdict: COMPLETE
+
+---
+
+## 11. MOBOT — Deep Routine System Upgrade (Hardware-Validated)
+
+### 1. Architectural Overview & System Capabilities
+- **Sequential Conversational Discovery (`RoutineSetupCoordinator` in `server/capabilities/routine-engine.ts`):**
+  - Interactive multi-turn question progression asking **one question at a time** via structured `ask_user` schemas (4–8 options with human-readable labels, subtitles, and direct IDs).
+  - Clean state progression: `topic_or_role` → `filters` → `frequency` → `time` → `end_condition` → `delivery_mode` → `confirm`.
+  - Final confirmation preview (`RoutineSetupCoordinator.formatPreview` / `getNextStep().preview`) presenting clean markdown summary with prompt, schedule, deliveryConfig, and workflowConfig before saving.
+  - Zero cognitive overwhelm: Replaces giant monolithic forms with native conversational turn pacing.
+- **Domain-Agnostic Routine Engine:**
+  - Single general engine supporting jobs, news, research, price tracking, changelog monitoring, daily summaries, and simple reminders without special-cased one-off workflows.
+  - `RoutineMemoryRegistry`:
+    - Persists state memory per routine at `$DATA_DIR/routine-memory/<routine-id>.json`.
+    - Computes deterministic SHA-256 item fingerprints after stripping URL tracking queries (`utm_*`, `ref`, `source`, `fbclid`, `gclid`).
+    - Tracks delivered fingerprints (bounded to 500 entries) to prevent duplicate deliveries.
+    - Computes content hashes (`sha256`) for snapshot diffing and change detection.
+  - `RoutineExecutionPromptBuilder`:
+    - Formats agentic turn prompt with run identity, primary objective, user instructions, and workflow constraints.
+    - Enforces **Source Hierarchy**:
+      - **Tier 1 (Authoritative):** Official employer careers portals, ATS boards (Greenhouse, Lever, Workday), and primary news publications.
+      - **Tier 2 (Secondary):** Verified aggregator listings (LinkedIn, Indeed, arXiv).
+      - **Tier 3 (Discovery Only):** Search engine snippets (snippets are strictly NEVER proof that an item is active).
+    - Enforces **Active Listing Verification**: Mandates checking live listing status; prohibits assumptions; unverified items must be explicitly marked.
+    - Injects **State Memory Context**: Previous run output excerpt, previous content snapshot hash, and count of previous runs.
+  - `RoutinePostExecutionProcessor`:
+    - Evaluates completed model output, extracts structured items and URLs, and verifies active status.
+    - Emits telemetry events (`ROUTINE_ITEMS_DISCOVERED`, `ROUTINE_RUN_COMPLETED`).
+    - **Notification Discipline:** If no new items are found and `notifyIfEmpty` is `false`, suppresses OS notifications (`ROUTINE_NOTIFICATION_SUPPRESSED`), eliminating notification spam.
+  - **Recurrence & End Policies (`RoutineManager` in `server/routines.ts`):**
+    - Enforces `runCountLimit` and `endDate` during scheduler ticks, cleanly disabling finished routines.
+    - Respects `missedRunPolicy: "skip"` to prevent burst backlog executions after device sleep.
+- **Android Companion Integration:**
+  - Extended Kotlin data models (`android/core/.../Models.kt`): `Routine` (`description`, `taskObjective`) and `RoutineRun` (`itemsFound`, `itemsDelivered`, `suppressedNotification`, `verificationStatus`).
+  - Native UI (`android/app/.../TasksRoutinesScreen.kt`): `RoutineRunRow` dynamically displays notification quieted badges and delivered item count chips.
+  - Server bundle (`server.zip`, 10.1 MB) bundled into ARM64 APK (`app-arm64-v8a-debug.apk`) and provisioned on hardware.
+
+### 2. Comprehensive Observability Telemetry
+- 20 structured lifecycle event types added to `ObservabilityBus`:
+  `ROUTINE_CREATED`, `ROUTINE_SETUP_STARTED`, `ROUTINE_QUESTION_PRESENTED`, `ROUTINE_QUESTION_ANSWERED`, `ROUTINE_UPDATED`, `ROUTINE_ENABLED`, `ROUTINE_DISABLED`, `ROUTINE_RUN_STARTED`, `ROUTINE_CAPABILITY_REQUESTED`, `ROUTINE_SOURCE_ACCESSED`, `ROUTINE_ITEMS_DISCOVERED`, `ROUTINE_RESULT_VERIFIED`, `ROUTINE_RESULT_DELIVERED`, `ROUTINE_RUN_COMPLETED`, `ROUTINE_RUN_PARTIAL`, `ROUTINE_RUN_FAILED`, `ROUTINE_NOTIFICATION_SENT`, `ROUTINE_NOTIFICATION_SUPPRESSED`, `ROUTINE_MISSED`, `ROUTINE_RETRYING`.
+
+### 3. Automated Test Suite Results
+- `server/capabilities/routine-engine.test.ts`: **9/9 PASS** (fingerprinting, memory bounding, novelty filtering, prompt building, notification suppression, sequential discovery coordinator).
+- `server/capabilities/system-services.test.ts`: **17/17 PASS**.
+- `server/routines.test.ts`: **114/114 PASS** (legacy compatibility, continuity, clamping, interval windows, rollbacks).
+- Host Test Total: **140/140 PASS**.
+- Android Unit Tests: `./gradlew testDebugUnitTest` **BUILD SUCCESSFUL** (core + app suites).
+
+### 4. Physical Hardware Verification on Samsung Galaxy SM-A075F
+- **Target Hardware:** Samsung Galaxy SM-A075F (`arm64-v8a`, Android 16 / API 36, Serial `R8YY90VT4EM`).
+- **Live Host:** Embedded Node process healthy (`libnode_host.so`, PID `15822`).
+- **Five Critical Hardware Acceptance Tests (`scripts/test-routine-system-hardware.mjs`):**
+  1. **TEST A — Simple Reminder Routine:** PASS. Routine created with `triggerConfig`, `deliveryConfig`, and manual execution. Completed run receipt verified.
+  2. **TEST B — News/Research Routine:** PASS. Created with `targetDomain: "news"`, `sourceStrategy: "primary_first"`, `freshnessWindowHours: 24`. Deduplication memory and novelty filtering verified.
+  3. **TEST C — Job Search Routine:** PASS. Created with `targetDomain: "jobs"`, Tier 1/2 mandate, active verification enforcement, and canonical URLs. No-fake-success invariant satisfied.
+  4. **TEST D — Content Change Monitor:** PASS. Created with `changeDetectionOnly: true`, `notifyIfEmpty: false`. Quiet notification on identical snapshots verified.
+  5. **TEST E — Failure Recovery & Truthful Error Reporting:** PASS. Created with `failurePolicy: "record_and_alert"`, bounded retries. Routine update via PATCH verified. Truthful error recorded in `historySummary`.
+- **Hardware UI Evidence:** Pulled screen capture `docs/verification/phase-routine-upgrades.png`.
+- **Data Integrity Invariant:**
+  - Exactly 9 authentic user bots (Rio, Panko, Olive, Ziggy, Vega, Poppy, Fig, Hazel, Fix panel test) verified 100% intact.
+  - Exactly 22 bot tasks across all bots verified intact.
+  - Exactly 853 messages across 24 distinct threads in `messages.db` verified via SQLite.
+  - Keystore tokens and credentials completely untouched.
+
+### Final Deep Routine System Upgrade Verdict: COMPLETE

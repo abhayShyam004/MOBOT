@@ -1426,6 +1426,8 @@ data class Routine(
     val nextRunAt: Double? = null,
     val createdAt: Double,
     val updatedAt: Double,
+    val description: String? = null,
+    val taskObjective: String? = null,
 ) {
     val runLocation: RoutineRunLocation
         get() = RoutineRunLocation.entries.firstOrNull { it.wireValue == runOn }
@@ -1463,6 +1465,10 @@ data class RoutineRun(
     val error: String? = null,
     val createdAt: Double,
     val seenAt: Double? = null,
+    val itemsFound: Int? = null,
+    val itemsDelivered: Int? = null,
+    val suppressedNotification: Boolean? = null,
+    val verificationStatus: String? = null,
 )
 
 @Serializable

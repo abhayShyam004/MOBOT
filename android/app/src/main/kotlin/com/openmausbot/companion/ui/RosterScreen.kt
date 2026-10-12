@@ -131,6 +131,8 @@ fun RosterScreen(navigator: CompanionNavigator) {
     var showingUpdates by remember { mutableStateOf(false) }
     var showingSmartRecap by remember { mutableStateOf(false) }
     var showingDailyBriefing by remember { mutableStateOf(false) }
+    var showingUniversalSearch by remember { mutableStateOf(false) }
+    var showingQuickCapture by remember { mutableStateOf(false) }
     var showingNewGroup by remember { mutableStateOf(false) }
     var showingNewSection by remember { mutableStateOf(false) }
     var expandedBots by rememberSaveable(stateSaver = StringSetSaver) { mutableStateOf(emptySet<String>()) }
@@ -289,6 +291,8 @@ fun RosterScreen(navigator: CompanionNavigator) {
                 onOpenUpdates = { showingUpdates = true },
                 onOpenSmartRecap = { showingSmartRecap = true },
                 onOpenDailyBriefing = { showingDailyBriefing = true },
+                onOpenUniversalSearch = { showingUniversalSearch = true },
+                onOpenQuickCapture = { showingQuickCapture = true },
                 canCreateBot = true,
                 canOrganize = canCreateSection,
             )
@@ -518,6 +522,8 @@ fun RosterScreen(navigator: CompanionNavigator) {
             onDismiss = { showingUpdates = false },
             onOpenSmartRecap = { showingSmartRecap = true },
             onOpenDailyBriefing = { showingDailyBriefing = true },
+            onOpenUniversalSearch = { showingUniversalSearch = true },
+            onOpenQuickCapture = { showingQuickCapture = true },
         )
     }
 
@@ -527,6 +533,24 @@ fun RosterScreen(navigator: CompanionNavigator) {
 
     if (showingDailyBriefing) {
         DailyBriefingSheet(onDismiss = { showingDailyBriefing = false })
+    }
+
+    if (showingUniversalSearch) {
+        UniversalSearchSheet(
+            onDismiss = { showingUniversalSearch = false },
+            onSelectResult = { item ->
+                if (item.category == "bots") {
+                    val targetBot = state.bots.find { it.id == item.id }
+                    if (targetBot != null) {
+                        navigator.open(Chat.BotChat(targetBot))
+                    }
+                }
+            },
+        )
+    }
+
+    if (showingQuickCapture) {
+        QuickCaptureSheet(onDismiss = { showingQuickCapture = false })
     }
 
     if (showingNewGroup) {
@@ -611,6 +635,8 @@ private fun RosterHeader(
     onOpenUpdates: () -> Unit,
     onOpenSmartRecap: () -> Unit,
     onOpenDailyBriefing: () -> Unit,
+    onOpenUniversalSearch: () -> Unit,
+    onOpenQuickCapture: () -> Unit,
     canCreateBot: Boolean,
     canOrganize: Boolean,
 ) {
@@ -718,6 +744,8 @@ private fun RosterHeader(
                 onOpenUpdates = onOpenUpdates,
                 onOpenSmartRecap = onOpenSmartRecap,
                 onOpenDailyBriefing = onOpenDailyBriefing,
+                onOpenUniversalSearch = onOpenUniversalSearch,
+                onOpenQuickCapture = onOpenQuickCapture,
                 onOrganize = onOrganize,
                 enabled = canOrganize,
             )
@@ -733,6 +761,8 @@ private fun RosterOverflowMenu(
     onOpenUpdates: () -> Unit,
     onOpenSmartRecap: () -> Unit,
     onOpenDailyBriefing: () -> Unit,
+    onOpenUniversalSearch: () -> Unit,
+    onOpenQuickCapture: () -> Unit,
     onOrganize: () -> Unit,
     enabled: Boolean,
 ) {
@@ -745,6 +775,20 @@ private fun RosterOverflowMenu(
             enabled = true,
         )
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("🔍 Universal Search") },
+                onClick = {
+                    open = false
+                    onOpenUniversalSearch()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("📥 Quick Capture") },
+                onClick = {
+                    open = false
+                    onOpenQuickCapture()
+                },
+            )
             DropdownMenuItem(
                 text = { Text("⚡ Smart Recap") },
                 onClick = {

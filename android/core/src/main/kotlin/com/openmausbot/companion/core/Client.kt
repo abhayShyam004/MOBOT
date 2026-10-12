@@ -259,6 +259,33 @@ class CompanionClient(
         makeRequest("POST", "/api/delight/briefing/config", body = config),
     )
 
+    suspend fun universalSearch(query: String, category: String? = null): UniversalSearchResponse = send(
+        makeRequest(
+            "GET",
+            "/api/system/search",
+            listOfNotNull(
+                "q" to query,
+                category?.let { "category" to it },
+            ),
+        ),
+    )
+
+    suspend fun quickCapture(payload: JsonObject): QuickCaptureResponse = send(
+        makeRequest("POST", "/api/system/quick-capture", body = payload),
+    )
+
+    suspend fun analyzeSmartLink(url: String): SmartLinkResponse = send(
+        makeRequest("POST", "/api/system/smart-link/analyze", body = buildJsonObject { put("url", url) }),
+    )
+
+    suspend fun calendarOverview(): JsonObject = send(
+        makeRequest("GET", "/api/system/calendar/overview"),
+    )
+
+    suspend fun searchContacts(query: String): JsonObject = send(
+        makeRequest("GET", "/api/system/contacts/search", listOf("q" to query)),
+    )
+
     suspend fun deploymentAccounts(): List<DeploymentAccountInfo> = send<DeploymentAccountsResponse>(
         makeRequest("GET", "/api/deploy/accounts"),
     ).accounts

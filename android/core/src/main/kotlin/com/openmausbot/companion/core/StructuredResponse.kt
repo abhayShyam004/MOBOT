@@ -476,4 +476,56 @@ data class DailyBriefingResponse(
     val briefing: DailyBriefingData,
 )
 
+// ── 22. System Services & Integrations (Phase VI) ──
+@Serializable
+data class UniversalSearchResultItem(
+    val category: String,
+    val id: String,
+    val title: String,
+    val subtitle: String? = null,
+    val preview: String? = null,
+    val targetRoute: String? = null,
+    val badge: String? = null,
+    val timestamp: Long? = null,
+)
+
+@Serializable
+data class UniversalSearchResponse(
+    val query: String,
+    val totalMatches: Int = 0,
+    val results: List<UniversalSearchResultItem> = emptyList(),
+    val categories: List<String> = emptyList(),
+)
+
+@Serializable
+data class QuickCaptureResponse(
+    val captureId: String,
+    val timestamp: Long = 0L,
+    val type: String,
+    val summary: String,
+    val suggestedActions: List<String> = emptyList(),
+    val recommendedBotId: String = "",
+    val dispatched: Boolean = false,
+)
+
+@Serializable
+data class SmartLinkAction(
+    val id: String,
+    val label: String,
+    val promptTemplate: String,
+)
+
+@Serializable
+data class SmartLinkResponse(
+    val url: String,
+    val domain: String,
+    val title: String? = null,
+    val description: String? = null,
+    val contentType: String = "text/html",
+    val isSafe: Boolean = true,
+    val securityNotice: String? = null,
+    val suggestedActions: List<SmartLinkAction> = emptyList(),
+)
+
+
 

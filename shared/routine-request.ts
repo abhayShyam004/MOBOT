@@ -9,6 +9,12 @@
  */
 
 import type { RoutineCronSchedule } from "./routine-schedule.ts";
+import type {
+  RoutineTriggerConfig,
+  RoutineWorkflowConfig,
+  RoutineDeliveryConfig,
+  RoutineExecutionConfig,
+} from "./routines.ts";
 
 export type RoutineRequestRunOn = "maus" | "cloud";
 
@@ -49,6 +55,8 @@ export type RoutineRequestScheduleChanges =
 
 export interface RoutineRequestDefinition {
   name: string;
+  description?: string;
+  taskObjective?: string;
   instructions: string;
   schedule: RoutineRequestSchedule;
   runOn: RoutineRequestRunOn;
@@ -58,6 +66,10 @@ export interface RoutineRequestDefinition {
   timeoutMinutes?: number;
   /** Carry the previous run's report into the next run. */
   continuity?: boolean;
+  triggerConfig?: RoutineTriggerConfig;
+  workflowConfig?: RoutineWorkflowConfig;
+  deliveryConfig?: RoutineDeliveryConfig;
+  executionConfig?: RoutineExecutionConfig;
 }
 
 export type RoutineRequestChanges =

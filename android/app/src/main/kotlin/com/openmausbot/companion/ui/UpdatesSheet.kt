@@ -3,6 +3,8 @@ package com.openmausbot.companion.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -143,6 +145,8 @@ internal fun UpdatesSheet(
     onDismiss: () -> Unit,
     onOpenSmartRecap: () -> Unit = {},
     onOpenDailyBriefing: () -> Unit = {},
+    onOpenUniversalSearch: () -> Unit = {},
+    onOpenQuickCapture: () -> Unit = {},
 ) {
     val session = LocalCompanion.current.session
     val state by session.state.collectAsState()
@@ -179,6 +183,7 @@ internal fun UpdatesSheet(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState())
                         .padding(horizontal = 20.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -208,6 +213,34 @@ internal fun UpdatesSheet(
                             .padding(horizontal = 12.dp, vertical = 6.dp),
                     ) {
                         Text("☀️ Daily Briefing", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(AppRadii.pill)
+                            .background(AppTheme.colors.surfaceRaised)
+                            .border(1.dp, AppTheme.colors.hairline, AppRadii.pill)
+                            .clickable {
+                                onDismiss()
+                                onOpenUniversalSearch()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text("🔍 Search", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(AppRadii.pill)
+                            .background(AppTheme.colors.surfaceRaised)
+                            .border(1.dp, AppTheme.colors.hairline, AppRadii.pill)
+                            .clickable {
+                                onDismiss()
+                                onOpenQuickCapture()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text("📥 Capture", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
                     }
                 }
             }

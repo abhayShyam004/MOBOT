@@ -511,6 +511,20 @@ private fun RoutineRunRow(
                         Text(it, fontSize = 14.sp, color = MaterialTheme.colorScheme.error)
                     }
                 }
+                if (run.suppressedNotification == true) {
+                    Text(
+                        text = "Notification quieted (no new matches)",
+                        fontSize = 12.sp,
+                        color = secondaryTint,
+                    )
+                }
+                run.itemsDelivered?.takeIf { it > 0 }?.let { count ->
+                    Text(
+                        text = "Delivered $count verified item(s)",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                }
                 if (run.status == "waiting") {
                     Text(
                         text = RoutineRules.WAITING_ON_YOU,

@@ -2263,6 +2263,36 @@ class Session(
         }
     }
 
+    suspend fun performUniversalSearch(query: String, category: String? = null): UniversalSearchResponse? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.universalSearch(query, category)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    suspend fun sendQuickCapture(payload: kotlinx.serialization.json.JsonObject): QuickCaptureResponse? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.quickCapture(payload)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    suspend fun analyzeSmartLink(url: String): SmartLinkResponse? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.analyzeSmartLink(url)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
     suspend fun startAppProjectPreview(id: String, port: Int? = null): AppProjectPreviewActionResponse? {
         val activeClient = client ?: return null
         return try {
