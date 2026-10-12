@@ -370,8 +370,12 @@ const appConfigSchema = z.object({
     .object({ key: optionalText, url: optionalText, model: optionalText, provider: optionalText })
     .optional(),
   /** Project key used for Sessions, catalog and agent tools. userId/sessionId
-   * are non-secret local identifiers used to reuse one Composio Session. */
-  composio: z.object({ apiKey: optionalText, userId: optionalText, sessionId: optionalText }).optional(),
+   * are non-secret local identifiers used to reuse one Composio Session.
+   * userId is also the multi-device sharing mechanism: connections belong to
+   * the Composio user, so a device that adopts another install's userId (and
+   * clears sessionId to rebuild its Session) inherits that install's
+   * connections. See prepareProjectSession in server/composio.ts. */
+  composio: z.object({ apiKey: optionalText, userId: optionalText, sessionId: optionalText, surface: z.enum(["platform", "connect"]).optional(), mcpUrl: optionalText }).optional(),
   box: z.object({ token: optionalText }).optional(),
   vps: vpsConfigSchema.optional(),
   /** Optional OpenCode key; persisted write-only and passed only to its child. */
@@ -417,6 +421,13 @@ const appConfigSchema = z.object({
   /** UI language override (BCP-47, lowercase). Empty/absent = follow the
    * system language. Unknown tags degrade to English in the renderer. */
   language: optionalText,
+  /** The owner's standing grant that no bot ever stops for a permission card.
+   * Absent/false keeps every provider's own mode (Ask asks, Auto reviews).
+   * True synthesizes Full access at turn time without persisting an elevated
+   * mode on any bot — the switch a phone host uses, where there is no Electron
+   * confirmation channel to grant Full through. Set only from the owner's own
+   * admin surface; the config route already requires the admin scope. */
+  neverAskPermissions: z.boolean().optional(),
   rooms: roomConfigSchema.optional(),
   threads: z.object({
     maxConcurrentPerBot: z.number().int().min(1).max(MAX_CONCURRENT_BOT_THREADS),
@@ -463,7 +474,7 @@ export interface AppConfig {
   budgets?: { monthlyUsd?: number; warnAtPercent?: number };
   billing?: { currency?: string; prices?: Record<string, { inputPerMillion: number; outputPerMillion: number; cachedInputPerMillion?: number }> };
   openaiCompat?: { key?: string; url?: string; model?: string; provider?: string };
-  composio?: { apiKey?: string; userId?: string; sessionId?: string };
+  composio?: { apiKey?: string; userId?: string; sessionId?: string; surface?: "platform" | "connect"; mcpUrl?: string };
   box?: { token?: string };
   /** A named host from the user's SSH config. Authentication stays with SSH. */
   vps?: { sshAlias?: string };
@@ -473,6 +484,8 @@ export interface AppConfig {
   profile?: { name?: string; email?: string };
   rooms?: { turnTimeoutMinutes: number; handoffLifetimeMinutes?: number; handoffMinRunwayMinutes?: number; handoffHardCapMinutes?: number };
   threads?: { maxConcurrentPerBot: number; eventLogMaxBytes?: number; eventLogRetentionDays?: number };
+  /** Owner's standing "never stop for approvals" grant; see the schema above. */
+  neverAskPermissions?: boolean;
   /** Shared preserves the historical singleton. Per-bot gives every bot a
    * separate container, durable workspace, viewer and lease. */
   localVm?: { mode?: "shared" | "per-bot"; maxInstances?: number };
@@ -595,6 +608,13 @@ export function parseConfigPatch(value: JsonValue): ConfigPatch {
 
 export function vpsSshAlias(cfg: AppConfig): string | null {
   return isValidSshAlias(cfg.vps?.sshAlias) ? cfg.vps.sshAlias : null;
+}
+
+/** The owner's standing "never stop for an approval" grant, read at turn time.
+ * Kept as a read-only accessor so a hand-edited config.json cannot smuggle a
+ * truthy non-boolean in. */
+export function neverAskPermissions(cfg: Pick<AppConfig, "neverAskPermissions">): boolean {
+  return cfg.neverAskPermissions === true;
 }
 
 /** Read-and-revalidate accessor, same shape as vpsSshAlias above: even
@@ -938,6 +958,7 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   if (checkedPatch.vps !== undefined) disk.vps = normalizeVpsConfig(checkedPatch.vps);
   // scalar, not a section: the merge loop above only walks objects
   if (checkedPatch.language !== undefined) disk.language = checkedPatch.language;
+  if (checkedPatch.neverAskPermissions !== undefined) disk.neverAskPermissions = checkedPatch.neverAskPermissions;
   if (checkedPatch.customDomain !== undefined) disk.customDomain = checkedPatch.customDomain;
   if (checkedPatch.signIn !== undefined) disk.signIn = checkedPatch.signIn;
   // A selection is replaced as one value, so changing engines also clears

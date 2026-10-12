@@ -19,16 +19,46 @@ object NotificationMapping {
     const val CHANNEL_DONE = "bot_messages"
     const val CHANNEL_ROUTINE_FAILED = "routine_failed"
 
-    fun channelId(notification: NotificationFrame): String = when (notification.kind) {
+    fun channelId(notification: NotificationFrame): String = channelId(notification.kind)
+
+    /** A kind as the person's own channel wording sees it. */
+    fun channelId(kind: String): String = when (kind) {
         "approval", "question" -> CHANNEL_BLOCKING
         "routine-failed" -> CHANNEL_ROUTINE_FAILED
         else -> CHANNEL_DONE
     }
 
-    /** Matches iOS: `openmaus.{threadId}.{seq}` (title fallback when seq is null). */
+    /**
+     * Matches iOS: `openmaus.{threadId}.{seq}` (title fallback when seq is null).
+     *
+     * Android no longer posts under this id, and that is the point of
+     * [NotificationAggregator]: one id per *frame* is one notification per
+     * message, which is how a single reply storm filled the shade. The mapping
+     * stays because it is the identifier the two platforms share — iOS
+     * (`Notifications.swift:65-69`) still keys its banners on it — and because a
+     * desktop-parity test asserts the shape.
+     */
     fun dedupeId(notification: NotificationFrame, sequence: Int?): String {
         val suffix = sequence?.toString() ?: notification.title
         return "openmaus.${notification.threadId}.$suffix"
+    }
+
+    /**
+     * One stable 31-bit notification id per conversation.
+     *
+     * Derived from the thread id rather than from a counter, so a process that
+     * restarts — and therefore has no memory of what it posted — updates the
+     * slot the previous process used instead of dropping a second, identical
+     * notification beside it. [NotificationAggregator] probes past a collision;
+     * this is only the base.
+     */
+    fun notificationId(threadId: String): Int {
+        var hash = 0x811c9dc5u
+        for (byte in threadId.encodeToByteArray()) {
+            hash = hash xor byte.toUByte().toUInt()
+            hash *= 0x01000193u
+        }
+        return (hash and 0x7fffffffu).toInt()
     }
 
     fun isHighImportance(notification: NotificationFrame): Boolean = notification.isBlocking

@@ -459,6 +459,12 @@ export class Store {
   bots: BotRecord[] = [];
   groups: GroupRecord[] = [];
   private threads = new Map<string, ThreadState>();
+  /** When each thread last received a message — the value every list that
+   * orders by recency reads. Kept here rather than on the task record: it
+   * changes on every message, and a persisted task write per message would
+   * rewrite the whole bots file for one line of transcript. Filled lazily
+   * from SQLite, kept current by every append. */
+  private lastMessageAtByThread = new Map<string, number>();
   private defaultSelection: () => ModelSelection;
   private listeners = new Set<(change: StoreChange) => void>();
   /** A broken team registry must not prevent loading independent chat data. */
@@ -1087,11 +1093,34 @@ export class Store {
     if (!activeLeafId) activeLeafId = messages.at(-1)?.id ?? null;
     const t = { messages, activeLeafId };
     this.threads.set(threadId, t);
+    // A full load is also the first time a legacy thread's newest line is
+    // known: keep the recency cache current without asking SQLite again.
+    const lastAt = messages.at(-1)?.at;
+    if (lastAt) this.noteMessageAt(threadId, lastAt);
     return t;
   }
 
   messagesFor(threadId: string): Message[] {
     return this.thread(threadId).messages;
+  }
+
+  /** Epoch ms of the newest message in this thread, or undefined for a
+   * thread that has none. Reads the cached value an append kept current and
+   * asks SQLite only the first time a thread is listed. */
+  lastMessageAt(threadId: string): number | undefined {
+    const cached = this.lastMessageAtByThread.get(threadId);
+    if (cached !== undefined) return cached;
+    const fromDb = mdb.readThreadLastAt(threadId);
+    if (fromDb !== null) this.lastMessageAtByThread.set(threadId, fromDb);
+    return fromDb ?? undefined;
+  }
+
+  /** Remember the newest message time for a thread. Monotonic: a message
+   * inserted mid-thread (an anchor insert, an edit) never lowers the
+   * thread's recency below the newest line already in it. */
+  private noteMessageAt(threadId: string, at: number): void {
+    const cached = this.lastMessageAtByThread.get(threadId);
+    if (cached === undefined || at > cached) this.lastMessageAtByThread.set(threadId, at);
   }
 
   /** A bounded page of a thread's newest messages, for callers that only
@@ -1171,6 +1200,7 @@ export class Store {
     t.messages.push(full);
     t.activeLeafId = full.id;
     mdb.appendMessage(threadId, full);
+    this.noteMessageAt(threadId, full.at);
     if (full.kind === "screen") {
       for (const pruned of this.pruneScreenFrames(t)) {
         mdb.updateMessage(threadId, pruned);
@@ -1200,6 +1230,7 @@ export class Store {
     const children = t.messages.filter((m) => m.parentId === anchorId);
     t.messages.push(full);
     mdb.appendMessage(threadId, full);
+    this.noteMessageAt(threadId, full.at);
     if (full.kind === "screen") {
       for (const pruned of this.pruneScreenFrames(t)) {
         mdb.updateMessage(threadId, pruned);
@@ -1262,6 +1293,7 @@ export class Store {
     t.messages.push(full);
     t.activeLeafId = full.id;
     mdb.appendMessage(threadId, full);
+    this.noteMessageAt(threadId, full.at);
     this.emit({ type: "message", threadId, message: full });
     // The message frame alone leaves every client on the OLD branch: a
     // client adopts a new message as its leaf only when it chains onto the

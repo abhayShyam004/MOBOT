@@ -189,6 +189,8 @@ class PairingLinkTest {
     @Test
     fun `only the pairing scheme and host are an invite`() {
         assertTrue(PairingLink.isInvite("openmausbot", "pair"))
+        // The scheme is the app's own link name, not its display name: renaming
+        // the app to MOBOT did not — and must not — move the pairing URI.
         assertTrue(PairingLink.isInvite("OpenMausBot", "PAIR"))
         assertFalse(PairingLink.isInvite("https", "pair"))
         assertFalse(PairingLink.isInvite("openmausbot", "join"))

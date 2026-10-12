@@ -21,6 +21,14 @@ class ChatPreferencesTest {
     )
 
     @Test
+    fun `a fresh install defaults to Reduced activity so normal work stays quiet`() {
+        // No stored choice: the transcript folds successful tool steps and keeps
+        // failures visible, instead of streaming internal progress into chat.
+        val name = "chat-activity-default-quiet"
+        assertEquals(ActivityDetail.REDUCED, store(name).activityDetail.value)
+    }
+
+    @Test
     fun `activity detail survives a new preferences instance`() {
         val name = "chat-activity-detail"
         store(name).setActivityDetail(ActivityDetail.HIDDEN)

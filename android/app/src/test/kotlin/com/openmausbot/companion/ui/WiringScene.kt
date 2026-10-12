@@ -15,7 +15,9 @@ import com.openmausbot.companion.dictation.SpeechDictation
 import com.openmausbot.companion.discovery.CompanionDiscovery
 import com.openmausbot.companion.discovery.DiscoveryState
 import com.openmausbot.companion.permissions.CompanionPermissions
+import com.openmausbot.companion.notifications.NoOpNotificationVisibility
 import com.openmausbot.companion.sharing.ShareInbox
+import com.openmausbot.companion.storage.AppearancePreferences
 import com.openmausbot.companion.storage.ChatPreferences
 import com.openmausbot.companion.storage.OnboardingPreferences
 import java.util.concurrent.atomic.AtomicInteger
@@ -93,6 +95,7 @@ internal class WiringScene(
         discovery = SilentDiscovery,
         onboarding = onboarding,
         chatPreferences = ChatPreferences(context),
+        appearance = AppearancePreferences(context),
         camera = CameraPermissionController(isGranted = { true }, request = {}),
         mic = MicPermissionController(isGranted = { true }, request = {}),
         notifications = NotificationPermissionController(
@@ -119,6 +122,8 @@ internal class WiringScene(
         shareInbox = ShareInbox(),
         alwaysOnEnabled = MutableStateFlow(false),
         onToggleAlwaysOn = {},
+        // This scene drives navigation wiring, not the shade.
+        notificationVisibility = NoOpNotificationVisibility,
     )
 
     private object SilentDiscovery : CompanionDiscovery {

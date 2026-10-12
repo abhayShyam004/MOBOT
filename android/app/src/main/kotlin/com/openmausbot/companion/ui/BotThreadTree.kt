@@ -14,6 +14,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -72,7 +73,11 @@ internal fun BotThreadTree(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 88.dp, end = 18.dp, bottom = if (isExpanded) 12.dp else 0.dp),
+            .padding(
+                start = AppSpacing.gutter + AppSizes.rowAvatar + AppSpacing.md,
+                end = AppSpacing.lg,
+                bottom = if (isExpanded) AppSpacing.md else 0.dp,
+            ),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Row(
@@ -84,29 +89,46 @@ internal fun BotThreadTree(
                         stateDescription = "${if (isExpanded) "Expanded" else "Collapsed"}, $count threads"
                     }
                     .clickable(enabled = !searching, role = Role.Button, onClick = onToggle)
-                    .heightIn(min = 48.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    .heightIn(min = 40.dp),
+                horizontalArrangement = Arrangement.spacedBy(AppSpacing.xs),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 DisclosureIcon(isExpanded)
-                Text("Threads", fontSize = 13.sp, fontWeight = FontWeight.Medium, color = secondaryTint)
-                Text(count.toString(), fontSize = 13.sp, color = secondaryTint)
+                // A count, not a section title: one quiet line saying how many
+                // conversations this bot keeps. It used to be a labelled control
+                // under every row, which made a list of bots read like a tree of
+                // threads.
+                Text(
+                    text = if (count == 1) "1 thread" else "$count threads",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = AppTheme.colors.textTertiary,
+                )
             }
             if (isExpanded) {
                 TouchTarget(
                     onClick = onCreate,
                     enabled = !creating,
-                    size = 48.dp,
+                    size = 40.dp,
                     contentDescription = "New thread with ${bot.name}",
                 ) {
-                    Icon(Icons.Filled.Add, contentDescription = null, tint = secondaryTint)
+                    Icon(
+                        Icons.Filled.Add,
+                        contentDescription = null,
+                        tint = AppTheme.colors.textTertiary,
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
                 TouchTarget(
                     onClick = onManage,
-                    size = 48.dp,
+                    size = 40.dp,
                     contentDescription = "Manage ${bot.name}'s threads",
                 ) {
-                    Icon(Icons.Filled.MoreVert, contentDescription = null, tint = secondaryTint)
+                    Icon(
+                        Icons.Filled.MoreVert,
+                        contentDescription = null,
+                        tint = AppTheme.colors.textTertiary,
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
             }
         }
@@ -179,7 +201,7 @@ private fun DisclosureIcon(expanded: Boolean) {
     Icon(
         if (expanded) Icons.Filled.KeyboardArrowDown else Icons.AutoMirrored.Filled.KeyboardArrowRight,
         contentDescription = null,
-        tint = secondaryTint,
-        modifier = Modifier.size(16.dp),
+        tint = AppTheme.colors.textTertiary,
+        modifier = Modifier.size(14.dp),
     )
 }

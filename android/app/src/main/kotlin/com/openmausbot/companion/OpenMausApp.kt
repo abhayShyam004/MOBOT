@@ -1,16 +1,26 @@
 package com.openmausbot.companion
 
+import android.app.Activity
 import android.app.Application
+import android.os.Bundle
 import androidx.lifecycle.ProcessLifecycleOwner
 import com.openmausbot.companion.audio.VoicePreviewPlayer
 import com.openmausbot.companion.avatar.AvatarImageStore
 import com.openmausbot.companion.core.Session
 import com.openmausbot.companion.discovery.NsdDiscovery
+import com.openmausbot.companion.host.BrowserDriverServer
+import com.openmausbot.companion.host.AndroidHostFiles
+import com.openmausbot.companion.host.HarnessService
+import com.openmausbot.companion.host.HarnessHost
+import com.openmausbot.companion.host.HarnessHostPort
+import com.openmausbot.companion.host.StandaloneConnectionStore
+import com.openmausbot.companion.host.StandaloneTokenStore
 import com.openmausbot.companion.lifecycle.AlwaysOnConnectionService
 import com.openmausbot.companion.lifecycle.AlwaysOnConnectionState
 import com.openmausbot.companion.lifecycle.ServiceProcessAnchor
 import com.openmausbot.companion.lifecycle.SessionLingerController
 import com.openmausbot.companion.lifecycle.installSessionLinger
+import com.openmausbot.companion.notifications.ForegroundObserver
 import com.openmausbot.companion.notifications.LocalNotificationPoster
 import com.openmausbot.companion.permissions.CompanionPermissions
 import com.openmausbot.companion.sharing.ShareInbox
@@ -18,7 +28,10 @@ import com.openmausbot.companion.storage.AlwaysOnPreferences
 import com.openmausbot.companion.storage.DataStoreConnectionStore
 import com.openmausbot.companion.storage.OnboardingPreferences
 import com.openmausbot.companion.storage.KeystoreTokenStore
+import com.openmausbot.companion.terminal.TerminalDriverServer
+import com.openmausbot.companion.terminal.TerminalSessions
 import com.openmausbot.companion.ui.FilePreviews
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -61,6 +74,26 @@ class OpenMausApp : Application() {
     lateinit var alwaysOn: AlwaysOnPreferences
         private set
 
+    /**
+     * The embedded MOBOT host: this phone's own computer. Process
+     * supervisor owned by the Application, observed by the foreground
+     * service and the diagnostics UI; independent of any Activity.
+     */
+    lateinit var harnessHost: HarnessHost
+        private set
+
+    /**
+     * The interactive terminals this phone is hosting.
+     *
+     * Application-scoped on purpose — this is what "the process survives the
+     * turn" means in practice. A bot's turn starts a session and ends; the chat
+     * screen, the terminal surface and any Activity may come and go; the PTY,
+     * the program and its output buffer live here, in the one object that no
+     * screen owns.
+     */
+    lateinit var terminalSessions: TerminalSessions
+        private set
+
     override fun onCreate() {
         super.onCreate()
         shareInbox = ShareInbox()
@@ -74,8 +107,8 @@ class OpenMausApp : Application() {
         onboarding = OnboardingPreferences(this)
         session = Session(
             scope = appScope,
-            connectionStore = DataStoreConnectionStore(this),
-            tokenStore = KeystoreTokenStore(this),
+            connectionStore = StandaloneConnectionStore(DataStoreConnectionStore(this)),
+            tokenStore = StandaloneTokenStore(KeystoreTokenStore(this)),
             onboardingStore = onboarding,
             deviceNameProvider = {
                 // User-visible device name; Settings.Global.DEVICE_NAME on API 25+.
@@ -111,7 +144,47 @@ class OpenMausApp : Application() {
             alwaysOn = { AlwaysOnConnectionState.active },
         )
 
+        // Whether this app is in front of the person is half of suppression: a
+        // conversation that is still "open" behind the launcher is not being
+        // read, and the linger above keeps the stream alive after Home exactly
+        // so a turn that finishes there can still be announced. Process
+        // lifecycle, not Activity lifecycle: a rotation recreates the Activity
+        // and must not read as leaving.
+        ProcessLifecycleOwner.get().lifecycle.addObserver(ForegroundObserver(notifications))
+
         alwaysOn = AlwaysOnPreferences(this)
+
+        // The terminals. Created before the host starts, because the host hands
+        // the driver's loopback port and capability token to the harness in its
+        // own environment (AT_DRIVER_PORT / AT_DRIVER_TOKEN) — the same handoff
+        // the browser driver uses, and paths/ports only, never a credential.
+        val terminalFiles = AndroidHostFiles(this)
+        terminalSessions = TerminalSessions(
+            homeDir = terminalFiles.homeDir(),
+            tmpDir = terminalFiles.tmpDir(),
+            nativeLibraryDir = File(applicationInfo.nativeLibraryDir ?: filesDir.absolutePath),
+            log = { message: String -> android.util.Log.i("TerminalSessions", message) },
+        )
+        TerminalSessions.instance = terminalSessions
+        TerminalDriverServer.start(terminalSessions)
+
+        // The standalone host. Started unconditionally: this phone IS the
+        // computer in this build. HarnessService holds the foreground
+        // notification Android requires for long-running work and keeps the
+        // process alive through backgrounding; the host itself outlives the
+        // UI entirely.
+        harnessHost = HarnessHost(appScope, AndroidHostFiles(this), HarnessHostPort)
+        // Phase 7: the browser driver (owns the bots' WebViews) must outlive
+        // the harness process and every Activity — app scope, started once.
+        // Session WebViews attach to the resumed Activity's decor: an
+        // unattached WebView never spawns its renderer on several OEM builds.
+        BrowserDriverServer.start(this, AndroidHostFiles(this).browserSessionsDir())
+        registerActivityLifecycleCallbacks(object : NoopLifecycle() {
+            override fun onActivityResumed(a: Activity) {
+                BrowserDriverServer.attachWindow(a.window)
+            }
+        })
+        HarnessService.start(this)
         // Covers the case where the process was relaunched (not booted) while
         // the setting was on — e.g. the OS killed the whole app under memory
         // pressure and the user (or a notification tap) reopened it. A device
@@ -120,5 +193,16 @@ class OpenMausApp : Application() {
         if (alwaysOn.enabled.value) {
             AlwaysOnConnectionService.start(this)
         }
+    }
+
+    /** Boilerplate carrier for the one lifecycle hook above. */
+    private open class NoopLifecycle : ActivityLifecycleCallbacks {
+        override fun onActivityCreated(a: Activity, s: Bundle?) {}
+        override fun onActivityStarted(a: Activity) {}
+        override fun onActivityResumed(a: Activity) {}
+        override fun onActivityPaused(a: Activity) {}
+        override fun onActivityStopped(a: Activity) {}
+        override fun onActivitySaveInstanceState(a: Activity, b: Bundle) {}
+        override fun onActivityDestroyed(a: Activity) {}
     }
 }

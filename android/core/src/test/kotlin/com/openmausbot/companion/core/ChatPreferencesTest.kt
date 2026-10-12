@@ -23,6 +23,21 @@ class ChatPreferencesTest {
         tool = ToolActivity(name = "run", ok = ok),
     )
 
+    /** The activity row a settled failed turn leaves: a chip plus the card. */
+    private fun failure(id: String, at: Double = 1.0): Message = Message(
+        id = id,
+        role = Message.Role.BOT,
+        kind = Message.Kind.ACTIVITY,
+        at = at,
+        tool = ToolActivity(name = "error: Rate limit reached", ok = false),
+        failure = FailureCard(
+            kind = "rate_limit",
+            title = "Rate limit reached",
+            detail = "The provider asked this turn to slow down.",
+            advice = "Wait a few seconds and retry.",
+        ),
+    )
+
     @Test
     fun fullKeepsEveryMessageAndHiddenDropsEveryActivity() {
         val messages = listOf(text("a"), activity("b"), activity("c", ok = false), text("d"))
@@ -51,6 +66,29 @@ class ChatPreferencesTest {
         assertEquals(listOf("run.a", "failed", "single", "tail"), rows.map { it.id })
         assertIs<TranscriptRow.Single>(rows[1])
         assertIs<TranscriptRow.Single>(rows[2])
+    }
+
+    @Test
+    fun aFailureRowIsNeverFoldedAndNeverHidden() {
+        // The turn produced no answer: the sentence explaining why is the only
+        // account of what happened to the message above it, so the activity
+        // setting must not swallow it — in any mode.
+        val messages = listOf(text("ask"), failure("boom"), activity("step", ok = false), text("tail"))
+        assertEquals(listOf("ask", "boom", "step", "tail"), transcriptRows(messages, ActivityDetail.FULL).map { it.id })
+        assertEquals(listOf("ask", "boom", "step", "tail"), transcriptRows(messages, ActivityDetail.REDUCED).map { it.id })
+        assertEquals(
+            listOf("ask", "boom", "tail"),
+            transcriptRows(messages, ActivityDetail.HIDDEN).map { it.id },
+            "an ordinary failed receipt still obeys the setting; a whole-turn failure does not",
+        )
+    }
+
+    @Test
+    fun aFailureRowPreviewsAsItsHeadlineNotAsAChip() {
+        assertEquals(
+            "Rate limit reached",
+            rosterPreview(listOf(failure("boom")), ActivityDetail.REDUCED),
+        )
     }
 
     @Test
@@ -94,7 +132,14 @@ class ChatPreferencesTest {
     }
 
     @Test
-    fun unknownActivityDetailUsesIosDefault() {
-        assertEquals(ActivityDetail.FULL, ActivityDetail.fromWire("unknown"))
+    fun unknownActivityDetailFallsBackToReduced() {
+        assertEquals(ActivityDetail.REDUCED, ActivityDetail.fromWire("unknown"))
+        assertEquals(ActivityDetail.REDUCED, ActivityDetail.fromWire(null))
+    }
+
+    @Test
+    fun anExplicitlyStoredChoiceStillWinsOverTheQuietDefault() {
+        assertEquals(ActivityDetail.FULL, ActivityDetail.fromWire("full"))
+        assertEquals(ActivityDetail.HIDDEN, ActivityDetail.fromWire("hidden"))
     }
 }

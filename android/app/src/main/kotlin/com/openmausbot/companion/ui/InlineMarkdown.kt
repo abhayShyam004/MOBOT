@@ -37,7 +37,12 @@ object InlineMarkdown {
     /** Flatten the runs back to the text they render. */
     fun plain(spans: List<InlineSpan>): String = spans.joinToString("") { it.text }
 
-    private fun render(source: String, styles: Set<InlineStyle>, link: String?): List<InlineSpan> {
+    private fun render(
+        source: String,
+        styles: Set<InlineStyle>,
+        link: String?,
+        suppressAutolink: Boolean = false,
+    ): List<InlineSpan> {
         val out = mutableListOf<InlineSpan>()
         val buffer = StringBuilder()
         var index = 0
@@ -56,6 +61,29 @@ object InlineMarkdown {
                 buffer.append(source[index + 1])
                 index += 2
                 continue
+            }
+
+            // A bare URL — `https://…` / `http://…` — is a link without the
+            // bracket syntax. Inside a code span or an existing link it is
+            // skipped: `` `https://x` `` is a snippet and `[l](https://x)` has
+            // already named its destination, and neither should be re-read.
+            // The scheme must open a word — `shttp://…` is one funny word, not
+            // a scheme with a letter welded to its front.
+            if (link == null &&
+                !suppressAutolink &&
+                (character == 'h' || character == 'H') &&
+                !isWordCharacter(source.getOrNull(index - 1))
+            ) {
+                val colon = bareUrlSchemeColon(source, index)
+                if (colon >= 0) {
+                    val bare = scanBareUrl(source, index, colon)
+                    if (bare != null) {
+                        flush()
+                        out += InlineSpan(source.substring(index, bare.end), styles, bare.destination)
+                        index = bare.end
+                        continue
+                    }
+                }
             }
 
             if (character == '`') {
@@ -132,6 +160,19 @@ object InlineMarkdown {
                         index = tail.end + 1
                         continue
                     }
+                    // A tail that will not parse is the half-typed link, and the
+                    // invariant above says it renders as the characters it is
+                    // made of. The URL inside a failed tail must not be
+                    // autolinked either: `…](https://e` mid-stream would
+                    // otherwise flash a link that vanishes the moment `)`
+                    // arrives. The label and tail render as one suppressed run —
+                    // emphasis and escapes still apply, autolinking does not.
+                    buffer.append(character)
+                    flush()
+                    val tailEnd = failedTailEnd(source, labelEnd + 2)
+                    out += render(source.substring(index + 1, tailEnd), styles, null, suppressAutolink = true)
+                    index = tailEnd
+                    continue
                 }
                 buffer.append(character)
                 index += 1
@@ -258,6 +299,131 @@ object InlineMarkdown {
 
 
     private data class LinkTail(val destination: String, val end: Int)
+
+    /** Just past the `)` closing a failed inline tail, or the source's end. */
+    private fun failedTailEnd(source: String, from: Int): Int {
+        var index = from
+        var depth = 0
+        while (index < source.length) {
+            when (source[index]) {
+                '(' -> depth += 1
+                ')' -> if (depth == 0) return index + 1 else depth -= 1
+            }
+            index += 1
+        }
+        return source.length
+    }
+
+    /** The path/query/fragment alphabet: anything but ASCII whitespace or control. */
+    private fun isUrlCharacter(character: Char): Boolean =
+        character.code >= 0x20 &&
+            character.code != 0x7F &&
+            character != ' ' &&
+            character != '\t'
+
+    /** Characters a bare URL never ends on; see [BARE_URL_TRAILING]. */
+    private fun isTrailingPunctuation(character: Char): Boolean =
+        character in BARE_URL_TRAILING
+
+    private val BARE_URL_TRAILING = charArrayOf('.', ',', ':', ';', '!', '?', '"', '\'', ')', ']', '}')
+
+    /**
+     * When the `http` at [index] begins a bare-URL scheme, the index of its
+     * colon; −1 when it does not. Accepts `http`/`https` in either case, and
+     * insists the next character really is the colon so an ordinary sentence
+     * word is never mistaken for the start of a scheme.
+     */
+    private fun bareUrlSchemeColon(source: String, index: Int): Int {
+        val rest = source.length - index
+        if (rest >= 8 &&
+            source.regionMatches(index + 4, "://", 0, 3, ignoreCase = true) &&
+            source.regionMatches(index, "http", 0, 4, ignoreCase = true)
+        ) {
+            return index + 4
+        }
+        if (rest < 9 ||
+            !source.regionMatches(index + 5, "://", 0, 3, ignoreCase = true) ||
+            !source.regionMatches(index, "https", 0, 5, ignoreCase = true)
+        ) {
+            return -1
+        }
+        return index + 5
+    }
+
+    /**
+     * Scan one bare-URL candidate: [index] sits on the colon that closes the
+     * scheme, [schemeStart] on the scheme's first letter. Returns null when
+     * there is no linkable run here.
+     *
+     * The run is the colon, the `//`, and then the URL body: every
+     * non-whitespace, non-control character, with two URL-aware refinements.
+     * Parentheses only count when balanced — Wikipedia's
+     * `Python_(programming_language)` survives whole, while the prose `)` after
+     * a link does not join and an open `(` the body never closes ends the link
+     * just before it. And the trailing run of sentence punctuation is left off
+     * the destination, because a URL does not end a sentence for you. A body of
+     * nothing is not a URL.
+     */
+    private fun scanBareUrl(source: String, schemeStart: Int, index: Int): BareUrl? {
+        if (source.getOrNull(index) != ':') return null
+        if (source.getOrNull(index + 1) != '/' || source.getOrNull(index + 2) != '/') return null
+        val start = index + 3
+        var scan = start
+        var depth = 0
+        while (scan < source.length) {
+            val current = source[scan]
+            if (!isUrlCharacter(current)) break
+            if (current == '(') {
+                depth += 1
+            } else if (current == ')') {
+                if (depth == 0) break
+                depth -= 1
+            }
+            scan += 1
+        }
+        var end = scan
+        if (depth != 0) {
+            // An open `(` the body never closed is prose, not URL: the link
+            // ends just before it, keeping the pairs that did close.
+            var closes = 0
+            for (position in end - 1 downTo start) {
+                when (source[position]) {
+                    ')' -> closes += 1
+                    '(' -> if (closes > 0) closes -= 1 else {
+                        end = position
+                        break
+                    }
+                }
+            }
+        }
+        while (end > start) {
+            val last = source[end - 1]
+            if (last == ')') {
+                // A `)` only leaves the destination when it closes a `(` the
+                // URL itself opened; surplus ones are the writer's punctuation.
+                val opens = source.countCharacter('(', start, end)
+                val closes = source.countCharacter(')', start, end)
+                if (opens >= closes) break
+                end -= 1
+                continue
+            }
+            if (!isTrailingPunctuation(last)) break
+            end -= 1
+        }
+        if (end <= start) return null
+        // The destination keeps its scheme: `LocalMessageLink.resolve` sends
+        // scheme-less values down the desktop-file path, which is the one route
+        // a web URL must never take.
+        return BareUrl(source.substring(schemeStart, end), end)
+    }
+
+    private fun String.countCharacter(character: Char, from: Int, until: Int): Int {
+        var count = 0
+        for (position in from until until) if (this[position] == character) count += 1
+        return count
+    }
+
+    private data class BareUrl(val destination: String, val end: Int)
 
     /**
      * CommonMark's inline-link tail — `'(' ws? destination? (ws title)? ws? ')'`

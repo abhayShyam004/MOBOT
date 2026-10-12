@@ -175,6 +175,30 @@ private fun sampleBot(
     hidden = hidden,
 )
 
+    @Test
+    fun anUnopenedThreadStillHasATimeFromTheHarnessStamp() {
+        // The app holds no transcript for this thread — it has never been
+        // opened on this device — but the harness knows when it last moved,
+        // so the roster can still put it in the right place instead of last.
+        val state = CompanionState(
+            bots = listOf(
+                sampleBot("fresh", "fresh-thread", at = 1.0).copy(
+                    tasks = listOf(
+                        BotTask(threadId = "fresh-thread", title = "Fresh", createdAt = 1.0, lastMessageAt = 30.0),
+                    ),
+                ),
+                sampleBot("opened", "opened-thread", at = 1.0),
+            ),
+            messages = mapOf("opened-thread" to listOf(text("m", 2.0, "opened"))),
+        )
+        assertEquals(30.0, state.chatSummaries().first { it.id == "fresh" }.lastActivity)
+        // A transcript still wins where there is one, because it carries lines
+        // the harness does not count as messages.
+        assertEquals(2.0, state.chatSummaries().first { it.id == "opened" }.lastActivity)
+        // And the thread that just moved is listed first.
+        assertEquals(listOf("fresh", "opened"), state.chatSummaries().map { it.id })
+    }
+
 private fun text(id: String, at: Double, body: String) = Message(
     id = id,
     role = Message.Role.USER,

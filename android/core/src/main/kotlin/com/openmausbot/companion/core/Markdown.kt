@@ -1,5 +1,9 @@
 package com.openmausbot.companion.core
 
+enum class TableAlignment {
+    LEFT, CENTER, RIGHT, NONE
+}
+
 sealed interface MarkdownBlock {
     data class Paragraph(val text: String) : MarkdownBlock
     data class Bullet(val indent: Int, val text: String) : MarkdownBlock
@@ -8,6 +12,11 @@ sealed interface MarkdownBlock {
     data class Code(val language: String?, val text: String) : MarkdownBlock
     data class Quote(val text: String) : MarkdownBlock
     data object Rule : MarkdownBlock
+    data class Table(
+        val headers: List<String>,
+        val alignments: List<TableAlignment>,
+        val rows: List<List<String>>,
+    ) : MarkdownBlock
 }
 
 object Markdown {
@@ -63,6 +72,14 @@ object Markdown {
                 continue
             }
 
+            val tableResult = tableAt(index - 1, lines)
+            if (tableResult != null) {
+                flushParagraph()
+                blocks += tableResult.first
+                index = tableResult.second
+                continue
+            }
+
             if (trimmed.startsWith('>')) {
                 flushParagraph()
                 blocks += MarkdownBlock.Quote(trimmed.drop(1).trim())
@@ -79,6 +96,124 @@ object Markdown {
         }
         flushParagraph()
         return blocks
+    }
+
+    private fun tableAt(startIndex: Int, lines: List<String>): Pair<MarkdownBlock.Table, Int>? {
+        val headerLine = lines[startIndex]
+        val headerTrimmed = headerLine.trim()
+        if (!headerTrimmed.contains('|')) return null
+        if (startIndex + 1 >= lines.size) return null
+
+        val separatorLine = lines[startIndex + 1]
+        val separatorTrimmed = separatorLine.trim()
+        if (!separatorTrimmed.contains('|')) return null
+
+        val headers = splitTableRow(headerLine)
+        if (headers.isEmpty()) return null
+        if (headers.size == 1 && (!headerTrimmed.startsWith('|') || !headerTrimmed.endsWith('|'))) return null
+
+        val alignments = parseSeparatorRow(separatorLine, headers.size) ?: return null
+
+        var cur = startIndex + 2
+        val rows = mutableListOf<List<String>>()
+        while (cur < lines.size) {
+            val nextLine = lines[cur]
+            val nextTrimmed = nextLine.trim()
+            if (nextTrimmed.isEmpty()) break
+            if (nextTrimmed.startsWith("```") || nextTrimmed.startsWith("~~~")) break
+            if (heading(nextTrimmed) != null) break
+            if (!nextTrimmed.contains('|')) break
+
+            val rowCells = splitTableRow(nextLine)
+            val padded = headers.indices.map { colIdx ->
+                rowCells.getOrElse(colIdx) { "" }
+            }
+            rows.add(padded)
+            cur++
+        }
+
+        return Pair(MarkdownBlock.Table(headers, alignments, rows), cur)
+    }
+
+    private fun parseSeparatorRow(line: String, expectedColumns: Int): List<TableAlignment>? {
+        val trimmed = line.trim()
+        if (!trimmed.contains('-')) return null
+        val cells = splitTableRow(line)
+        if (cells.size != expectedColumns || cells.isEmpty()) return null
+        val alignments = mutableListOf<TableAlignment>()
+        for (cell in cells) {
+            val s = cell.trim()
+            val core = s.replace(" ", "").trim(':')
+            if (core.isEmpty() || !core.all { it == '-' }) return null
+            val leftColon = s.startsWith(':')
+            val rightColon = s.endsWith(':')
+            val alignment = when {
+                leftColon && rightColon -> TableAlignment.CENTER
+                leftColon -> TableAlignment.LEFT
+                rightColon -> TableAlignment.RIGHT
+                else -> TableAlignment.NONE
+            }
+            alignments.add(alignment)
+        }
+        return alignments
+    }
+
+    private fun splitTableRow(line: String): List<String> {
+        var text = line.trim()
+        if (text.startsWith('|')) text = text.substring(1)
+        if (text.endsWith('|') && (text.length < 2 || text[text.length - 2] != '\\')) {
+            text = text.dropLast(1)
+        }
+
+        val cells = mutableListOf<String>()
+        val current = StringBuilder()
+        var inCode = false
+        var codeFenceLength = 0
+        var escaped = false
+        var i = 0
+
+        while (i < text.length) {
+            val c = text[i]
+            if (escaped) {
+                if (c != '|') current.append('\\')
+                current.append(c)
+                escaped = false
+                i++
+                continue
+            }
+            if (c == '\\') {
+                escaped = true
+                i++
+                continue
+            }
+            if (c == '`') {
+                var fence = 1
+                while (i + fence < text.length && text[i + fence] == '`') {
+                    fence++
+                }
+                if (!inCode) {
+                    inCode = true
+                    codeFenceLength = fence
+                } else if (fence == codeFenceLength) {
+                    inCode = false
+                    codeFenceLength = 0
+                }
+                current.append(text.substring(i, i + fence))
+                i += fence
+                continue
+            }
+            if (c == '|' && !inCode) {
+                cells.add(current.toString().trim())
+                current.setLength(0)
+                i++
+                continue
+            }
+            current.append(c)
+            i++
+        }
+        if (escaped) current.append('\\')
+        cells.add(current.toString().trim())
+        return cells
     }
 
     private fun heading(trimmed: String): MarkdownBlock.Heading? {

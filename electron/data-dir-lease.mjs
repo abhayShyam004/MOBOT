@@ -1,8 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, uptime } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+
+import {
+  attemptPublish,
+  readlinkTarget,
+  removeDanglingLease,
+  removeQuietly,
+} from "./fs-publish.mjs";
 
 const LEASE_NAME = "openmausbot-server.lease";
 const DELEGATED_CHILD_DIR = ".openmausbot-server-child";
@@ -233,7 +240,13 @@ function unlinkExact(path, message) {
   }
 }
 
-/** Publish an already complete record with one hard-link operation. */
+/** Publish an already complete record with one create-if-absent operation.
+ * Publication semantics live in ./fs-publish.mjs: hard link on desktops, a
+ * no-replace symlink to a fully written payload file on filesystems that
+ * deny link(2), such as Android app storage. Both routes keep the protocol
+ * this module relies on: one atomic create-if-absent step decides ownership,
+ * the published record is complete before it can be observed, and reaper
+ * election keeps publishing at deterministic never-unlinked paths. */
 function publishRecord(path, record, prepareMessage, acquireMessage) {
   const candidatePath = `${path}.candidate-${record.pid}-${record.token}`;
   try {
@@ -242,13 +255,9 @@ function publishRecord(path, record, prepareMessage, acquireMessage) {
     throw leaseError(prepareMessage, error);
   }
   try {
-    try {
-      linkSync(candidatePath, path);
-      return true;
-    } catch (error) {
-      if (error?.code === "EEXIST") return false;
-      throw leaseError(acquireMessage, error);
-    }
+    return attemptPublish(candidatePath, path).published;
+  } catch (error) {
+    throw leaseError(`${acquireMessage} (${error?.code ?? "unknown"})`, error);
   } finally {
     unlinkExact(candidatePath, "OpenMausBot could not remove its lease candidate.");
   }
@@ -311,7 +320,9 @@ function retireDeadOwner(leasePath, expected) {
     );
   }
   if (ownerIsAlive(current)) return false;
+  const retiredPayload = readlinkTarget(leasePath);
   unlinkExact(leasePath, "OpenMausBot could not retire the stale data-directory lease.");
+  if (retiredPayload !== null) removeQuietly(join(dirname(leasePath), retiredPayload));
   return true;
 }
 
@@ -444,20 +455,30 @@ function acquireDataDirLeaseInternal(dataDir, options = {}) {
   }
 
   let acquired = false;
+  let publishedPayload = null;
   try {
     for (;;) {
+      let attempt;
       try {
-        linkSync(candidatePath, leasePath);
-        acquired = true;
-        break;
+        attempt = attemptPublish(candidatePath, leasePath);
       } catch (error) {
-        if (error?.code !== "EEXIST") {
-          throw leaseError("OpenMausBot cannot acquire its data-directory lease.", error);
-        }
+        throw leaseError(`OpenMausBot cannot acquire its data-directory lease. (${error?.code ?? "unknown"})`, error);
+      }
+      if (attempt.published) {
+        acquired = true;
+        publishedPayload = attempt.payloadPath;
+        break;
       }
 
       const current = readOwner(leasePath);
-      if (!current) continue;
+      if (!current) {
+        // The only silent-empty read is a symlink lease whose payload
+        // vanished; the name still blocks publication, so retire it before
+        // retrying. Regular files never read as null here: an unparsable
+        // record throws above and fails closed.
+        removeDanglingLease(leasePath);
+        continue;
+      }
       if (current.host !== owner.host) {
         throw leaseError(
           `This OpenMausBot data directory is already owned by a process on another machine. Lease record: ${JSON.stringify(leasePath)}.`,
@@ -493,6 +514,10 @@ function acquireDataDirLeaseInternal(dataDir, options = {}) {
       } catch (error) {
         throw leaseError("OpenMausBot could not release its data-directory lease.", error);
       }
+      // A symlink publication leaves the payload backing the lease name;
+      // nobody can reference it once the name is gone (the token inside is
+      // unique to this owner), so reclaim the file.
+      if (publishedPayload !== null) removeQuietly(publishedPayload);
       released = true;
       return true;
     },

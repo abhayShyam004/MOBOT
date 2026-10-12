@@ -14,6 +14,7 @@ import { customMcpServers,
   providerReloadKeys,
   localVmMaxInstances,
   localVmMode,
+  neverAskPermissions,
   parseConfigPatch,
   parseStoredConfig,
   persistableInstanceConfigs,
@@ -52,6 +53,19 @@ describe("configuration boundaries", () => {
       voice: "fish-voice",
     });
     expect(() => parseConfigPatch({ tts: { provider: "unknown" } })).toThrow("provider");
+  });
+
+  it("treats 'never ask for permission' as a strict boolean", () => {
+    // Absent on every older host: the asking behaviour, never a grant.
+    expect(neverAskPermissions({})).toBe(false);
+    expect(neverAskPermissions({ neverAskPermissions: false })).toBe(false);
+    expect(neverAskPermissions({ neverAskPermissions: true })).toBe(true);
+    // A hand-edited truthy non-boolean is not the grant.
+    expect(neverAskPermissions({ neverAskPermissions: "true" as unknown as boolean })).toBe(false);
+    // The patch schema accepts the boolean and refuses anything else, so a
+    // curl cannot smuggle a string past the config route.
+    expect(parseConfigPatch({ neverAskPermissions: true })).toMatchObject({ neverAskPermissions: true });
+    expect(() => parseConfigPatch({ neverAskPermissions: "yes" })).toThrow();
   });
 
   it("defaults to three parallel threads and validates a configurable maximum of ten", () => {

@@ -21,7 +21,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -187,7 +186,7 @@ fun PairingScreen(onCancel: () -> Unit) {
             onCancel = { showingScanner = false },
             validate = { payload ->
                 if (PairingInvite.parse(payload) == null) {
-                    "That isn't an OpenMausBot pairing QR code."
+                    "That isn't an MOBOT pairing QR code."
                 } else {
                     // Session decides whether this invite may be accepted at all
                     // (already paired, credential already burned) and publishes
@@ -424,7 +423,7 @@ internal fun pairingFailureDisposition(
 @Composable
 private fun SetupSection(onScan: () -> Unit) {
     SectionCard(title = "On your computer") {
-        Text("1.  Open OpenMausBot → Settings → Phone", fontSize = 15.sp)
+        Text("1.  Open MOBOT → Settings → Phone", fontSize = 15.sp)
         Text("2.  Choose Set up a phone", fontSize = 15.sp)
         Button(onClick = onScan, modifier = Modifier.fillMaxWidth()) {
             Text("Scan QR Code")
@@ -502,10 +501,10 @@ private fun ManualSection(
     onContinue: () -> Unit,
 ) {
     SectionCard(title = "Or enter the address") {
-        OutlinedTextField(
+        AppTextField(
             value = address,
             onValueChange = onAddressChange,
-            placeholder = { Text("https://mac.example or 192.168.1.42:8810") },
+            placeholder = "https://mac.example or 192.168.1.42:8810",
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
             modifier = Modifier.fillMaxWidth(),
@@ -563,10 +562,10 @@ private fun CodeSection(
             }
 
             PairingConfirmation.Step.EnterCode -> {
-                OutlinedTextField(
+                AppTextField(
                     value = code,
                     onValueChange = onCodeChange,
-                    placeholder = { Text("000000") },
+                    placeholder = "000000",
                     singleLine = true,
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
                     textStyle = MaterialTheme.typography.headlineSmall.copy(
@@ -608,7 +607,7 @@ private fun CodeSection(
 private fun SectionCard(title: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text(
-            text = title.uppercase(),
+            text = title,
             fontSize = 12.sp,
             fontWeight = FontWeight.SemiBold,
             color = secondaryTint,

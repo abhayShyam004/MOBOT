@@ -13,7 +13,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import type { CloudBackend, EffortLevel, ServerFrame } from "../../shared/wire";
+import type { CloudBackend, EffortLevel, FailureCardData, ServerFrame } from "../../shared/wire";
 import type { ModelVariantOption, RuntimeEvent } from "../../shared/runtime-events";
 import type { MausColor, MausMotion } from "@/lib/mascot";
 import type { BotAvatarCrop } from "../../shared/bot-avatar";
@@ -152,6 +152,9 @@ export interface Message {
   /** `setup` marks an error fixed by installing something, not by retrying.
    * `summary` is the call's input on one redacted line (the shell command). */
   tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean; summary?: string; input?: string; output?: string };
+  /** A failed turn, classified by the server: what went wrong, where, and what
+   * to do. Never the provider's own payload — see shared/wire.ts. */
+  failure?: FailureCardData;
   /** user messages sent into a running turn — the model saw it mid-turn */
   steered?: boolean;
   /** a user message that arrived through the server's API, not typed here */

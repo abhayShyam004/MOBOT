@@ -280,6 +280,21 @@ object ChatActions {
  */
 object RosterLayout {
     /**
+     * Rows inside one roster bucket, newest message first. The roster's
+     * sections, pins and folders decide which bucket a chat belongs to; this
+     * decides the order within it, so a bot that just replied is the first
+     * row under its heading instead of wherever the fleet happened to list
+     * it. Unread still outranks recency — a chat with something new in it is
+     * the one to look at — and the sort is stable, so chats with no timestamp
+     * whatsoever keep the order the fleet sent them in.
+     */
+    fun byRecency(summaries: List<ChatSummary>): List<ChatSummary> =
+        summaries.sortedWith(
+            compareByDescending<ChatSummary> { it.chat.unread }
+                .thenByDescending { it.lastActivity },
+        )
+
+    /**
      * What a search shows: every kind of chat the query matches. Only a search
      * asks — an unsearched roster is assembled section by section from the
      * fleet's own partition, so there is no list to filter there.
@@ -330,7 +345,14 @@ object RosterLayout {
      * `uppercased()` does — a reader in `tr-TR` must still read BOTS, not BOTS
      * spelled with a dotted capital.
      */
-    fun sectionLabel(text: String): String = text.uppercase()
+    /**
+     * The heading as a roster section draws it.
+     *
+     * Returned as it arrives. This used to uppercase — the house style of a
+     * settings page — and the design language the app now follows labels a stretch
+     * of content the way a person would say it.
+     */
+    fun sectionLabel(text: String): String = text
 
     private const val NOT_PAIRED = "Not paired"
 }
@@ -477,6 +499,11 @@ object MessageActions {
             ?.joinToString("\n\n")
         // A tool chip is context, and a screenshot is pixels.
         Message.Kind.ACTIVITY, Message.Kind.SCREEN -> null
+        // A connection card has its own buttons; what it says is not text
+        // worth copying to the clipboard.
+        Message.Kind.CONNECTOR -> null
+        Message.Kind.STRUCTURED -> message.text
+            ?: message.structured?.components?.joinToString("\n\n") { it.title ?: it.type }
     }
 
     /**
@@ -504,8 +531,8 @@ object Reactions {
             .sortedBy { it.emoji }
 }
 
-/** The five commands, by what selecting one does rather than by its label. */
-enum class SlashCommandId { COMPUTER, TASKS, DIFF, RETRY, STEER }
+/** The commands, by what selecting one does rather than by its label. */
+enum class SlashCommandId { COMPUTER, TASKS, DIFF, RETRY, STEER, STOP, NEW_THREAD }
 
 /**
  * What a command *is*, which is not always a message.
@@ -520,6 +547,12 @@ sealed interface SlashEffect {
     data object OpenComputer : SlashEffect
 
     data object OpenTasks : SlashEffect
+
+    /** Interrupt the running turn — the same action the + sheet's Interrupt fires. */
+    data object Stop : SlashEffect
+
+    /** Start a fresh thread with this chat — the + sheet's New thread action. */
+    data object NewThread : SlashEffect
 
     /** Sent immediately, exactly as typing it would have been. */
     data class Send(val prompt: String) : SlashEffect
@@ -574,6 +607,18 @@ object SlashCommands {
             title = "/steer",
             description = "Steer and redirect active execution",
             effect = SlashEffect.Send("Pause and explain your current plan"),
+        ),
+        SlashCommand(
+            id = SlashCommandId.STOP,
+            title = "/stop",
+            description = "Stop the current turn",
+            effect = SlashEffect.Stop,
+        ),
+        SlashCommand(
+            id = SlashCommandId.NEW_THREAD,
+            title = "/new",
+            description = "Start a fresh thread",
+            effect = SlashEffect.NewThread,
         ),
     )
 

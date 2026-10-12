@@ -17,7 +17,6 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -363,7 +362,7 @@ private fun ShareSheetContent(
             ) {
                 HeaderBackButton(onBack = { if (canCancel) cancel() })
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Send to OpenMausBot", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Text("Send to MOBOT", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                     Text(headerSubtitle(phase), color = secondaryTint, fontSize = 13.sp)
                 }
                 if (phase == ShareSheetPhase.SENDING) {
@@ -438,14 +437,15 @@ private fun ShareSheetContent(
                 }
 
                 if (phase == ShareSheetPhase.READY || phase == ShareSheetPhase.SENDING) {
-                    OutlinedTextField(
+                    AppTextField(
                         value = instruction,
                         onValueChange = {
                             instruction = it
                             pendingDelivery = null
                         },
-                        label = { Text("Instruction (optional)") },
-                        placeholder = { Text("For example: summarize this and list the next steps") },
+                        label = "Instruction (optional)",
+                        singleLine = false,
+                        placeholder = "For example: summarize this and list the next steps",
                         enabled = canEdit,
                         minLines = 2,
                         modifier = Modifier.fillMaxWidth(),

@@ -122,6 +122,10 @@ export const MinimaxDriver: ProviderDriver<MinimaxConfig> = {
       missingKeyError: `no MiniMax key — set ${API_KEY_ENV} or run mmx auth login --api-key …`,
       unavailableReason: `no MiniMax API key — run mmx auth login --api-key … or set ${API_KEY_ENV}`,
       timeoutMs: 180_000,
+      // Same omission as openai-compat had: without a scale the shared runtime
+      // never retries, so a rate-limited MiniMax turn failed on its first
+      // response instead of waiting the 1s/3s/8s the other providers wait.
+      retryScale: Number(process.env.FAKE_MINIMAX_RETRY_SCALE ?? "1"),
       reasoning: true,
       billing: "metered",
       includeUsageInCompleted: true,

@@ -168,6 +168,32 @@ class DecodingTest {
     }
 
     @Test
+    fun decodesAConnectorRequestCard() {
+        val message = CompanionJson.decodeFromString<Message>(
+            """{"id":"m1","role":"bot","kind":"connector","at":1786742413762,
+              "connector":{"slug":"slack","label":"Slack","description":"Connect Slack so the bot can continue",
+              "status":"required","resumeKey":"rk-1","alias":"Work"}}""",
+        )
+        assertEquals(Message.Kind.CONNECTOR, message.kind)
+        val card = assertNotNull(message.connector)
+        assertEquals("slack", card.slug)
+        assertEquals("rk-1", card.resumeKey)
+        assertEquals("Work", card.alias)
+        assertFalse(ConnectorCardRules.isConnected(card))
+        assertFalse(ConnectorCardRules.isDismissed(card))
+        assertEquals("Connect securely", ConnectorCardRules.connectActionLabel(card))
+
+        // A card with no alias still decodes: the field exists only when the
+        // person chose to connect a second account.
+        val anon = CompanionJson.decodeFromString<Message>(
+            """{"id":"m2","role":"bot","kind":"connector","at":1,
+              "connector":{"slug":"gmail","label":"Gmail","description":"d","status":"connected","resumeKey":"rk-2","resumed":true}}""",
+        )
+        assertEquals(null, anon.connector?.alias)
+        assertEquals(true, anon.connector?.resumed)
+    }
+
+    @Test
     fun pendingApprovalIsActionableAndAnsweredOrDismissedIsNot() {
         val message = CompanionJson.decodeFromString<Message>(
             """{"id":"m1","role":"bot","kind":"options","at":1786742413762,
@@ -313,6 +339,10 @@ class DecodingTest {
         // `ios/Tests/CompanionCoreTests/DecodingTests.swift:313-324` pins them.
         // A "contains pair" assertion would have kept passing when the desktop
         // renamed its Companion area to Phone and the fixtures were re-captured.
+        // The name here is the *server's* own wording, captured from a real
+        // response — the desktop app still calls itself OpenMausBot even though
+        // this phone app is MOBOT, so the fixture (and this expectation) keeps
+        // whatever the host actually said.
         assertEquals(
             "pair this device from Phone settings in OpenMausBot on your computer",
             decodeFixture<APIErrorBody>("unauthorized").error,

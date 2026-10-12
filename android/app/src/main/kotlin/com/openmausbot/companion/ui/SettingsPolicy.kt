@@ -15,21 +15,17 @@ import kotlinx.coroutines.flow.asStateFlow
  */
 object SettingsPolicy {
     const val NOTIFICATIONS_FOOTER =
-        "Approvals and finished work appear while OpenMausMobile is connected, including " +
+        "Approvals and finished work appear while MOBOT is connected, including " +
             "frames replayed after a short background pause. Closed-app push needs a " +
             "separate push-relay release that does not exist yet."
 
     const val WORKSPACE_FOOTER =
-        "Routine schedules are safe to manage here. Provider keys, webhook secrets, " +
-            "pairing, revocation, Local VM, and agent execution policy stay on your computer."
+        "Routine schedules are safe to manage here. Webhook secrets, pairing, revocation, " +
+            "and agent execution policy stay on your computer."
 
     const val UNPAIR_FOOTER =
         "Removes the pairing from this phone only. To stop it reaching the computer at all, " +
-            "remove the device in OpenMausBot → Settings → Phone."
-
-    const val NOT_HERE =
-        "API keys, pairing and the Local VM are managed on the computer. This phone is " +
-            "deliberately not allowed to change them."
+            "remove the device in MOBOT → Settings → Phone."
 
     const val UNPAIR_CONFIRM_TITLE = "Unpair this phone?"
     const val UNPAIR_CONFIRM_MESSAGE = "You'll need a new pairing code to connect again."

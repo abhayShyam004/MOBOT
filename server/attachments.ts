@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   createReadStream,
-  linkSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -14,6 +14,7 @@ import {
 } from "node:fs";
 import { link, open, unlink } from "node:fs/promises";
 import { join, extname } from "node:path";
+import { attemptPublish, LINK_UNSUPPORTED_CODES, readlinkTarget } from "../electron/fs-publish.mjs";
 import { DATA_DIR } from "./config.ts";
 
 export const ATTACHMENTS_DIR = join(DATA_DIR, "attachments");
@@ -202,7 +203,22 @@ export function deleteAttachment(path: string): void {
     // Only bother sizing it if the cache is already warm — if it isn't, the
     // eventual first scan just won't see this file, which is correct.
     const size = committedAttachmentBytes !== null ? statSync(path).size : 0;
+    // A symlink publication keeps its bytes in a payload file the quota scan
+    // counts; removing only the name would orphan those bytes forever.
+    let payload: string | null = null;
+    try {
+      if (lstatSync(path).isSymbolicLink()) payload = readlinkTarget(path);
+    } catch {
+      // Already gone.
+    }
     unlinkSync(path);
+    if (payload !== null) {
+      try {
+        unlinkSync(join(path, "..", payload));
+      } catch {
+        // Payload already gone.
+      }
+    }
     if (committedAttachmentBytes !== null) {
       committedAttachmentBytes = Math.max(0, committedAttachmentBytes - size);
     }
@@ -489,8 +505,28 @@ export async function saveFile(
       closed = true;
       try {
         const accountingVersion = attachmentAccountingVersion;
-        await link(partialPath, path);
-        addCommittedBytes(bytes, accountingVersion);
+        let attempt = { published: true, payloadPath: null as string | null };
+        try {
+          await link(partialPath, path);
+        } catch (error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code === "EEXIST") {
+            attempt = { published: false, payloadPath: null };
+          } else if (code !== undefined && LINK_UNSUPPORTED_CODES.has(code)) {
+            // Filesystems that deny link(2) (Android app storage) publish
+            // through the shared create-if-absent layer instead.
+            attempt = attemptPublish(partialPath, path);
+          } else {
+            throw error;
+          }
+        }
+        if (attempt.published) {
+          addCommittedBytes(bytes, accountingVersion);
+        } else if (
+          statSync(path).size !== bytes || await digestFile(path) !== await digestFile(partialPath)
+        ) {
+          throw statusError(409, "uploadId was already used for different file bytes");
+        }
         await unlink(partialPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -546,8 +582,8 @@ export function saveImage(bytes: Buffer, mime: string, requestedUploadId?: strin
   try {
     writeFileSync(partialPath, bytes, { mode: 0o600, flag: "wx" });
     try {
-      linkSync(partialPath, path);
-      addCommittedBytes(bytes.byteLength);
+      const attempt = attemptPublish(partialPath, path);
+      if (attempt.published) addCommittedBytes(bytes.byteLength);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const saved = readFileSync(path);

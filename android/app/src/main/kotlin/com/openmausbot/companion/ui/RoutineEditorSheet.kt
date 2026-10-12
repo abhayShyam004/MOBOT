@@ -33,7 +33,6 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.SelectableDates
 import androidx.compose.material3.Text
@@ -262,10 +261,10 @@ internal fun RoutineEditorSheet(
             }
 
             FormSection(header = "Work") {
-                OutlinedTextField(
+                AppTextField(
                     value = name,
                     onValueChange = { name = it },
-                    label = { Text("Routine name") },
+                    label = "Routine name",
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -276,10 +275,11 @@ internal fun RoutineEditorSheet(
                     onSelect = { agent = agent.choose(it) },
                 )
 
-                OutlinedTextField(
+                AppTextField(
                     value = prompt,
                     onValueChange = { prompt = it },
-                    label = { Text("What should the agent do?") },
+                    label = "What should the agent do?",
+                    singleLine = false,
                     minLines = 4,
                     maxLines = 10,
                     modifier = Modifier.fillMaxWidth(),
@@ -477,16 +477,16 @@ internal fun RoutineEditorSheet(
                             )
                         }
                         if (intervalUsesCustom) {
-                            OutlinedTextField(
+                            AppTextField(
                                 value = intervalMinutesText,
                                 onValueChange = { value ->
                                     if (value.length <= 4 && value.all(Char::isDigit)) {
                                         intervalMinutesText = value
                                     }
                                 },
-                                label = { Text("Custom interval") },
+                                label = "Custom interval",
                                 suffix = { Text("minutes") },
-                                supportingText = { Text("From 5 minutes to 24 hours") },
+                                helper = "From 5 minutes to 24 hours",
                                 isError = intervalMinutes == null,
                                 singleLine = true,
                                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
@@ -697,12 +697,12 @@ private fun TimeoutPicker(value: Int?, onSelect: (Int?) -> Unit) {
         onExpandedChange = { expanded = it },
         modifier = Modifier.fillMaxWidth(),
     ) {
-        OutlinedTextField(
+        AppTextField(
             value = value?.let { "$it minutes" } ?: "No limit",
             onValueChange = {},
             readOnly = true,
-            label = { Text("Stop if still running after") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            label = "Stop if still running after",
+            trailing = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             modifier = Modifier
                 .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
                 .fillMaxWidth()
@@ -743,12 +743,12 @@ private fun AgentPicker(
         onExpandedChange = { expanded = it },
         modifier = Modifier.fillMaxWidth(),
     ) {
-        OutlinedTextField(
+        AppTextField(
             value = label,
             onValueChange = {},
             readOnly = true,
-            label = { Text("Agent") },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            label = "Agent",
+            trailing = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             modifier = Modifier
                 .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
                 .fillMaxWidth(),

@@ -21,7 +21,7 @@
 // stdout is the MCP channel — never console.log here.
 import { connect } from "node:net";
 import { randomUUID } from "node:crypto";
-import { parseAskQuestions, questionAnswersByQuestion } from "../shared/ask-question.ts";
+import { normalizeAskUserInput, questionAnswersByQuestion } from "../shared/ask-question.ts";
 
 const socketPath = process.argv[2] ?? "";
 
@@ -108,7 +108,7 @@ async function answerNativeQuestions(input: unknown): Promise<string> {
   // Unanswerable entries are SKIPPED by the parser, not fatal: one bad entry
   // must not cost the user the good questions beside it. Nothing left means
   // the whole call was unanswerable, which becomes a denial.
-  const questions = parseAskQuestions(input);
+  const questions = normalizeAskUserInput(input);
   if (!questions?.length) {
     return JSON.stringify({
       behavior: "deny",
@@ -157,16 +157,33 @@ const TOOLS = [
   {
     name: "ask_user",
     description:
-      "Ask the human who owns this bot a question and wait for their answer. Use whenever you need a decision, a preference, missing information, or sign-off before doing something consequential — do not guess on things the owner would want to decide. Returns their answer as text.",
+      "Pause mid-task to get the owner's decision, preference, or missing knowledge — then continue the SAME task with their answer. Decide on your own when a reasonable default exists; ask only when different answers would materially change what you do next (an approach that shapes later work, a preference you cannot infer, context only they have, or sign-off before something irreversible). Never ask what you can find out yourself, never ask for permission to act, never ask trivia, and never ask the person to do your work or supply content. When you need their input, call this tool rather than ending the turn to say what you need. ONE question. type — single_choice (one pick), multiple_choice (several, with min/maxSelections), confirmation (yes/no), free_text (they type; omit choices). Give each option a stable snake_case id; the answer cites it. 2-4 options, each with a one-line description of when to choose it. Returns their answer as text.",
     inputSchema: {
       type: "object",
       properties: {
         question: { type: "string", description: "The question, with enough context to answer at a glance" },
+        type: {
+          type: "string",
+          enum: ["single_choice", "multiple_choice", "confirmation", "free_text"],
+          description: "single_choice unless the question is really one of the others.",
+        },
         choices: {
           type: "array",
-          items: { type: "string" },
-          description: "Optional 2-5 suggested answers, shown as one-tap buttons",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", maxLength: 40, description: "Stable snake_case id the answer will cite." },
+              label: { type: "string", maxLength: 120 },
+              description: { type: "string", maxLength: 400, description: "When to choose this, or what it implies." },
+            },
+            required: ["label"],
+          },
+          description: "The options, most likely first. Omit for free_text.",
         },
+        minSelections: { type: "integer", minimum: 0, maximum: 12, description: "multiple_choice: at least this many picks." },
+        maxSelections: { type: "integer", minimum: 1, maximum: 12, description: "multiple_choice: at most this many picks." },
+        required: { type: "boolean", default: true, description: "false lets the task continue without an answer." },
+        allowOther: { type: "boolean", default: true, description: "false removes the free-text row from a choice question." },
       },
       required: ["question"],
     },
@@ -205,9 +222,17 @@ async function handle(msg: any) {
       : Array.isArray(args.suggestions)
         ? args.suggestions
         : null;
+    // A typed ask normalizes HERE, once: the structured questions ride to
+    // the broker beside the flat fields (which stay for an older broker),
+    // and the answer text the broker returns is already the tool result
+    // the CLI sees — no relaying, no re-parsing.
+    const normalized = isQuestion ? normalizeAskUserInput(args) : null;
     const answer: any = await askBroker(
       isQuestion
-        ? { t: "ask", id: askId, kind: "question", tool: "ask_user", input: { question: args.question, choices: args.choices } }
+        ? {
+            t: "ask", id: askId, kind: "question", tool: "ask_user",
+            input: { question: args.question, choices: args.choices, ...(normalized ? { questions: normalized } : {}) },
+          }
         : { t: "ask", id: askId, tool: args.tool_name, input: args.input },
     );
     let text = answer.message || "No answer was given — use your best judgment.";

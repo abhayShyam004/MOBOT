@@ -8,6 +8,7 @@ import type {
 } from "../contracts.ts";
 import { newEventId, newId } from "../contracts.ts";
 import { redactSecretsInText } from "../redact.ts";
+import { askQuestionSummary, normalizeAskUserInput } from "../../shared/ask-question.ts";
 import { toolDetailPreview } from "../tool-summary.ts";
 import { ChatToolSessionError, mountChatTools, type ChatToolDefinition, type ChatToolSession } from "./chat-mcp-tools.ts";
 import { createChatToolApproval } from "./chat-tool-approval.ts";
@@ -111,6 +112,8 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
     turnId: string;
     done: Promise<void>;
     approval: ReturnType<typeof createChatToolApproval>;
+    /** In-process harness tools for this turn (document page reads). */
+    turnTools: NonNullable<SendTurnInput["turnTools"]>;
   }>();
 
   const emit = (event: RuntimeEvent) => {
@@ -333,14 +336,25 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
         ...base(turn.threadId, turnId), type: "request.opened", requestType: "permission",
         requestId: ask.id, tool: ask.tool, summary: ask.summary, allowSession: false,
       }),
+      openQuestions: (ask) => emit({
+        ...base(turn.threadId, turnId), type: "request.opened", requestType: "question",
+        requestId: ask.id, tool: ask.tool, summary: ask.summary,
+        ...(ask.questions?.length ? { questions: ask.questions } : {}),
+        ...(ask.choices?.length ? { choices: ask.choices } : {}),
+      }),
       resolved: (ask, allowed, source) => emit({
         ...base(turn.threadId, turnId), type: "request.resolved", requestId: ask.id,
         behavior: allowed ? "allow" : "deny", source,
       }),
+      resolvedQuestions: (ask, answer, source) => emit({
+        ...base(turn.threadId, turnId), type: "request.resolved", requestId: ask.id,
+        behavior: "answer", source,
+        ...(answer ? { answer } : {}),
+      }),
     });
     let resolveDone!: () => void;
     const done = new Promise<void>((resolve) => { resolveDone = resolve; });
-    active.set(turn.threadId, { abort, turnId, done, approval });
+    active.set(turn.threadId, { abort, turnId, done, approval, turnTools: turn.turnTools ?? [] });
     emit({ ...base(turn.threadId, turnId), type: "turn.started" });
     emit({ ...base(turn.threadId, turnId), type: "session.started", sessionId: null, model });
 
@@ -356,6 +370,14 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       const seenCalls = new Set<string>();
       try {
         tools = await mountChatTools(options.tools === false ? undefined : turn.integrations, abort.signal);
+        // Harness-run tools (document page reads, ask_user) ride beside the
+        // MCP tools in the model's catalog — but only when this endpoint
+        // accepts tools at all: a text-only endpoint must see no tools key.
+        const harnessDefinitions = options.tools === false ? [] : (turn.turnTools ?? []).map((tool) => ({
+          type: "function" as const,
+          function: { name: tool.name, description: tool.description, parameters: tool.inputSchema },
+        }));
+        const allDefinitions = tools.definitions.concat(harnessDefinitions);
         for (let round = 0; round < 16; round++) {
           abort.signal.throwIfAborted();
           native("out", options.nativeLog.outgoing(turn, messages, model));
@@ -385,7 +407,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
               completion = await complete(messages, model, true, abort.signal, (text, streamKind) => {
                 streamed = true;
                 delta(text, streamKind);
-              }, tools.definitions);
+              }, allDefinitions);
               delta("", "assistant_text", true);
               delta("", "reasoning_text", true);
               break;
@@ -419,12 +441,16 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             }
             if (toolFailed) {
               stopReason = "tool_error";
-              throw new ChatProtocolError("One or more tool operations failed or were denied. See the tool results; the final response is not an execution receipt.");
+              // Plain words for a real condition: steps failed, so the answer
+              // may claim more than happened. The names, codes and recovery
+              // steps of those failures are diagnostics — they stay in the
+              // turn's own records, never in the person's chat.
+              throw new ChatProtocolError("Some steps in this turn did not succeed, so the reply above may be incomplete.");
             }
             ok = true;
             break;
           }
-          if (!tools.definitions.length) throw new ChatProtocolError("provider returned tool calls, but no tools are available for this turn");
+          if (!allDefinitions.length) throw new ChatProtocolError("provider returned tool calls, but no tools are available for this turn");
           // Validate IDs for the entire batch before executing any of its calls.
           for (const call of completion.toolCalls) {
             if (seenCalls.has(call.id)) throw new ChatProtocolError("provider reused a tool-call ID; refusing to repeat an operation");
@@ -437,7 +463,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
           });
           for (const call of completion.toolCalls) {
             abort.signal.throwIfAborted();
-            let result: { text: string; ok: boolean };
+            let result: { text: string; ok: boolean } | undefined;
             let started = false;
             let fatal: Error | undefined;
             try {
@@ -445,25 +471,67 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
               try { args = JSON.parse(call.function.arguments); }
               catch { throw new ChatProtocolError("tool arguments are not complete JSON"); }
               if (!object(args)) throw new ChatProtocolError("tool arguments must be a JSON object");
-              tools.validate(call.function.name, args);
               const inputPreview = preview(args);
-              // Full access is the person's explicit grant to answer every
-              // prompt. This runtime has no provider reviewer to hand it to,
-              // so it is honoured here: without it every single tool call on
-              // an OpenAI-compatible engine stops for a card, and a Chief's
-              // delegated Full access cannot help either.
-              const allowed = turn.approvalMode === "full"
-                || await approval.ask(call.function.name, inputPreview ?? "This tool has no arguments.");
-              abort.signal.throwIfAborted();
-              emit({ ...base(turn.threadId, turnId), type: "item.started", itemType: "tool", itemId: call.id,
-                title: call.function.name, ...(inputPreview ? { input: inputPreview } : {}),
-              });
-              started = true;
-              if (allowed) {
-                result = await tools.execute(call.function.name, args as Record<string, unknown>, abort.signal);
+              // A harness-run tool (document page reads) needs no MCP session
+              // and no permission card: it reads only what the user attached.
+              const harnessTool = (turn.turnTools ?? []).find((tool) => tool.name === call.function.name);
+              const startItem = () => {
+                if (started) return;
+                started = true;
+                emit({ ...base(turn.threadId, turnId), type: "item.started", itemType: "tool", itemId: call.id,
+                  title: call.function.name, ...(inputPreview ? { input: inputPreview } : {}) });
+              };
+              // Either branch below settles the call on its own — no MCP
+              // session, no permission card — and marks it handled so the
+              // permission path is skipped entirely. ask_user is checked by
+              // name first, so a question can never become a permission ask.
+              let handled = false;
+              if (call.function.name === "ask_user") {
+                // The bot's own mid-task question — never a permission ask.
+                // It blocks here until the person answers the card; their
+                // words become the tool result, so the SAME task resumes with
+                // the answer in hand rather than starting over. Structured,
+                // flat, and v2-typed shapes all normalize into the one card
+                // every client renders, free text included.
+                const questions = normalizeAskUserInput(args);
+                if (!questions) throw new ChatProtocolError("ask_user needs a question");
+                startItem();
+                const answer = await approval.askQuestion("ask_user", askQuestionSummary(questions), { questions });
+                abort.signal.throwIfAborted();
+                if (answer === null) {
+                  denials.push(call.function.name);
+                  result = { ok: false, text: "The question was left unanswered because the turn was stopped or closed. Wrap up the task without the answer, or say what is still needed." };
+                } else {
+                  result = { ok: true, text: answer };
+                }
+                handled = true;
+              } else if (harnessTool) {
+                // A harness-run tool (document page reads) needs no MCP
+                // session and no permission card: it reads only what the
+                // user attached.
+                startItem();
+                const output = await harnessTool.execute(args as Record<string, unknown>);
+                result = { text: output, ok: !/^Error:/m.test(output.slice(0, 200)) };
+                handled = true;
               } else {
-                denials.push(call.function.name);
-                result = { ok: false, text: "Permission denied or expired; the tool was not executed." };
+                tools.validate(call.function.name, args);
+              }
+              if (!handled) {
+                // Full access is the person's explicit grant to answer every
+                // prompt. This runtime has no provider reviewer to hand it to,
+                // so it is honoured here: without it every single tool call on
+                // an OpenAI-compatible engine stops for a card, and a Chief's
+                // delegated Full access cannot help either.
+                const allowed = turn.approvalMode === "full"
+                  || await approval.ask(call.function.name, inputPreview ?? "This tool has no arguments.");
+                abort.signal.throwIfAborted();
+                startItem();
+                if (allowed) {
+                  result = await tools.execute(call.function.name, args as Record<string, unknown>, abort.signal);
+                } else {
+                  denials.push(call.function.name);
+                  result = { ok: false, text: "Permission denied or expired; the tool was not executed." };
+                }
               }
             } catch (error) {
               if (error instanceof ChatToolSessionError) fatal = error;
@@ -472,11 +540,14 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
                 : safeText(asError(error).message).slice(0, 2_000) };
             }
             if (!started) emit({ ...base(turn.threadId, turnId), type: "item.started", itemType: "tool", itemId: call.id, title: call.function.name });
-            const text = safeText(result.text);
-            const output = preview({ ok: result.ok, result: text });
-            emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.id, ok: result.ok, output });
-            if (!result.ok) toolFailed = true;
-            messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: result.ok, result: text }) });
+            // Every branch above assigns a result; the catch does too. The
+            // undefined case is the impossible one, and stays honest about it.
+            const settledResult = result ?? { ok: false, text: "The tool produced no result." };
+            const text = safeText(settledResult.text);
+            const output = preview({ ok: settledResult.ok, result: text });
+            emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.id, ok: settledResult.ok, output });
+            if (!settledResult.ok) toolFailed = true;
+            messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: settledResult.ok, result: text }) });
             abort.signal.throwIfAborted();
             if (fatal) throw fatal;
           }
@@ -533,7 +604,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
         await turn.done;
       },
       respondToRequest: async (threadId, requestId, decision) =>
-        active.get(threadId)?.approval.answer(requestId, decision.behavior) ?? "unavailable",
+        active.get(threadId)?.approval.answer(requestId, decision.behavior, decision.message) ?? "unavailable",
       hasSession: (threadId) => active.has(threadId),
       stopAll: async () => {
         const turns = [...active.values()];

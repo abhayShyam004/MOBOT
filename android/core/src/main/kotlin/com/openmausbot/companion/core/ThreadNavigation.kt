@@ -33,9 +33,12 @@ fun BotTask.demandsAttention(queued: Boolean = false): Boolean =
  * Attention outranks recency within a bot: waiting-on-you needs the person
  * most, then working/busy, then queued, then unread. A held send is client
  * state, so it ranks in the queued tier the way the wire value does. The
- * thread being looked at rides just above the idle tail; idle threads keep
- * stored order. Mirrors the desktop's orderedSidebarThreads so the tree, the
- * sheet, and the pickers agree on one order.
+ * thread being looked at rides just above the idle tail, and the idle tail
+ * itself is newest message first — a thread that just got a reply is the one
+ * the person is most likely to want, so it sits above threads that have not
+ * moved. Ties (two threads that have never had a message) fall back to
+ * creation time, and a harness that does not send the stamp falls back to it
+ * too, which is the stored order this list used before.
  */
 fun attentionRank(task: BotTask, activeThreadId: String, queued: Boolean = false): Int = when {
     task.activity == "waiting-on-you" -> 0
@@ -53,7 +56,10 @@ fun orderedThreads(
     activeThreadId: String,
     queuedThreadIds: Set<String> = emptySet(),
 ): List<BotTask> =
-    tasks.sortedBy { attentionRank(it, activeThreadId, queued = it.threadId in queuedThreadIds) }
+    tasks.sortedWith(
+        compareBy<BotTask> { attentionRank(it, activeThreadId, queued = it.threadId in queuedThreadIds) }
+            .thenByDescending { it.lastMessageAt ?: it.createdAt },
+    )
 
 /** Routine results are ordinary threads; only their internal per-run executions are hidden. */
 val Bot.visibleTasks: List<BotTask>

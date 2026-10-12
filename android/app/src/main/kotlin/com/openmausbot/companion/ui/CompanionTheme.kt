@@ -1,34 +1,15 @@
 package com.openmausbot.companion.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextDirection
-
-/**
- * The app's colours. Deliberately small: the roster and chat draw almost
- * everything from `secondary` opacities the way the SwiftUI screens draw from
- * `Color.secondary`, and the one branded colour is the mascot green the desktop
- * uses for the profile avatar.
- */
-private val Green = Color(MausPalette.argb("green"))
-
-private val LightColors = lightColorScheme(
-    primary = Green,
-    onPrimary = Color.White,
-    secondary = Green,
-)
-
-private val DarkColors = darkColorScheme(
-    primary = Green,
-    onPrimary = Color.White,
-    secondary = Green,
-)
+import com.openmausbot.companion.core.ThemeMode
 
 /**
  * Reading direction comes from the words, not from the locale's layout.
@@ -87,7 +68,14 @@ private val DarkColors = darkColorScheme(
 private fun TextStyle.readingFromContent(): TextStyle =
     copy(textDirection = TextDirection.ContentOrLtr)
 
-private val ContentDirectedTypography: Typography = Typography().run {
+/**
+ * The app's type scale, with the direction policy above already applied.
+ *
+ * [readingFromContent] is kept as one call over the finished scale rather than
+ * written into each style in [appTypography]: there is exactly one place that
+ * knows the policy, and this is it.
+ */
+private val ContentDirectedTypography: Typography = appTypography().run {
     copy(
         displayLarge = displayLarge.readingFromContent(),
         displayMedium = displayMedium.readingFromContent(),
@@ -107,18 +95,52 @@ private val ContentDirectedTypography: Typography = Typography().run {
     )
 }
 
-@Composable
-fun CompanionTheme(
-    darkTheme: Boolean = isSystemInDarkTheme(),
-    content: @Composable () -> Unit,
-) {
-    MaterialTheme(
-        colorScheme = if (darkTheme) DarkColors else LightColors,
-        typography = ContentDirectedTypography,
-        content = content,
-    )
+/** Resolves a [ThemeMode] against the system, in one place for the whole app. */
+internal fun ThemeMode.resolve(systemDark: Boolean): Boolean = when (this) {
+    ThemeMode.SYSTEM -> systemDark
+    ThemeMode.DARK -> true
+    ThemeMode.LIGHT -> false
 }
 
-/** SwiftUI's `Color.secondary` — the muted foreground everything quiet uses. */
+@Composable
+fun CompanionTheme(
+    mode: ThemeMode = ThemeMode.SYSTEM,
+    darkTheme: Boolean = mode.resolve(isSystemInDarkTheme()),
+    content: @Composable () -> Unit,
+) {
+    val colors = if (darkTheme) DarkAppColors else LightAppColors
+    CompositionLocalProvider(
+        LocalAppColors provides colors,
+        // What a `Text` says when it says nothing about colour: the page's own
+        // ink, in whichever theme is on.
+        //
+        // Compose's default for this local is *black*, and Material only
+        // replaces it through its own `Surface`/`Card`, which know the colour
+        // they are painting and can look up its matching text colour. This app
+        // draws most of its own grounds — a speech bubble is `colors.surface`,
+        // a transcript chip is a wash, the page itself is a wallpaper — so the
+        // ones composed outside a Material surface inherited Compose's black.
+        // On the light theme that was invisible as a defect: black type on a
+        // white bubble *is* the design. After dark it was black type on a
+        // near-black bubble, which is the one place a colour system has to be
+        // right. Stating it once, here, is what makes a screen that forgets to
+        // name a colour legible in both themes rather than only in one.
+        LocalContentColor provides colors.textPrimary,
+    ) {
+        MaterialTheme(
+            colorScheme = appColorScheme(colors, darkTheme),
+            typography = ContentDirectedTypography,
+            content = content,
+        )
+    }
+}
+
+/**
+ * The muted foreground everything quiet uses.
+ *
+ * Kept as a name because it is now the design system's, not Material's: a screen
+ * asking for "secondary text" gets [AppColors.textSecondary], which is what the
+ * tokens call it.
+ */
 val secondaryTint: Color
-    @Composable get() = MaterialTheme.colorScheme.onSurfaceVariant
+    @Composable get() = AppTheme.colors.textSecondary

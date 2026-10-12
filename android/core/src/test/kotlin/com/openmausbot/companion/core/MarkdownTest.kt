@@ -172,6 +172,118 @@ class MarkdownTest {
         }
     }
 
+    @Test
+    fun basicTableParsing() {
+        val src = """
+            | Name | Age |
+            |---|---:|
+            | Alice | 20 |
+            | Bob | 25 |
+        """.trimIndent()
+
+        val blocks = Markdown.blocks(src)
+        assertEquals(1, blocks.size)
+        val table = blocks.first() as MarkdownBlock.Table
+        assertEquals(listOf("Name", "Age"), table.headers)
+        assertEquals(listOf(TableAlignment.NONE, TableAlignment.RIGHT), table.alignments)
+        assertEquals(listOf(listOf("Alice", "20"), listOf("Bob", "25")), table.rows)
+    }
+
+    @Test
+    fun tableWithProseBeforeAndAfter() {
+        val src = """
+            Here are the projects:
+
+            | Project | Status |
+            |:---|:---:|
+            | Omb | Active |
+
+            Conclusion paragraph.
+        """.trimIndent()
+
+        val blocks = Markdown.blocks(src)
+        assertEquals(3, blocks.size)
+        assertTrue(blocks[0] is MarkdownBlock.Paragraph)
+        assertEquals("Here are the projects:", (blocks[0] as MarkdownBlock.Paragraph).text)
+        assertTrue(blocks[1] is MarkdownBlock.Table)
+        val table = blocks[1] as MarkdownBlock.Table
+        assertEquals(listOf("Project", "Status"), table.headers)
+        assertEquals(listOf(TableAlignment.LEFT, TableAlignment.CENTER), table.alignments)
+        assertEquals(listOf(listOf("Omb", "Active")), table.rows)
+        assertTrue(blocks[2] is MarkdownBlock.Paragraph)
+        assertEquals("Conclusion paragraph.", (blocks[2] as MarkdownBlock.Paragraph).text)
+    }
+
+    @Test
+    fun tableWithLinksAndFormattingInsideCells() {
+        val src = """
+            | Project | Repository | Notes |
+            |---|---|---|
+            | **OpenMausBot** | [GitHub](https://github.com/test) | `v0.1` |
+        """.trimIndent()
+
+        val blocks = Markdown.blocks(src)
+        assertEquals(1, blocks.size)
+        val table = blocks.first() as MarkdownBlock.Table
+        assertEquals(listOf("Project", "Repository", "Notes"), table.headers)
+        assertEquals(listOf(listOf("**OpenMausBot**", "[GitHub](https://github.com/test)", "`v0.1`")), table.rows)
+    }
+
+    @Test
+    fun multipleTablesWithHeadings() {
+        val src = """
+            # Section 1
+            | A | B |
+            |---|---|
+            | 1 | 2 |
+
+            ## Section 2
+            | C | D |
+            |---|---|
+            | 3 | 4 |
+        """.trimIndent()
+
+        val blocks = Markdown.blocks(src)
+        assertEquals(4, blocks.size)
+        assertTrue(blocks[0] is MarkdownBlock.Heading)
+        assertTrue(blocks[1] is MarkdownBlock.Table)
+        assertTrue(blocks[2] is MarkdownBlock.Heading)
+        assertTrue(blocks[3] is MarkdownBlock.Table)
+    }
+
+    @Test
+    fun exactScreenshotPortfolioTableRegression() {
+        val src = """
+            Here is the portfolio overview:
+
+            | Rank | Project | Type / Stack | Main Purpose | Why It Stands Out | Recognition |
+            |---:|---|---|---|---|---|
+            | 1 | OpenMausBot | TypeScript · Open source | AI-agent platform | Most technically ambitious | Best flagship project |
+            | 2 | Flocus V2 | Web application | Pomodoro productivity app | Strong user-facing product | Best user-facing product |
+            | 3 | qa-service | Python · FastAPI · FAISS · SQLite | RAG QA service | Strong backend/AI implementation | Best technical/backend project |
+
+            That summarizes all three projects.
+        """.trimIndent()
+
+        val blocks = Markdown.blocks(src)
+        assertEquals(3, blocks.size)
+        assertEquals(MarkdownBlock.Paragraph("Here is the portfolio overview:"), blocks[0])
+        val table = blocks[1] as MarkdownBlock.Table
+        assertEquals(listOf("Rank", "Project", "Type / Stack", "Main Purpose", "Why It Stands Out", "Recognition"), table.headers)
+        assertEquals(listOf(TableAlignment.RIGHT, TableAlignment.NONE, TableAlignment.NONE, TableAlignment.NONE, TableAlignment.NONE, TableAlignment.NONE), table.alignments)
+        assertEquals(3, table.rows.size)
+        assertEquals(listOf("1", "OpenMausBot", "TypeScript · Open source", "AI-agent platform", "Most technically ambitious", "Best flagship project"), table.rows[0])
+        assertEquals(listOf("2", "Flocus V2", "Web application", "Pomodoro productivity app", "Strong user-facing product", "Best user-facing product"), table.rows[1])
+        assertEquals(listOf("3", "qa-service", "Python · FastAPI · FAISS · SQLite", "RAG QA service", "Strong backend/AI implementation", "Best technical/backend project"), table.rows[2])
+        assertEquals(MarkdownBlock.Paragraph("That summarizes all three projects."), blocks[2])
+
+        // Verify that raw table separator or edge pipes are NOT emitted as ordinary paragraphs
+        blocks.filterIsInstance<MarkdownBlock.Paragraph>().forEach { p ->
+            assertTrue(!p.text.contains("|---"), "Paragraph leaked table separator syntax: ${p.text}")
+            assertTrue(!p.text.contains("| Rank |"), "Paragraph leaked table header syntax: ${p.text}")
+        }
+    }
+
     private fun text(block: MarkdownBlock): String = when (block) {
         is MarkdownBlock.Paragraph -> block.text
         is MarkdownBlock.Bullet -> block.text
@@ -180,5 +292,6 @@ class MarkdownTest {
         is MarkdownBlock.Code -> block.language.orEmpty() + block.text
         is MarkdownBlock.Quote -> block.text
         MarkdownBlock.Rule -> ""
+        is MarkdownBlock.Table -> block.headers.joinToString("") + block.rows.flatten().joinToString("")
     }
 }

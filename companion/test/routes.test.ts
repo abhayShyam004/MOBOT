@@ -194,10 +194,13 @@ describe("what it may not", () => {
   });
 
   // The method is part of the allowance, not decoration: reading the fleet
-  // and deleting a bot are the same path.
+  // and deleting a bot are the same path. Deleting a bot IS allowed now —
+  // the roster's long-press offers it, and the harness route 409s while the
+  // bot is busy — but sibling paths (PATCH, model, overview) stay shut.
   it("allows a path only for the methods it was allowed for", () => {
     expect(allowed("GET", "/api/bots")).toBe(true);
-    expect(allowed("DELETE", "/api/bots/bot_123")).toBe(false);
+    expect(allowed("DELETE", "/api/bots/bot_123")).toBe(true);
+    expect(allowed("DELETE", "/api/bots/bot_123/extra")).toBe(false);
     expect(allowed("POST", "/api/threads/th_1/messages")).toBe(false);
     expect(allowed("GET", "/api/threads/th_1/messages/msg_2/file")).toBe(false);
     expect(allowed("POST", "/api/threads/th_1/messages/msg_2/file/extra")).toBe(false);

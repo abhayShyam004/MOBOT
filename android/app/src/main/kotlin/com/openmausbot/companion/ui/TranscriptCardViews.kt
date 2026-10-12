@@ -55,6 +55,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.R
 import com.openmausbot.companion.core.Reasoning
+import com.openmausbot.companion.core.TableAlignment
 import com.openmausbot.companion.core.TranscriptCard
 import java.util.Locale
 import kotlinx.coroutines.launch
@@ -77,7 +78,7 @@ import kotlinx.coroutines.launch
  */
 
 /** What the clipboard shows a copied card came from. */
-private const val CARD_CLIP_LABEL = "OpenMausMobile card"
+private const val CARD_CLIP_LABEL = "MOBOT card"
 
 /** Added and removed, in the app's own palette rather than Tailwind's. */
 private val DiffAdded = Color(MausPalette.argb("green"))
@@ -408,12 +409,18 @@ private val TABLE_ROW_GAP = 4.dp
 internal fun tableGridMeasurePolicy(
     columnCount: Int,
     minColumnWidth: Dp = TABLE_MIN_COLUMN_WIDTH,
+    maxColumnWidth: Dp? = null,
     columnGap: Dp = TABLE_COLUMN_GAP,
     rowGap: Dp = TABLE_ROW_GAP,
+    alignments: List<TableAlignment> = emptyList(),
 ): MeasurePolicy = MeasurePolicy { measurables, constraints ->
     require(columnCount > 0) { "a table with no columns has nothing to lay out" }
     val rowCount = (measurables.size - columnCount * 2) / columnCount
-    val unbounded = Constraints()
+    val unbounded = if (maxColumnWidth != null) {
+        Constraints(maxWidth = maxColumnWidth.roundToPx())
+    } else {
+        Constraints()
+    }
     val headings = List(columnCount) { measurables[it].measure(unbounded) }
     val cells = List(rowCount * columnCount) {
         measurables[columnCount * 2 + it].measure(unbounded)
@@ -452,10 +459,26 @@ internal fun tableGridMeasurePolicy(
     }
 
     layout(constraints.constrainWidth(width), constraints.constrainHeight(baseline)) {
-        headings.forEachIndexed { column, heading -> heading.placeRelative(x[column], 0) }
+        headings.forEachIndexed { column, heading ->
+            val align = alignments.getOrElse(column) { TableAlignment.NONE }
+            val xOffset = when (align) {
+                TableAlignment.RIGHT -> x[column] + (widths[column] - heading.width)
+                TableAlignment.CENTER -> x[column] + (widths[column] - heading.width) / 2
+                else -> x[column]
+            }
+            heading.placeRelative(xOffset, 0)
+        }
         rules.forEachIndexed { column, rule -> rule.placeRelative(x[column], ruleY) }
         cells.forEachIndexed { index, cell ->
-            cell.placeRelative(x[index % columnCount], y[index / columnCount])
+            val column = index % columnCount
+            val row = index / columnCount
+            val align = alignments.getOrElse(column) { TableAlignment.NONE }
+            val xOffset = when (align) {
+                TableAlignment.RIGHT -> x[column] + (widths[column] - cell.width)
+                TableAlignment.CENTER -> x[column] + (widths[column] - cell.width) / 2
+                else -> x[column]
+            }
+            cell.placeRelative(xOffset, y[row])
         }
     }
 }

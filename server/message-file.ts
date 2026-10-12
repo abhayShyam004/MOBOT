@@ -4,7 +4,7 @@
 // message, and this helper keeps the eventual file handle inside one of them.
 import { constants } from "node:fs";
 import { open, realpath, stat, type FileHandle } from "node:fs/promises";
-import { basename, extname, isAbsolute, posix, relative, resolve, sep, win32 } from "node:path";
+import { basename, dirname, extname, isAbsolute, posix, relative, resolve, sep, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { fromMarkdown } from "mdast-util-from-markdown";
@@ -421,11 +421,33 @@ export async function openMessageFile(href: string, roots: readonly string[]): P
         throw statusError(409, "the linked file changed while it was being opened");
       }
 
+      // The attachment store publishes a committed upload as a name symlink
+      // to a payload sidecar in the same directory (see attachments.ts).
+      // Serving the canonical target's identity would hand back a
+      // ".jpg.payload-…" name with no usable MIME type, so a same-directory
+      // publication presents itself under the identity the message actually
+      // granted. The bytes are the symlink target's either way — the label,
+      // not the content, is what changes — and a symlink across directories
+      // keeps the canonical identity, so the store boundary still decides.
+      // Both directories are canonicalised before the comparison: on Android
+      // the app's data directory is aliased by per-user mounts (/data/user/0
+      // versus /data/data name the same files), so the raw candidate and the
+      // realpath result legitimately differ by prefix while naming one
+      // directory.
+      let grantedDir: string;
+      try {
+        grantedDir = await realpath(dirname(candidate));
+      } catch {
+        grantedDir = "";
+      }
+      const publication = canonicalAfter !== candidate && grantedDir !== "" && dirname(canonicalAfter) === grantedDir
+        ? candidate
+        : canonicalAfter;
       return {
         handle,
         bytes: opened.size,
-        name: basename(canonicalAfter),
-        mime: mimeFor(canonicalAfter),
+        name: basename(publication),
+        mime: mimeFor(publication),
       };
     } catch (error) {
       await handle?.close().catch(() => undefined);

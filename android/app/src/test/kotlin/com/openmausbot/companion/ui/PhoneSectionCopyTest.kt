@@ -40,7 +40,7 @@ class PhoneSectionCopyTest {
 
         // Step one of setup. Upstream: `ios/App/OnboardingViews.swift:137`.
         assertTrue(
-            source.contains("1.  Open OpenMausBot → Settings → Phone"),
+            source.contains("1.  Open MOBOT → Settings → Phone"),
             "the setup steps must name the Phone section",
         )
         // A discovered computer that answered without an address.

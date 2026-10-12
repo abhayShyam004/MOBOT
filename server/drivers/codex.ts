@@ -36,7 +36,8 @@ import { appendNative } from "./native.ts";
 import { commandSummary, toolDetailPreview } from "../tool-summary.ts";
 import { codexDeveloperInstructions, syncCodexInstructions } from "./codex-instructions.ts";
 import type { ApprovalMode } from "../../shared/approval-mode.ts";
-import { CodexDeviceAuthController } from "./codex-device-auth.ts";
+import { CodexNativeAuthController, readCodexSignIn } from "./codex-native-auth.ts";
+import { createCodexNativeRuntime } from "./codex-native-runtime.ts";
 import { codexAccountEmail } from "./codex-identity.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../resume-recovery.ts";
 
@@ -581,11 +582,41 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       }
     };
     await refreshModels();
-    const authentication = new CodexDeviceAuthController({
-      cli: config.cli,
+    // The ChatGPT sign-in runs natively against OpenAI's own device flow and
+    // writes the Codex CLI's own auth.json — the CLI runtime is not needed to
+    // authenticate an account (and on the Android host cannot be installed at
+    // all). The runtime remains a separate capability: see authCapability and
+    // the snapshot below.
+    const authentication = new CodexNativeAuthController({
       environment: childEnv,
       onAuthenticated: refreshModels,
     });
+    // The signed-in account is also a runtime: on a host without the Codex
+    // CLI (the Android harness) turns run through the ChatGPT backend with
+    // the same OAuth tokens, so signing in yields a model provider that can
+    // actually answer rather than a permanently unavailable one.
+    const nativeRuntime = createCodexNativeRuntime({
+      environment: childEnv,
+      models: () => models,
+    });
+    // One CLI probe, shared by create's capability decision and snapshot():
+    // the binary's presence is a host fact that changes at install time, not
+    // per request, so a just-installed CLI is noticed on the next refresh.
+    let probe: { at: number; version: string | null } | null = null;
+    const probeVersion = async (): Promise<string | null> => {
+      if (probe && Date.now() - probe.at < 15_000) return probe.version;
+      const version = await new Promise<string | null>((resolve) => {
+        execCli(config.cli, ["--version"], { timeout: 8000, env: childEnv() }, (err, stdout) =>
+          resolve(err ? null : stdout.trim()),
+        );
+      });
+      probe = { at: Date.now(), version };
+      return version;
+    };
+    /** True when this host cannot run the CLI runtime but has a ChatGPT
+     * account sign-in the native backend runtime can use. */
+    const useNative = async (): Promise<boolean> => !config.managed && !await probeVersion() && readCodexSignIn(childEnv()).method === "login";
+    const nativeMode = await useNative();
     const listeners = new Set<RuntimeEventListener>();
     interface Turn {
       stop: () => Promise<boolean>;
@@ -1527,12 +1558,33 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
 
   const snapshot = async (): Promise<ProviderSnapshot> => {
     const env = childEnv();
-    const version = await new Promise<string | null>((resolve) => {
-      execCli(config.cli, ["--version"], { timeout: 8000, env }, (err, stdout) =>
-        resolve(err ? null : stdout.trim()),
-      );
-    });
-    if (!version) return { state: "unavailable", reason: `\`${config.cli}\` CLI not found` };
+    const version = await probeVersion();
+    if (!version) {
+      // Runtime absent; the account may still be signed in natively, and the
+      // snapshot must say so rather than collapse auth into the runtime state.
+      const signIn = readCodexSignIn(env);
+      const account = signIn.method
+        ? { method: signIn.method, ...(signIn.email ? { email: signIn.email } : {}) }
+        : undefined;
+      // A ChatGPT sign-in runs turns through the native backend runtime below:
+      // the account is the runtime, so the provider is genuinely available
+      // even with no binary to spawn.
+      if (signIn.authenticated && signIn.method === "login") {
+        return {
+          state: "available",
+          authenticated: true,
+          version,
+          ...(account ? { account } : {}),
+          billing: "subscription",
+        };
+      }
+      return {
+        state: "unavailable",
+        reason: `\`${config.cli}\` CLI not found`,
+        ...(signIn.authenticated ? { authenticated: true } : {}),
+        ...(account ? { account } : {}),
+      };
+    }
     if (config.managed) return { state: "available", version, authenticated: Boolean(input.environment.OPENMAUSBOT_COMPANY_API_KEY && input.environment.CODEX_HOME), billing: "metered" };
     const authenticated = await new Promise<boolean>((resolve) => {
       execCli(config.cli, ["login", "status"], { timeout: 8000, env }, (err, stdout, stderr) =>
@@ -1566,26 +1618,45 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     getAuthentication: (flowId) => authentication.get(flowId),
     cancelAuthentication: () => authentication.cancel(),
     signOut: () => authentication.signOut(),
+    // The registry reports the flow shape from the driver: on a host whose
+    // browser can reach it (the Android harness sets OPENMAUSBOT_LOOPBACK_AUTH)
+    // the sign-in is a browser redirect; elsewhere a device code.
+    authMethod: () => authentication.declaredMethod(),
+    // Authentication capability is native (no runtime needed); the CLI gap is
+    // a runtime fact, reported by the snapshot, never by hiding sign-in.
+    authCapability: async () => ({ available: true }),
     snapshot,
+    // The native backend runtime also answers cheap text calls; the CLI-only
+    // path keeps its historical absence of one.
+    ...(nativeMode ? { generateText: nativeRuntime.generateText } : {}),
     adapter: {
       provider: DRIVER_KIND,
-      capabilities: {
-        sessionModelSwitch: "unsupported",
-        queueing: true,
-        computerMcp: true,
-        localComputerMcp: true,
-        composioMcp: true,
-        agentsMcp: true,
-      customMcp: true,
-        phoneMcp: true,
-        browserMcp: true,
-        images: true,
-        nativeImageInput: true,
-        effortLevels: ["low", "medium", "high", "xhigh", "max"],
-        strictResume: true,
-      },
-      sendTurn,
-      interruptTurn: async (threadId) => {
+      // A host without the CLI runs on the native backend runtime: the same
+      // MCP families, approvals and effort, but no in-session steering or
+      // image input, so those are not offered there.
+      capabilities: nativeMode
+        ? { ...nativeRuntime.adapter.capabilities }
+        : {
+          sessionModelSwitch: "unsupported",
+          queueing: true,
+          computerMcp: true,
+          localComputerMcp: true,
+          composioMcp: true,
+          agentsMcp: true,
+          customMcp: true,
+          phoneMcp: true,
+          browserMcp: true,
+          images: true,
+          nativeImageInput: true,
+          effortLevels: ["low", "medium", "high", "xhigh", "max"],
+          strictResume: true,
+        },
+      // Re-decided per turn (the probe is cached for seconds, not forever) so
+      // installing the CLI mid-session upgrades the next turn without a
+      // restart.
+      sendTurn: async (turn) => await useNative() ? nativeRuntime.adapter.sendTurn(turn) : sendTurn(turn),
+      interruptTurn: async (threadId, turnId) => {
+        await nativeRuntime.adapter.interruptTurn(threadId, turnId);
         await active.get(threadId)?.stop();
       },
       steer: async (threadId, text) => {
@@ -1595,20 +1666,29 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       respondToRequest: async (threadId, requestId, decision) => {
         const turn = active.get(threadId);
         const finish = turn?.asks.get(requestId);
-        if (!finish) return "unavailable"; // settled, timed out, or turn gone
-        finish(decision.behavior, decision.message, "user");
-        return decision.behavior === "allow" ? "allowed-once" : decision.behavior === "answer" ? "answered" : "rejected";
+        if (finish) {
+          finish(decision.behavior, decision.message, "user");
+          return decision.behavior === "allow" ? "allowed-once" : decision.behavior === "answer" ? "answered" : "rejected";
+        }
+        // Not a CLI turn: the native backend runtime may be the one asking.
+        return nativeRuntime.adapter.respondToRequest(threadId, requestId, decision);
       },
-      hasSession: (threadId) => active.has(threadId),
+      hasSession: (threadId) => active.has(threadId) || nativeRuntime.adapter.hasSession(threadId),
       stopAll: async () => {
         await Promise.all([...active.values()].map(({ stop }) => stop()));
+        await nativeRuntime.adapter.stopAll();
       },
       onEvent: (listener) => {
         listeners.add(listener);
-        return () => listeners.delete(listener);
+        const offNative = nativeRuntime.adapter.onEvent(listener);
+        return () => {
+          listeners.delete(listener);
+          offNative();
+        };
       },
     },
     dispose: async () => {
+      await nativeRuntime.dispose();
       await authentication.dispose();
       await Promise.all([...active.values()].map(({ stop }) => stop()));
       listeners.clear();

@@ -41,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -89,6 +90,25 @@ fun ComputerScreen(botId: String, onBack: () -> Unit) {
             ?.asImageBitmap()
     }
 
+    // A frameless watch is bounded: after WAIT_GIVE_UP_MS with nothing
+    // delivered the screen says so and offers a retry, instead of spinning
+    // forever on a host that has no capture source for this bot.
+    var gaveUp by remember(botId) { mutableStateOf(false) }
+    var waitStart by remember(botId) { mutableStateOf(0L) }
+    LaunchedEffect(botId, bot.busy, image) {
+        if (image != null || bot.busy != true) {
+            gaveUp = false
+            return@LaunchedEffect
+        }
+        if (waitStart == 0L) {
+            waitStart = System.currentTimeMillis()
+            delay(ComputerPolicy.WAIT_GIVE_UP_MS)
+            if (image == null) gaveUp = true
+        } else {
+            gaveUp = true
+        }
+    }
+
     Box(modifier = Modifier.fillMaxSize().background(Color.Black)) {
         if (image != null) {
             Image(
@@ -99,9 +119,24 @@ fun ComputerScreen(botId: String, onBack: () -> Unit) {
             )
         } else {
             Waiting(
-                headline = ComputerPolicy.waitingHeadline(bot),
-                explanation = ComputerPolicy.IDLE_EXPLANATION.takeIf {
-                    ComputerPolicy.explainsIdle(bot)
+                headline = when {
+                    gaveUp -> ComputerPolicy.GAVE_UP_HEADLINE
+                    bot.busy == true -> ComputerPolicy.waitingHeadline(bot)
+                    else -> "Nothing to show yet"
+                },
+                explanation = when {
+                    gaveUp -> ComputerPolicy.GAVE_UP_EXPLANATION
+                    ComputerPolicy.explainsIdle(bot) -> ComputerPolicy.IDLE_EXPLANATION
+                    else -> null
+                },
+                showSpinner = ComputerPolicy.showsSpinner(bot.busy, gaveUp),
+                onRetry = if (gaveUp) {
+                    {
+                        gaveUp = false
+                        waitStart = 0L
+                    }
+                } else {
+                    null
                 },
             )
         }
@@ -219,17 +254,24 @@ fun ComputerScreen(botId: String, onBack: () -> Unit) {
 }
 
 @Composable
-private fun Waiting(headline: String, explanation: String?) {
+private fun Waiting(
+    headline: String,
+    explanation: String?,
+    showSpinner: Boolean,
+    onRetry: (() -> Unit)?,
+) {
     Column(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        CircularProgressIndicator(
-            modifier = Modifier.size(24.dp),
-            strokeWidth = 2.dp,
-            color = Color.White,
-        )
+        if (showSpinner) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(24.dp),
+                strokeWidth = 2.dp,
+                color = Color.White,
+            )
+        }
         Text(
             text = headline,
             fontSize = 15.sp,
@@ -243,6 +285,9 @@ private fun Waiting(headline: String, explanation: String?) {
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 32.dp),
             )
+        }
+        onRetry?.let {
+            Button(onClick = it) { Text("Retry") }
         }
     }
 }

@@ -22,6 +22,22 @@ object ComputerPolicy {
     const val OPEN_DESKTOP = "Open live cloud desktop"
 
     /**
+     * How long watching a busy bot may produce nothing before the screen says
+     * so instead of spinning. A host without a capture source never delivers a
+     * frame; a bounded wait is the difference between "the picture is slow"
+     * and a spinner that outlives the user's patience.
+     */
+    const val WAIT_GIVE_UP_MS: Long = 12_000L
+
+    const val GAVE_UP_HEADLINE = "No preview available"
+    const val GAVE_UP_EXPLANATION =
+        "The bot is working, but this host does not provide screen captures for live " +
+            "preview. The transcript below the chat is the reliable view of what it is doing."
+
+    /** A spinner means "a frame could still arrive": never drawn after the wait. */
+    fun showsSpinner(busy: Boolean?, gaveUp: Boolean): Boolean = busy == true && !gaveUp
+
+    /**
      * A VPS-backed bot is `"cloud"` too, but the server refuses to mint an
      * interactive desktop for it — no button beats a dead one. An older harness
      * never sends `cloudBackend`, so null keeps the button.

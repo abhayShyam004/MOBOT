@@ -1,9 +1,13 @@
-// Bundled skill catalog. Skills remain isolated resources so adding or
-// disabling one does not require changing a provider driver. A future Skills
-// UI can use the same manifests; today enabled built-ins are selected by their
-// declared trigger terms and mounted capabilities.
+// Bundled and extensible skill subsystem for MOBOT.
+//
+// Skills remain isolated resources so adding or disabling one does not
+// require changing provider drivers. A task activates skills on demand
+// based on declared trigger terms, requested capabilities, and explicit
+// context. Instructions are injected cleanly per turn without prompt bloat.
+
 import { existsSync, readFileSync, readdirSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export interface SkillManifest {
   id: string;
@@ -13,12 +17,29 @@ export interface SkillManifest {
   defaultEnabled: boolean;
   triggerTerms: string[];
   requiredCapabilities: string[];
+  source?: string;
+  license?: string;
+  revision?: string;
+  dependencies?: string[];
+  supportedStacks?: string[];
+  triggers?: string[];
+  capabilities?: string[];
+  enabled?: boolean;
 }
 
 export interface BundledSkill {
   manifest: SkillManifest;
   instructions: string;
   directory: string;
+}
+
+export interface SkillContext {
+  text: string;
+  capabilities?: Iterable<string>;
+  requestedSkills?: string[];
+  excludedSkills?: string[];
+  botId?: string;
+  threadId?: string;
 }
 
 const SAFE_ID = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
@@ -33,27 +54,40 @@ export function parseSkillManifest(value: unknown, directory: string): SkillMani
   if (!value || typeof value !== "object") throw new Error(`${directory}/manifest.json is invalid`);
   const raw = value as Record<string, unknown>;
   const id = typeof raw.id === "string" ? raw.id : "";
-  const triggerTerms = strings(raw.triggerTerms);
-  const requiredCapabilities = strings(raw.requiredCapabilities);
+  const triggerTerms = strings(raw.triggerTerms) ?? strings(raw.triggers);
+  const requiredCapabilities =
+    raw.requiredCapabilities !== undefined
+      ? strings(raw.requiredCapabilities)
+      : raw.capabilities !== undefined
+        ? strings(raw.capabilities)
+        : [];
   if (!SAFE_ID.test(id) || id !== basename(directory)) throw new Error(`${directory}/manifest.json has an invalid id`);
   if (typeof raw.name !== "string" || !raw.name.trim()) throw new Error(`${directory}/manifest.json has no name`);
   if (typeof raw.version !== "string" || !/^\d+\.\d+\.\d+$/.test(raw.version)) throw new Error(`${directory}/manifest.json has an invalid version`);
   if (typeof raw.description !== "string" || !raw.description.trim()) throw new Error(`${directory}/manifest.json has no description`);
-  if (typeof raw.defaultEnabled !== "boolean") throw new Error(`${directory}/manifest.json has no defaultEnabled flag`);
+  if (typeof raw.defaultEnabled !== "boolean" && typeof raw.enabled !== "boolean") throw new Error(`${directory}/manifest.json has no defaultEnabled flag`);
   if (!triggerTerms?.length) throw new Error(`${directory}/manifest.json has no trigger terms`);
   if (!requiredCapabilities) throw new Error(`${directory}/manifest.json has invalid capabilities`);
+
+  const defaultEnabled = typeof raw.defaultEnabled === "boolean" ? raw.defaultEnabled : Boolean(raw.enabled);
+
   return {
     id,
     name: raw.name.trim(),
     version: raw.version,
     description: raw.description.trim(),
-    defaultEnabled: raw.defaultEnabled,
+    defaultEnabled,
     triggerTerms,
     requiredCapabilities,
+    source: typeof raw.source === "string" ? raw.source : undefined,
+    license: typeof raw.license === "string" ? raw.license : undefined,
+    revision: typeof raw.revision === "string" ? raw.revision : undefined,
+    dependencies: strings(raw.dependencies) ?? undefined,
+    supportedStacks: strings(raw.supportedStacks) ?? undefined,
   };
 }
 
-function loadSkillDirectory(directory: string): BundledSkill | null {
+export function loadSkillDirectory(directory: string): BundledSkill | null {
   const manifestPath = join(directory, "manifest.json");
   const skillPath = join(directory, "SKILL.md");
   if (!existsSync(manifestPath) || !existsSync(skillPath)) return null;
@@ -63,7 +97,22 @@ function loadSkillDirectory(directory: string): BundledSkill | null {
   return { manifest, instructions, directory };
 }
 
-export function loadBundledSkills(root = process.env.OMB_SKILLS_DIR || join(process.cwd(), "skills")): BundledSkill[] {
+export function defaultSkillsRoot(): string {
+  if (process.env.OMB_SKILLS_DIR && existsSync(process.env.OMB_SKILLS_DIR)) {
+    return process.env.OMB_SKILLS_DIR;
+  }
+  const moduleDir = typeof import.meta?.url === "string" ? dirname(fileURLToPath(import.meta.url)) : "";
+  const candidates = [
+    join(process.cwd(), "skills"),
+    ...(moduleDir ? [join(moduleDir, "skills"), join(moduleDir, "..", "skills")] : []),
+  ];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return join(process.cwd(), "skills");
+}
+
+export function loadBundledSkills(root = defaultSkillsRoot()): BundledSkill[] {
   if (!existsSync(root)) return [];
   const skills: BundledSkill[] = [];
   for (const name of readdirSync(root).sort()) {
@@ -115,17 +164,27 @@ export function skillInstructionsFor(
   return renderSkillInstructions(selectBundledSkills(text, capabilities, skills), options);
 }
 
+export function matchesTrigger(haystack: string, term: string): boolean {
+  const lowerHaystack = haystack.toLowerCase();
+  const lowerTerm = term.toLowerCase().trim();
+  if (!lowerTerm) return false;
+  if (/^[a-z0-9_-]{1,3}$/i.test(lowerTerm)) {
+    const regex = new RegExp(`\\b${lowerTerm.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "i");
+    return regex.test(lowerHaystack);
+  }
+  return lowerHaystack.includes(lowerTerm);
+}
+
 export function selectBundledSkills(
   text: string,
   capabilities: Iterable<string>,
   skills: readonly BundledSkill[],
 ): BundledSkill[] {
-  const haystack = text.toLowerCase();
   const available = new Set(capabilities);
   return skills.filter(({ manifest }) =>
     manifest.defaultEnabled &&
     manifest.requiredCapabilities.every((capability) => available.has(capability)) &&
-    manifest.triggerTerms.some((term) => haystack.includes(term.toLowerCase())),
+    manifest.triggerTerms.some((term) => matchesTrigger(text, term)),
   );
 }
 
@@ -137,4 +196,105 @@ export function renderSkillInstructions(
   return selected.map(({ manifest, instructions, directory }) =>
     `\n\n<openmaus-skill id=${JSON.stringify(manifest.id)} version=${JSON.stringify(manifest.version)}${includeRoot ? ` root=${JSON.stringify(directory)}` : ""}>\n${instructions}\n</openmaus-skill>`,
   ).join("");
+}
+
+// --------------------------------------------------
+// Generic Extensible Skill Subsystem Architecture
+// --------------------------------------------------
+
+export class SkillRegistry {
+  private skills = new Map<string, BundledSkill>();
+
+  constructor(initialSkills?: readonly BundledSkill[]) {
+    if (initialSkills) {
+      for (const skill of initialSkills) {
+        this.register(skill);
+      }
+    }
+  }
+
+  register(skill: BundledSkill): void {
+    this.skills.set(skill.manifest.id, skill);
+  }
+
+  unregister(id: string): boolean {
+    return this.skills.delete(id);
+  }
+
+  get(id: string): BundledSkill | undefined {
+    return this.skills.get(id);
+  }
+
+  has(id: string): boolean {
+    return this.skills.has(id);
+  }
+
+  list(): BundledSkill[] {
+    return Array.from(this.skills.values());
+  }
+
+  clear(): void {
+    this.skills.clear();
+  }
+}
+
+export class SkillLoader {
+  private bundledRoot: string;
+
+  constructor(bundledRoot = defaultSkillsRoot()) {
+    this.bundledRoot = bundledRoot;
+  }
+
+  loadBundled(): BundledSkill[] {
+    return loadBundledSkills(this.bundledRoot);
+  }
+
+  loadUser(userRoot: string): BundledSkill[] {
+    return loadUserSkills(userRoot);
+  }
+
+  loadAll(userRoot?: string): BundledSkill[] {
+    const bundled = this.loadBundled();
+    if (!userRoot) return bundled;
+    return mergeSkills(bundled, this.loadUser(userRoot));
+  }
+}
+
+export class SkillResolver {
+  private registry: SkillRegistry;
+
+  constructor(registry: SkillRegistry) {
+    this.registry = registry;
+  }
+
+  resolve(context: SkillContext): BundledSkill[] {
+    const skills = this.registry.list();
+    const available = new Set(context.capabilities ?? []);
+    const requested = new Set(context.requestedSkills ?? []);
+    const excluded = new Set(context.excludedSkills ?? []);
+
+    return skills.filter(({ manifest }) => {
+      if (excluded.has(manifest.id)) return false;
+      if (requested.has(manifest.id)) return true;
+      if (!manifest.defaultEnabled) return false;
+      if (!manifest.requiredCapabilities.every((cap) => available.has(cap))) return false;
+      return manifest.triggerTerms.some((term) => matchesTrigger(context.text, term));
+    });
+  }
+}
+
+export class SkillActivation {
+  static render(skills: readonly BundledSkill[], options?: { includeRoot?: boolean }): string {
+    return renderSkillInstructions(skills, options);
+  }
+
+  static activate(
+    resolver: SkillResolver,
+    context: SkillContext,
+    options?: { includeRoot?: boolean },
+  ): { activeSkills: BundledSkill[]; instructions: string } {
+    const activeSkills = resolver.resolve(context);
+    const instructions = SkillActivation.render(activeSkills, options);
+    return { activeSkills, instructions };
+  }
 }

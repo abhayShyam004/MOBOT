@@ -46,13 +46,33 @@ object NotificationIntents {
     fun contentIntent(
         packageContext: android.content.Context,
         notification: NotificationFrame,
+    ): Intent = contentIntent(
+        packageContext,
+        notification.botId,
+        notification.threadId,
+        notification.kind,
+    )
+
+    /**
+     * The same Intent from the three ids alone.
+     *
+     * A notification is posted from a [ConversationNotice] and not from a frame —
+     * the frame that opened the conversation may be several updates behind the
+     * text now in the shade — so the destination has to be addressable without
+     * one.
+     */
+    fun contentIntent(
+        packageContext: android.content.Context,
+        botId: String,
+        threadId: String,
+        kind: String,
     ): Intent = Intent(packageContext, MainActivity::class.java).apply {
         action = ACTION_OPEN
-        data = contentUri(notification.botId, notification.threadId)
+        data = contentUri(botId, threadId)
         flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
-        putExtra(LocalNotificationPoster.EXTRA_THREAD_ID, notification.threadId)
-        putExtra(LocalNotificationPoster.EXTRA_BOT_ID, notification.botId)
-        putExtra(LocalNotificationPoster.EXTRA_KIND, notification.kind)
+        putExtra(LocalNotificationPoster.EXTRA_THREAD_ID, threadId)
+        putExtra(LocalNotificationPoster.EXTRA_BOT_ID, botId)
+        putExtra(LocalNotificationPoster.EXTRA_KIND, kind)
     }
 
     /** Android's URI encoder is available throughout this app's API range. */

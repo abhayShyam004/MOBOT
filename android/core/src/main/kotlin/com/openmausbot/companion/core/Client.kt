@@ -27,6 +27,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.Dns
@@ -50,7 +51,7 @@ data class PairingOutcome(
 /** No automatically permitted route identified itself and completed the logical pairing. */
 class PairingRouteError(val attemptedRoutes: List<String>) : IOException(
     "Couldn't reach this computer through any available route " +
-        "(${attemptedRoutes.joinToString()}). Keep Phone access turned on in OpenMausBot, then try again.",
+        "(${attemptedRoutes.joinToString()}). Keep Phone access turned on in MOBOT, then try again.",
 )
 
 internal const val SCOPED_IPV6_HTTP_HOST = "scoped-ipv6.openmausbot.invalid"
@@ -219,12 +220,425 @@ class CompanionClient(
         makeRequest("GET", "/api/instances"),
     ).instances
 
+    suspend fun capabilities(): List<CapabilityConfig> = send<CapabilitiesResponse>(
+        makeRequest("GET", "/api/capabilities"),
+    ).capabilities
+
+    suspend fun deviceCapabilities(): List<DeviceCapabilityItem> = send<DeviceCapabilitiesListResponse>(
+        makeRequest("GET", "/api/device-capabilities"),
+    ).capabilities
+
+    suspend fun appProjects(): List<AppProjectRecord> = send<AppProjectListResponse>(
+        makeRequest("GET", "/api/projects"),
+    ).projects
+
+    suspend fun appProject(id: String): AppProjectDetailResponse = send(
+        makeRequest("GET", "/api/projects/$id"),
+    )
+
+    suspend fun deleteAppProject(id: String): JsonObject = send(
+        makeRequest("DELETE", "/api/projects/$id"),
+    )
+
+    suspend fun smartRecap(since: String? = null, botId: String? = null): SmartRecapResponse = send(
+        makeRequest(
+            "GET",
+            "/api/delight/recap",
+            listOfNotNull(
+                since?.let { "since" to it },
+                botId?.let { "botId" to it },
+            ),
+        ),
+    )
+
+    suspend fun dailyBriefing(): DailyBriefingResponse = send(
+        makeRequest("GET", "/api/delight/briefing"),
+    )
+
+    suspend fun updateDailyBriefingConfig(config: JsonObject): JsonObject = send(
+        makeRequest("POST", "/api/delight/briefing/config", body = config),
+    )
+
+    suspend fun deploymentAccounts(): List<DeploymentAccountInfo> = send<DeploymentAccountsResponse>(
+        makeRequest("GET", "/api/deploy/accounts"),
+    ).accounts
+
+    suspend fun connectDeploymentAccount(provider: String, token: String): JsonObject = send(
+        makeRequest(
+            "POST",
+            "/api/deploy/accounts/$provider",
+            body = buildJsonObject { put("token", token) },
+        ),
+    )
+
+    suspend fun disconnectDeploymentAccount(provider: String): JsonObject = send(
+        makeRequest("DELETE", "/api/deploy/accounts/$provider"),
+    )
+
+    suspend fun testDeploymentAccount(provider: String, token: String? = null): JsonObject = send(
+        makeRequest(
+            "POST",
+            "/api/deploy/accounts/$provider/test",
+            body = if (token != null) buildJsonObject { put("token", token) } else null,
+        ),
+    )
+
+    suspend fun deployProject(id: String, provider: String = "vercel", target: String = "preview"): DeployProjectResponse = send(
+        makeRequest(
+            "POST",
+            "/api/projects/$id/deploy",
+            body = buildJsonObject {
+                put("provider", provider)
+                put("target", target)
+            },
+        ),
+    )
+
+    suspend fun projectDeployment(id: String): DeployProjectResponse = send(
+        makeRequest("GET", "/api/projects/$id/deploy"),
+    )
+
+    suspend fun cancelProjectDeployment(id: String): JsonObject = send(
+        makeRequest("POST", "/api/projects/$id/deploy/cancel"),
+    )
+
+    suspend fun redeployProject(id: String): DeployProjectResponse = send(
+        makeRequest("POST", "/api/projects/$id/deploy/redeploy"),
+    )
+
+    suspend fun startAppProjectPreview(id: String, port: Int? = null): AppProjectPreviewActionResponse = send(
+        makeRequest(
+            "POST",
+            "/api/projects/$id/preview/start",
+            body = if (port != null) buildJsonObject { put("port", port) } else null,
+        ),
+    )
+
+    suspend fun stopAppProjectPreview(id: String): AppProjectPreviewActionResponse = send(
+        makeRequest("POST", "/api/projects/$id/preview/stop"),
+    )
+
+    suspend fun updateCapability(id: String, enabled: Boolean, provider: String, model: String, apiKey: String? = null): CapabilityConfig = send(
+        makeRequest(
+            "POST",
+            "/api/capabilities/$id",
+            body = buildJsonObject {
+                put("enabled", enabled)
+                put("provider", provider)
+                put("model", model)
+                if (apiKey != null) put("apiKey", apiKey)
+            },
+        ),
+    )
+
     /** Missing capability data fails closed: image prompts must be readable by the selected model. */
     suspend fun imageCapableInstanceIds(): Set<String> = instances()
         .filter { it.capabilities?.images == true }
         .mapTo(mutableSetOf(), Instance::instanceId)
 
     suspend fun config(): ConfigStatus = send(makeRequest("GET", "/api/config"))
+
+    /**
+     * The owner's standing "never stop for approvals" grant. The host answers
+     * with full access for every bot turn while this is on — no permission
+     * card is opened. The setting lives on the computer, so it survives a
+     * phone reinstall; the toggle is the only way to change it.
+     */
+    suspend fun setNeverAskPermissions(enabled: Boolean): ConfigStatus = send(
+        makeRequest(
+            "PATCH",
+            "/api/config",
+            body = buildJsonObject { put("neverAskPermissions", enabled) },
+        ),
+    )
+
+    /**
+     * Save the workspace OpenAI-compatible endpoint and key. The key is
+     * write-only: every read reports configured-or-not, never the secret.
+     * A null key leaves the stored one untouched; an empty string clears it.
+     */
+    suspend fun updateOpenAICompat(url: String, key: String?): ConfigStatus = send(
+        makeRequest(
+            "PUT",
+            "/api/config",
+            body = buildJsonObject {
+                put(
+                    "openaiCompat",
+                    buildJsonObject {
+                        put("url", url)
+                        key?.let { put("key", it) }
+                    },
+                )
+            },
+        ),
+    )
+
+    /**
+     * A bot's memory: the always-loaded MEMORY.md index plus its topic and
+     * log files. Plain markdown the bot and the person both write; each bot
+     * keeps its own, so no other bot sees it.
+     */
+    suspend fun memoryOverview(botId: String): MemoryOverview =
+        send(makeRequest("GET", "/api/bots/${segment(botId)}/memory"))
+
+    /** One memory document (MEMORY.md by default), with the hash a save must
+     * present so a note the bot wrote in between is never clobbered. */
+    suspend fun memoryFile(botId: String, path: String = "MEMORY.md"): MemoryDoc =
+        send(
+            makeRequest(
+                "GET",
+                "/api/bots/${segment(botId)}/memory/file",
+                query = listOf("path" to path),
+            ),
+        )
+
+    /** Save one memory document. `expectedHash` is what the reader returned. */
+    suspend fun saveMemoryFile(botId: String, path: String, text: String, expectedHash: String): MemoryDoc =
+        send(
+            makeRequest(
+                "PUT",
+                "/api/bots/${segment(botId)}/memory/file",
+                body = buildJsonObject {
+                    put("path", path)
+                    put("text", text)
+                    put("expectedHash", expectedHash)
+                },
+            ),
+        )
+
+    /** Delete a topic or log file. MEMORY.md itself is not deletable. */
+    suspend fun deleteMemoryFile(botId: String, path: String) {
+        sendUnit(
+            makeRequest(
+                "DELETE",
+                "/api/bots/${segment(botId)}/memory/file",
+                query = listOf("path" to path),
+            ),
+        )
+    }
+
+    /**
+     * Re-discover the OpenAI-compatible endpoint's model list. Returns the
+     * refreshed instance catalog, the same shape every model picker reads.
+     */
+    suspend fun refreshOpenAICompatModels(): List<Instance> = send<InstanceList>(
+        makeRequest("POST", "/api/instances/openaiCompat/refresh-models"),
+    ).instances
+
+    /**
+     * Set or replace one provider's credential on the phone's own host. The
+     * key is write-only: a null leaves the stored one untouched. Works for
+     * every apikey engine (`xai`, `anthropic`, `openaiCompat`, …) and for a
+     * custom API provider added from the phone, whose own entry is patched
+     * rather than the workspace-wide OpenAI-compatible settings.
+     */
+    suspend fun updateProviderKey(instanceId: String, url: String?, key: String?): ConfigStatus {
+        if (instanceId == "opencodeGo") {
+            return send(
+                makeRequest(
+                    "PUT",
+                    "/api/config",
+                    body = buildJsonObject {
+                        put("opencodeGo", buildJsonObject {
+                            key?.takeIf(String::isNotBlank)?.let { put("apiKey", it) }
+                        })
+                    },
+                ),
+            )
+        }
+        if (instanceId !in setOf("anthropic", "xai", "openaiCompat", "openai-compatible")) {
+            // A custom provider's own row: PATCH its config, never the shared
+            // openaiCompat section, which belongs to the built-in entry.
+            return send(makeRequest("PATCH", "/api/instances/${segment(instanceId)}", body = providerKeyPatch(url, key)))
+        }
+        return send(
+            makeRequest(
+                "PUT",
+                "/api/config",
+                body = buildJsonObject {
+                    when (instanceId) {
+                        "anthropic" -> put("anthropic", providerKeyPatch(url, key))
+                        "xai" -> put("xai", providerKeyPatch(url, key))
+                        else -> put("openaiCompat", providerKeyPatch(url, key))
+                    }
+                },
+            ),
+        )
+    }
+
+    /**
+     * Add a named custom API provider (an OpenAI- or Anthropic-compatible
+     * endpoint with its own key). The server allocates the id and returns the
+     * refreshed fleet, so the new name shows up everywhere instances do.
+     */
+    suspend fun createCustomProvider(
+        driver: String,
+        name: String,
+        url: String,
+        key: String,
+        model: String?,
+        icon: ProviderIconDto? = null,
+    ): List<Instance> = send<InstanceList>(
+        makeRequest(
+            "POST",
+            "/api/instances",
+            body = buildJsonObject {
+                put("driver", driver)
+                put("name", name)
+                put("url", url)
+                put("key", key)
+                model?.takeIf(String::isNotBlank)?.let { put("model", it) }
+                icon?.let { ic ->
+                    put("icon", buildJsonObject {
+                        put("kind", ic.kind)
+                        ic.preset?.let { put("preset", it) }
+                        ic.dataUrl?.let { put("dataUrl", it) }
+                    })
+                }
+            },
+        ),
+    ).instances
+
+    /** Remove a custom API provider added from here. */
+    suspend fun deleteCustomProvider(instanceId: String): List<Instance> = send<InstanceList>(
+        makeRequest("DELETE", "/api/instances/${segment(instanceId)}", body = JsonObject(emptyMap())),
+    ).instances
+
+    private fun providerKeyPatch(url: String?, key: String?): JsonObject = buildJsonObject {
+        url?.takeIf(String::isNotBlank)?.let { put("url", it) }
+        key?.takeIf(String::isNotBlank)?.let { put("key", it) }
+    }
+
+    /** Re-read one engine's model list from its provider. */
+    suspend fun refreshInstanceModels(instanceId: String): List<Instance> = send<InstanceList>(
+        makeRequest("POST", "/api/instances/${segment(instanceId)}/refresh-models", body = JsonObject(emptyMap())),
+    ).instances
+
+    /** Set the workspace default model for new chats. */
+    suspend fun setDefaultModelSelection(selection: ModelSelection): ConfigStatus = send(
+        makeRequest(
+            "PATCH",
+            "/api/config",
+            body = buildJsonObject {
+                put(
+                    "defaultModelSelection",
+                    CompanionJson.encodeToJsonElement(ModelSelection.serializer(), selection).jsonObject,
+                )
+            },
+        ),
+    )
+
+    /** Start an account sign-in flow for one engine. The harness wraps the
+     * flow in an `auth` envelope (server/index.ts: `json(res, 200, { auth })`),
+     * the same shape its own web UI reads. */
+    suspend fun startInstanceAuth(instanceId: String): InstanceAuthStart = send<AuthStartResponse>(
+        makeRequest("POST", "/api/instances/${segment(instanceId)}/auth/start", body = JsonObject(emptyMap())),
+    ).auth
+
+    /** Poll a started sign-in flow. */
+    suspend fun instanceAuthStatus(instanceId: String, flowId: String): InstanceAuthStatus = send<AuthStatusResponse>(
+        makeRequest("GET", "/api/instances/${segment(instanceId)}/auth/status?flowId=${segment(flowId)}"),
+    ).auth
+
+    /** Complete a paste-code / browser-callback sign-in. */
+    suspend fun completeInstanceAuth(instanceId: String, flowId: String, code: String) {
+        sendUnit(
+            makeRequest(
+                "POST",
+                "/api/instances/${segment(instanceId)}/auth/complete",
+                body = buildJsonObject {
+                    put("flowId", flowId)
+                    put("code", code)
+                },
+            ),
+        )
+    }
+
+    /** Remove the stored sign-in for one engine, so another account can connect. */
+    suspend fun signOutInstance(instanceId: String): List<Instance> = send<InstanceList>(
+        makeRequest("POST", "/api/instances/${segment(instanceId)}/auth/sign-out", body = JsonObject(emptyMap())),
+    ).instances
+
+    // ── MCP servers (custom tools the harness mounts per turn) ──
+
+    suspend fun mcpServers(): List<McpServerListing> = send<McpServerList>(
+        makeRequest("GET", "/api/mcp/servers"),
+    ).servers
+
+    /** Secrets are write-only: listings carry envKeys/headerKeys, never values. */
+    suspend fun addMcpServer(
+        name: String,
+        config: McpServerConfig,
+    ): List<McpServerListing> = send<McpServerList>(
+        makeRequest("POST", "/api/mcp/servers", body = mcpConfigBody(name, config)),
+    ).servers
+
+    suspend fun updateMcpServer(
+        name: String,
+        config: McpServerConfig,
+    ): List<McpServerListing> = send<McpServerList>(
+        makeRequest("PUT", "/api/mcp/servers/${segment(name)}", body = mcpConfigBody(null, config)),
+    ).servers
+
+    suspend fun setMcpServerEnabled(name: String, enabled: Boolean): List<McpServerListing> =
+        send<McpServerList>(
+            makeRequest(
+                "PATCH",
+                "/api/mcp/servers/${segment(name)}",
+                body = buildJsonObject { put("enabled", enabled) },
+            ),
+        ).servers
+
+    suspend fun deleteMcpServer(name: String): List<McpServerListing> = send<McpServerList>(
+        makeRequest("DELETE", "/api/mcp/servers/${segment(name)}"),
+    ).servers
+
+    /** The bounded connection test the desktop "Test" button runs. */
+    suspend fun testMcpServer(name: String): McpProbeResult = send(
+        makeRequest("POST", "/api/mcp/servers/${segment(name)}/test"),
+    )
+
+    /** Paste a `{"mcpServers": {…}}` block from any other agent tool. */
+    suspend fun importMcpServers(json: String): List<McpServerListing> = send<McpServerList>(
+        makeRequest(
+            "POST",
+            "/api/mcp/servers/import",
+            body = buildJsonObject { put("json", json) },
+        ),
+    ).servers
+
+    /**
+     * One MCP config mutation body. Secrets are values the API never returns:
+     * `env` for a command server, `headers` for a URL one — sent on add/edit,
+     * absent (names only) in every listing.
+     */
+    private fun mcpConfigBody(
+        name: String?,
+        config: McpServerConfig,
+    ): JsonObject = buildJsonObject {
+        name?.let { put("name", it) }
+        put("enabled", config.enabled)
+        fun secrets(map: Map<String, McpSecret>): JsonObject = JsonObject(
+            map.mapValues { (_, secret) ->
+                when (secret) {
+                    is McpSecret.Value -> JsonPrimitive(secret.value)
+                    McpSecret.KeepStored -> JsonPrimitive(true)
+                }
+            },
+        )
+        when (config) {
+            is McpServerConfig.Command -> {
+                put("command", config.command)
+                if (config.args.isNotEmpty()) put("args", JsonArray(config.args.map { JsonPrimitive(it) }))
+                if (config.env.isNotEmpty()) put("env", secrets(config.env))
+            }
+            is McpServerConfig.Url -> {
+                put("type", config.type)
+                put("url", config.url)
+                if (config.headers.isNotEmpty()) put("headers", secrets(config.headers))
+            }
+        }
+    }
 
     /**
      * The engine is a setting, not a secret, so it rides the ordinary config
@@ -247,6 +661,31 @@ class CompanionClient(
 
     suspend fun allConnectorStatuses(): ConnectorStatuses =
         send(makeRequest("GET", "/api/connectors/connected"))
+
+    /**
+     * Save the host's connected-apps project key. Write-only in both
+     * directions that matter: the field is sent once, and GET /api/config
+     * only ever answers configured-or-not. An empty string clears the key.
+     */
+    suspend fun updateComposioApiKey(key: String, surface: String? = null): ConfigStatus = send(
+        makeRequest(
+            "PUT",
+            "/api/config",
+            body = buildJsonObject {
+                put("composio", buildJsonObject {
+                    put("apiKey", key)
+                    surface?.let { put("surface", it) }
+                })
+            },
+        ),
+    )
+
+    /** Disconnect the account the harness currently uses for [slug]. Every
+     * account is removed provider-side by the harness, not here. */
+    suspend fun removeConnectorService(slug: String) {
+        if (!validConnectorSlug(slug)) throw APIError.BadUrl
+        sendUnit(makeRequest("DELETE", "/api/connectors/$slug"))
+    }
 
     suspend fun image(threadId: String, messageId: String): ByteArray {
         val raw = perform(makeRequest("GET", "/api/threads/${segment(threadId)}/messages/${segment(messageId)}/image"))
@@ -288,6 +727,19 @@ class CompanionClient(
     }
 
     suspend fun avatar(path: String): ByteArray {
+        if (!validAvatarPath(path)) throw APIError.BadUrl
+        val raw = perform(makeRequest("GET", path))
+        check(raw)
+        return raw.data
+    }
+
+    /**
+     * Fetch an app-owned image a bot attached to its reply (a picture it
+     * downloaded from the internet). Same path gate as an avatar: only
+     * `/api/attachments/<uuid>.<image-ext>` is reachable, never an arbitrary
+     * file on the computer.
+     */
+    suspend fun attachmentImage(path: String): ByteArray {
         if (!validAvatarPath(path)) throw APIError.BadUrl
         val raw = perform(makeRequest("GET", path))
         check(raw)
@@ -343,6 +795,24 @@ class CompanionClient(
         return send<BotResponse>(
             makeRequest("PATCH", path, body = body),
         ).bot
+    }
+
+    /**
+     * Create a bot with its opening configuration in one atomic call — name,
+     * model selection and the persona line. The server validates the whole
+     * body before creating anything, so a rejected field leaves no
+     * half-configured bot behind.
+     */
+    suspend fun createBot(name: String?, selection: ModelSelection?, title: String?, description: String?): Bot {
+        val body = buildJsonObject {
+            name?.takeIf(String::isNotBlank)?.let { put("name", it) }
+            title?.takeIf(String::isNotBlank)?.let { put("title", it) }
+            description?.takeIf(String::isNotBlank)?.let { put("description", it) }
+            selection?.let {
+                put("modelSelection", CompanionJson.encodeToJsonElement(ModelSelection.serializer(), it).jsonObject)
+            }
+        }
+        return send<BotResponse>(makeRequest("POST", "/api/bots", body = body)).bot
     }
 
     /** Upload a shared image as raw bytes; [uploadId] makes an interrupted retry idempotent. */
@@ -501,7 +971,7 @@ class CompanionClient(
             if (error.serverMessage?.contains(ALREADY_DRAINED, ignoreCase = true) == true) return
             throw APIError.Status(
                 404,
-                "This computer is too old to take back a queued message. Update OpenMausBot on it.",
+                "This computer is too old to take back a queued message. Update MOBOT on it.",
             )
         }
     }
@@ -552,7 +1022,60 @@ class CompanionClient(
             "/api/connectors/$slug/authorize",
             body = body,
         ))
-        val url = runCatching { URI(response.url) }.getOrNull()
+        return validatedAuthUrl(response.url)
+    }
+
+    /** Per-bot gate on the workspace's connected apps. This is the broad bot
+     * PATCH the desktop's own bot settings use — the strict profile route
+     * deliberately refuses the field as privilege-bearing. */
+    suspend fun updateBotComposio(botId: String, enabled: Boolean): Bot = send<BotResponse>(
+        makeRequest(
+            "PATCH",
+            "/api/bots/${segment(botId)}",
+            body = buildJsonObject { put("composio", enabled) },
+        ),
+    ).bot
+
+    // ── in-chat connection cards ─────────────────────────────────────────
+    // Bound to the bot and the exact message that requested the connection;
+    // the server validates both before doing anything.
+
+    suspend fun authorizeConnectorCard(botId: String, messageId: String, threadId: String): URI {
+        val response = send<ConnectorAuthorizationResponse>(makeRequest(
+            "POST",
+            "/api/bots/${segment(botId)}/connector-cards/${segment(messageId)}/authorize",
+            body = jsonBody("threadId" to threadId),
+        ))
+        return validatedAuthUrl(response.url)
+    }
+
+    suspend fun connectorCardStatus(botId: String, messageId: String, threadId: String): ConnectorStatus =
+        send(makeRequest(
+            "GET",
+            "/api/bots/${segment(botId)}/connector-cards/${segment(messageId)}/status",
+            query = listOf("threadId" to threadId),
+        ))
+
+    suspend fun resumeConnectorCard(botId: String, messageId: String, threadId: String) {
+        sendUnit(makeRequest(
+            "POST",
+            "/api/bots/${segment(botId)}/connector-cards/${segment(messageId)}/resume",
+            body = jsonBody("threadId" to threadId),
+        ))
+    }
+
+    suspend fun dismissConnectorCard(botId: String, messageId: String, threadId: String) {
+        sendUnit(makeRequest(
+            "POST",
+            "/api/bots/${segment(botId)}/connector-cards/${segment(messageId)}/dismiss",
+            body = jsonBody("threadId" to threadId),
+        ))
+    }
+
+    /** The provider's sign-in page must be a real HTTPS page; anything else
+     * is a malformed answer, not a link worth opening. */
+    private fun validatedAuthUrl(value: String): URI {
+        val url = runCatching { URI(value) }.getOrNull()
         if (url == null || !url.scheme.equals("https", ignoreCase = true) || url.host.isNullOrEmpty()) {
             throw APIError.BadUrl
         }
@@ -614,6 +1137,69 @@ class CompanionClient(
     suspend fun deleteTask(botId: String, threadId: String): Bot = send<BotResponse>(
         makeRequest("DELETE", "/api/bots/${segment(botId)}/tasks/${segment(threadId)}"),
     ).bot
+
+    /** Removes the whole agent — threads, transcripts and workspace. The
+     * harness answers 409 with an actionable message while anything of the
+     * bot's is still running. */
+    suspend fun deleteBot(botId: String) {
+        sendUnit(makeRequest("DELETE", "/api/bots/${segment(botId)}"))
+    }
+
+    /**
+     * Settle a room's first-run setup: the bulletin and who answers by
+     * default are the two things the desktop's setup step asks for, and a
+     * room that still owes them refuses its first message. Every client
+     * offers the same step, the phone included.
+     */
+    suspend fun finishRoomSetup(groupId: String, bulletin: String, everyone: Boolean): Room = send<RoomResponse>(
+        makeRequest(
+            "PATCH",
+            "/api/groups/${segment(groupId)}/setup",
+            body = buildJsonObject {
+                put("action", "complete")
+                put("bulletin", bulletin)
+                putJsonObject("defaultResponder") { put("kind", if (everyone) "everyone" else "mentions") }
+            },
+        ),
+    ).group
+
+    /**
+     * Change a room's own settings after setup: name, bulletin, members and
+     * who answers by default. Only the fields passed are sent, so the host
+     * keeps everything else. The header opens this, never a model picker.
+     */
+    suspend fun updateRoomSettings(
+        groupId: String,
+        name: String? = null,
+        bulletin: String? = null,
+        memberIds: List<String>? = null,
+        responder: GroupResponder? = null,
+    ): Room = send<RoomResponse>(
+        makeRequest(
+            "PATCH",
+            "/api/groups/${segment(groupId)}",
+            body = buildJsonObject {
+                name?.let { put("name", it) }
+                bulletin?.let { put("bulletin", it) }
+                memberIds?.let { ids -> put("memberIds", JsonArray(ids.map { JsonPrimitive(it) })) }
+                responder?.let { value ->
+                    putJsonObject("defaultResponder") {
+                        put("kind", value.kind)
+                        value.botId?.let { put("botId", it) }
+                    }
+                }
+            },
+        ),
+    ).group
+
+    /**
+     * Delete the whole room — every task and its transcript — not just one
+     * thread. The harness refuses (409) while the room is mid-turn or saving
+     * a credential; that message is surfaced verbatim.
+     */
+    suspend fun deleteRoom(groupId: String) {
+        sendUnit(makeRequest("DELETE", "/api/groups/${segment(groupId)}"))
+    }
 
     suspend fun createRoomTask(groupId: String, title: String? = null): Room {
         val body = buildJsonObject {
@@ -815,7 +1401,16 @@ class CompanionClient(
         }
         private val AVATAR_MIME_TYPES = setOf("image/png", "image/jpeg", "image/gif", "image/webp")
         private val JSON_MEDIA_TYPE = "application/json".toMediaType()
-        private val EMPTY_BODY: RequestBody = ByteArray(0).toRequestBody(null)
+
+        /**
+         * Zero-length JSON body. Body-less POSTs on this API must still
+         * declare application/json — the server's mutation routes gate on
+         * Content-Type before reading the body, and an untyped empty body
+         * arrives headerless, which reads as a malformed request (the 415
+         * that surfaced as "content-type must be application/json" when
+         * saving a provider in Settings).
+         */
+        private val EMPTY_BODY: RequestBody = ByteArray(0).toRequestBody(JSON_MEDIA_TYPE)
         private const val HEX_DIGITS = "0123456789ABCDEF"
 
         /**

@@ -156,6 +156,14 @@ export const OpenAICompatDriver: ProviderDriver<OpenAICompatConfig> = {
       missingKeyError: `no API key — set ${config.apiKeyEnv} or add it to the instance config`,
       unavailableReason: `no API key — set ${config.apiKeyEnv} or add it to the instance config`,
       timeoutMs: idleTimeoutMs(),
+      // The runtime only retries at all once a scale is supplied, and this
+      // endpoint was the one driver left without: Grok passed it, MiniMax and
+      // this driver did not, so a single 429 from a router — the ordinary way
+      // a shared or free model says "not this second" — ended the turn as
+      // `upstream HTTP 429: {"error":…}` in the conversation, with no wait
+      // and no second try. Rate limiting is not an exotic failure for a
+      // gateway onto someone else's quota; it is the expected one.
+      retryScale: Number(process.env.FAKE_OPENAI_COMPAT_RETRY_SCALE ?? "1"),
       reasoning: true,
       billing: "metered",
       includeUsageInCompleted: true,

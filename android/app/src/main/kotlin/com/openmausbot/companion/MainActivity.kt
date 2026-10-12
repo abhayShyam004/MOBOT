@@ -20,7 +20,9 @@ import com.openmausbot.companion.dictation.SpeechDictation
 import com.openmausbot.companion.lifecycle.AlwaysOnConnectionService
 import com.openmausbot.companion.notifications.notificationTarget
 import com.openmausbot.companion.browser.CloudDesktopBrowser
+import com.openmausbot.companion.host.BrowserDriverServer
 import com.openmausbot.companion.sharing.TranscriptSharing
+import com.openmausbot.companion.storage.AppearancePreferences
 import com.openmausbot.companion.storage.ChatPreferences
 import android.os.PowerManager
 import com.openmausbot.companion.ui.CameraPermissionController
@@ -173,9 +175,11 @@ class MainActivity : ComponentActivity() {
             discovery = app.discovery,
             onboarding = app.onboarding,
             chatPreferences = ChatPreferences(this),
+            appearance = AppearancePreferences(this),
             camera = camera,
             mic = mic,
             notifications = notifications,
+            notificationVisibility = app.notifications,
             avatars = app.avatars,
             voicePreview = app.voicePreview,
             dictation = dictation,
@@ -217,6 +221,13 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        // While the browser driver holds live bot sessions, this activity shows
+        // over a locked keyguard (alarm/fulL-screen-intent semantics — public
+        // API, no permission, does NOT unlock the device). A WebView attached to
+        // a stopped activity never traverses on several OEM builds, which is how
+        // a bot's page load silently stalls behind a dozed screen. With no live
+        // sessions the flag clears and normal lock behavior returns.
+        setShowWhenLocked(BrowserDriverServer.hasLiveSessions())
         // Permissions can change while the app is in the background — a grant
         // made in Settings should take effect on return, not on next launch.
         app.permissions.refresh()
@@ -243,6 +254,11 @@ class MainActivity : ComponentActivity() {
      */
     private fun handleIntent(intent: Intent?, fresh: Boolean = false) {
         if (intent == null) return
+
+        // Deterministic hardware verification hook
+        intent.getStringExtra("test_simulate_error")?.let { errorType ->
+            app.session.triggerSimulatedError(errorType)
+        }
 
         // The extras deliberately stay on the Intent: PendingThreadNavigation
         // remembers what has already been opened, so a rotation before the

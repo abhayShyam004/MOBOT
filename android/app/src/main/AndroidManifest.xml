@@ -15,6 +15,8 @@
     -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!--
@@ -80,7 +82,7 @@
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
-        android:theme="@style/Theme.OpenMausMobile">
+        android:theme="@style/Theme.MOBOT">
 
         <!--
           persistNever: nothing about this Activity, its launching Intent
@@ -208,6 +210,28 @@
             android:exported="false"
             android:foregroundServiceType="connectedDevice"
             android:stopWithTask="false" />
+
+        <!--
+          The embedded MOBOT host. This phone IS the computer: the agent
+          runtime, its transcripts (SQLite) and its provider calls are local
+          work, so dataSync is the honest foregroundServiceType. Unlike
+          connectedDevice there is no paired machine to stay attached to; the
+          host serves the app itself over loopback. On Android 15+ dataSync
+          foreground services face a ~6h/24h runtime cap — when the budget is
+          exhausted, HarnessService falls back to specialUse at promotion time
+          (never crashing the process) so a long-lived local host is not
+          murdered mid-turn; the scheduler work is covered separately in a
+          later phase.
+        -->
+        <service
+            android:name=".host.HarnessService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync|specialUse"
+            android:stopWithTask="false">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Embedded MOBOT agent host: local loopback HTTP server, transcripts, and bot runtime." />
+        </service>
 
         <!--
           Restarts AlwaysOnConnectionService after a reboot, only when the user

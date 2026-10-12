@@ -134,16 +134,22 @@ class RosterLayoutTest {
     }
 
     @Test
-    fun `section headings uppercase by the invariant rules`() {
+    fun `section headings read as written, in any locale`() {
         val original = Locale.getDefault()
         try {
             Locale.setDefault(Locale.forLanguageTag("tr-TR"))
-            // `text.uppercased()` in Swift is canonical, not localised: a Turkish
-            // reader must still see BOTS and CHATS, not a dotted capital I.
-            assertEquals("BOTS", RosterLayout.sectionLabel("Bots"))
-            assertEquals("GROUPS", RosterLayout.sectionLabel("Groups"))
-            assertEquals("CHATS", RosterLayout.sectionLabel("Chats"))
-            assertEquals("MESSAGES", RosterLayout.sectionLabel("Messages"))
+            // The headings used to be uppercased with Swift's canonical
+            // `uppercased()`, and the test above this one asserted the Turkish
+            // dotted-I hazard could not reach them. The design language that
+            // replaced it labels a stretch of content the way a person would say
+            // it, so the rule is now the simpler one: the label arrives as it was
+            // written, and there is no case mapping left to get wrong. Set in
+            // `tr-TR` because that is the locale that would expose a regression if
+            // one were reintroduced.
+            assertEquals("Bots", RosterLayout.sectionLabel("Bots"))
+            assertEquals("Groups", RosterLayout.sectionLabel("Groups"))
+            assertEquals("Chats", RosterLayout.sectionLabel("Chats"))
+            assertEquals("Messages", RosterLayout.sectionLabel("Messages"))
         } finally {
             Locale.setDefault(original)
         }

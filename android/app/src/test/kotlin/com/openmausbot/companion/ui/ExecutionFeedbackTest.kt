@@ -394,7 +394,9 @@ class CompanionHapticsTest {
     fun `every command in the HUD has an answer`() {
         val cues = SlashCommands.ALL.map { CompanionHaptics.forCommand(it.effect) }
         assertEquals(
-            listOf(HapticCue.SELECT, HapticCue.SELECT, null, null, null),
+            // computer, tasks → select; diff, retry, steer send → none; stop and
+            // new thread act (not send) → select.
+            listOf(HapticCue.SELECT, HapticCue.SELECT, null, null, null, HapticCue.SELECT, HapticCue.SELECT),
             cues,
         )
     }

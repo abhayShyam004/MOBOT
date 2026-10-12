@@ -186,6 +186,20 @@ export const AntigravityDriver: ProviderDriver<AcpConfig> = {
             },
           }
         : {}),
+      // The sign-in runs this engine's own runtime; where that runtime cannot
+      // exist (the Android host), the account flow does not exist with it and
+      // the card must say so instead of collecting a spawn failure.
+      authCapability: async () => {
+        try {
+          await resolveAntigravityRuntime(input.config.cli, { ...process.env, ...input.environment, PATH: augmentedPath() });
+          return { available: true };
+        } catch {
+          return {
+            available: false,
+            reason: "Antigravity's account sign-in runs its own runtime, which this host cannot provide. Connect an API provider instead.",
+          };
+        }
+      },
       startAuthentication: async () => {
         const { runtime, profile } = await runtimeAndProfile();
         return auth.start(runtime, profile);

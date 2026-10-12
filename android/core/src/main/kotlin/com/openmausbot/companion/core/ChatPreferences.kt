@@ -9,12 +9,19 @@ import kotlinx.serialization.encodeToString
 enum class ActivityDetail(val wireValue: String, val label: String, val caption: String) {
     FULL("full", "Full", "Every step a bot takes."),
     REDUCED("reduced", "Reduced", "Steps fold into one line. Failures always show."),
-    HIDDEN("hidden", "Hidden", "No activity, only messages."),
+    HIDDEN("hidden", "Hidden", "No activity. A failed turn still explains itself."),
     ;
 
     companion object {
+        /**
+         * The quiet default. Normal agent work should read as a conversation, not
+         * a tool-call log, so a phone with no stored choice — and a wire value it
+         * does not recognise — folds successful steps into one line and keeps
+         * failures visible. Full remains one tap away in Settings; an explicitly
+         * stored choice (including Full) always wins over the default.
+         */
         fun fromWire(value: String?): ActivityDetail =
-            entries.firstOrNull { it.wireValue == value } ?: FULL
+            entries.firstOrNull { it.wireValue == value } ?: REDUCED
     }
 }
 
@@ -115,18 +122,34 @@ internal fun previewText(message: Message): String = when (message.kind) {
             else -> card.title
         }
     }
-    Message.Kind.ACTIVITY -> message.tool?.name.orEmpty()
+    // A failure row previews as its headline rather than the chip's own
+    // "error: …" phrasing: the roster row is about the bot, not about a log.
+    Message.Kind.ACTIVITY -> message.failure?.title ?: message.tool?.name.orEmpty()
     Message.Kind.SCREEN -> "Screenshot"
+    // The request itself is the preview: what the bot is blocked on.
+    Message.Kind.CONNECTOR -> message.connector?.let { "Connect ${it.label}" }.orEmpty()
+    Message.Kind.STRUCTURED -> message.text.takeIf { !it.isNullOrBlank() }
+        ?: message.structured?.components?.firstOrNull()?.title
+        ?: "Structured response"
     Message.Kind.UNKNOWN -> message.text.orEmpty()
 }
 
 /**
  * Fold a transcript to the selected activity detail. Failed steps are never folded in reduced
- * mode; hidden mode intentionally removes all activity, including failures.
+ * mode, and a failure that explains a whole turn is never folded in any mode — including hidden.
+ *
+ * The exception is deliberate, and it is narrower than "errors always show": a plain failed
+ * tool receipt still obeys the setting, because a reader who turned activity off does not want a
+ * bad Read in the middle of their conversation. A message carrying [Message.failure] is a different
+ * thing — the turn produced no answer at all, and the sentence explaining why is the only account
+ * of what happened to the message they sent. Hiding it would leave their own words unanswered with
+ * nothing to point at.
  */
 fun transcriptRows(messages: List<Message>, detail: ActivityDetail): List<TranscriptRow> = when (detail) {
     ActivityDetail.FULL -> messages.map(TranscriptRow::Single)
-    ActivityDetail.HIDDEN -> messages.filterNot { it.kind == Message.Kind.ACTIVITY }.map(TranscriptRow::Single)
+    ActivityDetail.HIDDEN -> messages
+        .filterNot { it.kind == Message.Kind.ACTIVITY && it.failure == null }
+        .map(TranscriptRow::Single)
     ActivityDetail.REDUCED -> buildList {
         val run = mutableListOf<Message>()
         fun flush() {
@@ -142,7 +165,7 @@ fun transcriptRows(messages: List<Message>, detail: ActivityDetail): List<Transc
             if (message.kind != Message.Kind.ACTIVITY) {
                 flush()
                 add(TranscriptRow.Single(message))
-            } else if (message.tool?.ok == false) {
+            } else if (message.tool?.ok == false || message.failure != null) {
                 flush()
                 add(TranscriptRow.Single(message))
             } else {

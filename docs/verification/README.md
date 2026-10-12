@@ -123,6 +123,56 @@ search and draft isolation using disposable simulators and an offline fixture.
 The [Android thread checks](android-threads.md) cover the Compose thread tree,
 local selection, draft isolation and installable preview APK.
 
+The [Android terminal checks](android-terminal.md) cover the persistent PTY, the
+Compose surface, the loopback driver the harness calls, and the native
+`npx`/`npm` launcher, on a real arm64 phone.
+
+The [Android WebRTC and uTP checks](android-webrtc-utp.md) cover the two
+NDK-built native addons the torlnk chain needs, how the app places them, and
+what the libraries themselves report — including the same measurements with the
+addons hidden, so "available" is a measurement and not a constant.
+
+The [Android ask-user checks](android-ask-user.md) cover the voluntary structured
+question on a real arm64 phone: a typed `ask_user` card, all four question types,
+the answer resuming the same task exactly once, persistence across backgrounding
+and rotation, and a card that outlives its process saying so when answered.
+
+The [real-model ask judgement record](android-ask-user-real.md) covers the other
+half of that feature: with the person's own configured providers, no mock and no
+cues, two real models voluntarily called `ask_user` when a decision changed the
+work and left it alone when it did not — including the run where one of them
+asked the person for content it should have written itself.
+
+The [provider rate-limit checks](provider-rate-limits.md) cover which drivers
+wait a 429 out and how long: the shared retry policy, the two drivers that had
+no retry at all and now pass the scale, and what the phone's transcript showed
+before and after.
+
+The [Android provider-failure card checks](provider-failure-cards.md) cover what a
+phone says when a turn's retries are exhausted: a classified card naming the
+engine, the model and the status, with the actions that failure actually
+suggests — and the provider's own JSON body in the log, on no screen and in no
+transcript field.
+
+The [Android appearance checks](android-appearance.md) cover the app speaking as
+MOBOT, a provider shown by its real logo rather than a letter, the roster's
+opening line, a multi-line memory editor, bot settings naming the provider and
+the model it is on, and a background chosen once in Settings.
+
+The [Android notification checks](android-notifications.md) cover the shade on a
+real arm64 phone: a conversation being read gets nothing at all, a burst behind
+the launcher is one notification that updates in place (`10 new messages`), two
+bots hold two rows, rotation leaves them untouched, opening a chat withdraws its
+row, and a restarted process updates the same id — plus why the run has to hold
+the app's own always-on connection open to mean anything, and how Android's
+auto-group summary is told apart from a notification the app posted.
+
+The [Android structured response checks](android-structured-responses.md) cover
+the 16 native Jetpack Compose components (cards, dashboards, diagrams, tables,
+checklists, forms, artifacts, maps, calendars, and dev views) parsed from the
+`mobot/v1` protocol, sanitization, accessibility fallbacks, and physical verification
+in both dark and light themes on Samsung Galaxy hardware.
+
 The [right-to-left fixture](bidi.md) checks per-block direction in bot replies
 and per-line direction in sent turns, with code pinned left-to-right.
 

@@ -1,7 +1,11 @@
 package com.openmausbot.companion.ui
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,6 +16,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -31,13 +36,13 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -52,13 +57,17 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -68,13 +77,16 @@ import com.openmausbot.companion.avatar.AvatarImageRules
 import com.openmausbot.companion.avatar.PreparedAvatar
 import com.openmausbot.companion.core.AvatarCrop
 import com.openmausbot.companion.core.Bot
+import com.openmausbot.companion.core.BotMcpSelection
 import com.openmausbot.companion.core.forTask
 import com.openmausbot.companion.core.BotProfilePatch
 import com.openmausbot.companion.core.ConfigStatus
 import com.openmausbot.companion.core.Instance
+import com.openmausbot.companion.core.McpServerListing
 import com.openmausbot.companion.core.ModelSelection
 import com.openmausbot.companion.core.Voice
 import com.openmausbot.companion.core.VoiceProvider
+import com.openmausbot.companion.core.isConnectedAppsAllowed
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -92,7 +104,19 @@ import kotlinx.coroutines.withContext
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: (String) -> Unit) {
+internal fun AgentProfileSheet(
+    bot: Bot,
+    onDismiss: () -> Unit,
+    onOpenOverview: (String) -> Unit,
+    onOpenMemory: (String) -> Unit = {},
+    /**
+     * Open straight onto the model list. A failed turn's "Change model" lands
+     * here, where the same Apply button and the same busy/loaded gates already
+     * live — a second, thinner picker inside the chat would be a second place
+     * for a model change to happen, and the two would drift.
+     */
+    openModelPicker: Boolean = false,
+) {
     val environment = LocalCompanion.current
     val session = environment.session
     val state by session.state.collectAsState()
@@ -127,6 +151,10 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
     var selectedModelId by rememberSaveable { mutableStateOf(opened.modelSelection.model) }
     // "" is the engine default; the picker has no null row.
     var selectedEffort by rememberSaveable { mutableStateOf(opened.modelSelection.effort.orEmpty()) }
+    // The selector is a page of this sheet rather than a sheet of its own.
+    var selectingModel by rememberSaveable { mutableStateOf(openModelPicker) }
+    // …and so is the provider picker: the two halves of one decision.
+    var selectingProvider by rememberSaveable { mutableStateOf(false) }
     val selectedInstance = instances.firstOrNull { it.instanceId == selectedInstanceId }
     val modelDraft = ModelSelection(selectedInstanceId, selectedModelId, selectedEffort.ifEmpty { null })
 
@@ -195,6 +223,42 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
 
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
+        if (selectingProvider) {
+            ProviderSelectorPage(
+                botName = current.name,
+                instances = instances,
+                selectedInstanceId = selectedInstanceId,
+                onPick = { id ->
+                    instances.firstOrNull { it.instanceId == id }
+                        ?.let { ModelRules.defaultsFor(it, savedModel) }
+                        ?.let { showModel(it) }
+                    selectingProvider = false
+                },
+                onBack = { selectingProvider = false },
+                modifier = Modifier.padding(bottom = 24.dp),
+            )
+            return@ModalBottomSheet
+        }
+        if (selectingModel) {
+            // The choosing page replaces the settings body, and its own back
+            // returns to it: one step out, not two sheets to unwind.
+            ModelSelectorPage(
+                botName = current.name,
+                instances = instances,
+                selection = modelDraft,
+                // Picking returns to the settings page rather than closing the
+                // sheet: the model is applied there, in one visible place, and a
+                // choice that silently took effect would leave the row above it
+                // saying something else.
+                onPick = {
+                    showModel(it)
+                    selectingModel = false
+                },
+                onBack = { selectingModel = false },
+                modifier = Modifier.padding(bottom = 24.dp),
+            )
+            return@ModalBottomSheet
+        }
         Box {
             Column(
                 modifier = Modifier
@@ -223,61 +287,34 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
                         icon = Icons.Filled.Info,
                         onClick = { onOpenOverview(bot.id) },
                     )
+                    ActionRow(
+                        text = "Memory",
+                        icon = Icons.Filled.Info,
+                        onClick = { onOpenMemory(bot.id) },
+                    )
                 }
 
                 FormSection(header = "Model", footer = ModelRules.FOOTER) {
                     val instanceChoices = ModelRules.instanceChoices(instances, savedModel)
-                    if (!modelsLoaded) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth().heightIn(min = MIN_TOUCH_TARGET),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(ModelRules.LOADING, fontSize = 15.sp, modifier = Modifier.weight(1f))
-                            CircularProgressIndicator(modifier = Modifier.size(20.dp))
-                        }
-                    } else if (instanceChoices.isEmpty()) {
+                    // Which engine runs the model, and which model it runs, are
+                    // two facts rather than two fields: each row states what the
+                    // bot is on and carries the small caption that opens its own
+                    // page. A closed dropdown listed every engine on the host
+                    // before anyone had asked to see any of them.
+                    ProviderSummaryRow(
+                        instance = selectedInstance,
+                        loaded = modelsLoaded,
+                        onClick = { selectingProvider = true },
+                    )
+                    ModelSummaryRow(
+                        instance = selectedInstance,
+                        selection = modelDraft,
+                        loaded = modelsLoaded,
+                        onClick = { selectingModel = true },
+                    )
+                    if (modelsLoaded && instanceChoices.isEmpty()) {
                         IconNote(text = ModelRules.NONE_AVAILABLE, icon = Icons.Filled.Warning)
-                    } else {
-                        val providerRows = buildList {
-                            if (ModelRules.providerMissing(instances, selectedInstanceId)) {
-                                add(
-                                    VoiceChoice(
-                                        id = selectedInstanceId,
-                                        label = ModelRules.CURRENT_PROVIDER_UNAVAILABLE,
-                                        detail = null,
-                                        enabled = false,
-                                    ),
-                                )
-                            }
-                            instanceChoices.forEach {
-                                add(
-                                    VoiceChoice(
-                                        id = it.instanceId,
-                                        label = ModelRules.instanceLabel(it),
-                                        detail = null,
-                                        enabled = it.snapshot.isAvailable,
-                                    ),
-                                )
-                            }
-                        }
-                        ChoicePicker(
-                            label = "Provider",
-                            choices = providerRows,
-                            selected = selectedInstanceId,
-                            onSelect = { id ->
-                                val instance = instances.firstOrNull { it.instanceId == id }
-                                if (instance != null) showModel(ModelRules.defaultsFor(instance, savedModel))
-                            },
-                        )
-                        ChoicePicker(
-                            label = "Model",
-                            choices = ModelRules.modelChoices(selectedInstance, selectedModelId).map {
-                                VoiceChoice(id = it.id, label = it.label, detail = null, enabled = true)
-                            },
-                            selected = selectedModelId,
-                            enabled = selectedInstance?.snapshot?.isAvailable == true,
-                            onSelect = { selectedModelId = it },
-                        )
+                    } else if (modelsLoaded) {
                         val effortLevels = ModelRules.effortLevels(selectedInstance)
                         if (effortLevels.isNotEmpty()) {
                             ChoicePicker(
@@ -330,7 +367,8 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
                         contentAlignment = Alignment.Center,
                     ) {
                         BotAvatar(
-                            bot = current,
+                            // The chosen colour previews live, before saving.
+                            bot = current.copy(color = form.color),
                             size = 112.dp,
                             state = MausState.HAPPY,
                             contentDescription = "${current.name} avatar",
@@ -351,6 +389,43 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
                             ) {
                                 Text(ProfileRules.cropLabel(option))
                             }
+                        }
+                    }
+
+                    Text(
+                        text = "Colour",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        MausPalette.names.sorted().forEach { name ->
+                            val selected = form.color == name
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(MausPalette.argb(name)))
+                                    .border(
+                                        width = if (selected) 3.dp else 1.dp,
+                                        color = if (selected) {
+                                            MaterialTheme.colorScheme.onSurface
+                                        } else {
+                                            MaterialTheme.colorScheme.outlineVariant
+                                        },
+                                        shape = CircleShape,
+                                    )
+                                    .selectable(
+                                        selected = selected,
+                                        role = Role.RadioButton,
+                                        onClick = { form = form.copy(color = name) },
+                                    )
+                                    .semantics { contentDescription = "Colour $name" },
+                            )
                         }
                     }
 
@@ -396,10 +471,11 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
                     header = "Generate an avatar",
                     footer = ProfileRules.generateFooter(config),
                 ) {
-                    OutlinedTextField(
+                    AppTextField(
                         value = prompt,
                         onValueChange = { prompt = it },
-                        label = { Text("Art direction") },
+                        label = "Art direction",
+                        singleLine = false,
                         minLines = 2,
                         maxLines = 5,
                         modifier = Modifier.fillMaxWidth(),
@@ -444,28 +520,169 @@ internal fun AgentProfileSheet(bot: Bot, onDismiss: () -> Unit, onOpenOverview: 
                     )
                 }
 
+                // Which of the host's custom MCP servers this bot sees. The
+                // same three states the server defines: every enabled server,
+                // none, or an explicit list. Disabled catalog entries stay
+                // unmounted either way. The catalog comes from Session's
+                // StateFlow, so a change made in Settings re-renders here.
+                FormSection(header = "Tools", footer = MCP_TOOLS_FOOTER) {
+                    val mcpCatalog by session.mcp.servers.collectAsState()
+                    val enabledServers = mcpCatalog.orEmpty().filter { it.enabled }
+                    when {
+                        mcpCatalog == null -> {
+                            IconNote("MCP servers could not be loaded.", Icons.Filled.Warning)
+                            ActionRow(
+                                text = "Retry",
+                                icon = Icons.Filled.Check,
+                                enabled = !busy,
+                                onClick = { scope.launch { session.mcp.refresh() } },
+                            )
+                        }
+                        enabledServers.isEmpty() -> IconNote(
+                            "No MCP servers are enabled. Add and enable them in Settings → MCP servers.",
+                            Icons.Filled.Info,
+                        )
+                        else -> {
+                            val selection = current.mcpServers
+                            val all = selection == null
+                            enabledServers.forEach { server ->
+                                val checked = if (all) true else selection.contains(server.name)
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(min = MIN_TOUCH_TARGET)
+                                        .toggleable(
+                                            value = checked,
+                                            role = Role.Checkbox,
+                                            onValueChange = { on ->
+                                                scope.launch {
+                                                    busy = true
+                                                    try {
+                                                        val target = liveBot().forTask(opened.threadId) ?: return@launch
+                                                        // A checkbox on an "all" bot starts the explicit
+                                                        // list from the currently enabled servers.
+                                                        val names = current.mcpServers ?: enabledServers.map { it.name }
+                                                        val next = if (on) names + server.name else names - server.name
+                                                        session.updateProfile(
+                                                            if (next.size == enabledServers.size && enabledServers.all { next.contains(it.name) }) {
+                                                                BotMcpSelection.all()
+                                                            } else {
+                                                                BotMcpSelection.only(next.distinct())
+                                                            },
+                                                            target,
+                                                        )
+                                                    } finally {
+                                                        busy = false
+                                                    }
+                                                }
+                                            },
+                                        ),
+                                ) {
+                                    Checkbox(checked = checked, onCheckedChange = null)
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(server.name, fontSize = 15.sp)
+                                        val detail = if (server.isRemote) {
+                                            "${server.type ?: "http"} server"
+                                        } else {
+                                            (listOfNotNull(server.command) + server.args.orEmpty())
+                                                .joinToString(" ")
+                                        }
+                                        Text(
+                                            text = detail,
+                                            fontSize = 12.sp,
+                                            color = secondaryTint,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                }
+                            }
+                            // The only unambiguous bulk action: collapse an explicit
+                            // list back to "follow all". Unchecking every box one by
+                            // one reaches the none state honestly; no misleading
+                            // "limit to selected" button on an all-checked list.
+                            if (!all) {
+                                ActionRow(
+                                    text = "Use all enabled servers",
+                                    icon = Icons.Filled.Check,
+                                    enabled = !busy,
+                                    onClick = {
+                                        scope.launch {
+                                            busy = true
+                                            try {
+                                                val target = liveBot().forTask(opened.threadId) ?: return@launch
+                                                session.updateProfile(BotMcpSelection.all(), target)
+                                            } finally {
+                                                busy = false
+                                            }
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // The workspace's connected apps, granted or withheld per bot.
+                // The server's gate is `bot.composio !== false`, so absent and
+                // true mean the same thing; only an explicit false closes the
+                // door. Turning the grant ON needs the host to be configured —
+                // turning it OFF never does.
+                FormSection(
+                    header = "Connected apps",
+                    footer = "Connected apps are set up once, for the whole host, in Settings → Connected apps.",
+                ) {
+                    val configured = config?.composio?.configured == true
+                    val allowed = current.isConnectedAppsAllowed()
+                    SwitchRow(
+                        label = "Allow this bot to use connected apps",
+                        checked = allowed,
+                        enabled = !busy && (allowed || configured),
+                        onCheckedChange = { next ->
+                            scope.launch {
+                                busy = true
+                                try {
+                                    session.setBotConnectedApps(current.id, next)
+                                } finally {
+                                    busy = false
+                                }
+                            }
+                        },
+                    )
+                    Text(
+                        text = when {
+                            !configured -> "Connect apps in Settings before giving this bot access."
+                            allowed -> "Let this bot use your connected Gmail, Calendar, Slack, and other apps."
+                            else -> "Keep your connected apps unavailable to this bot."
+                        },
+                        fontSize = 12.sp,
+                        color = secondaryTint,
+                    )
+                }
+
                 FormSection(header = "Identity") {
-                    OutlinedTextField(
+                    AppTextField(
                         value = form.name,
                         onValueChange = { form = form.copy(name = it) },
-                        label = { Text("Name") },
+                        label = "Name",
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(
                             capitalization = KeyboardCapitalization.Words,
                         ),
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
+                    AppTextField(
                         value = form.title,
                         onValueChange = { form = form.copy(title = it) },
-                        label = { Text("Title") },
+                        label = "Title",
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    OutlinedTextField(
+                    AppTextField(
                         value = form.description,
                         onValueChange = { form = form.copy(description = it) },
-                        label = { Text("What this agent does") },
+                        label = "What this agent does",
+                        singleLine = false,
                         minLines = 3,
                         maxLines = 8,
                         modifier = Modifier.fillMaxWidth(),
@@ -610,27 +827,50 @@ internal fun ChoicePicker(
         onExpandedChange = { if (enabled) expanded = it },
         modifier = Modifier.fillMaxWidth(),
     ) {
-        OutlinedTextField(
+        AppTextField(
             value = selectedLabel,
             onValueChange = {},
             readOnly = true,
             enabled = enabled,
-            label = { Text(label) },
-            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            label = label,
+            trailing = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
             modifier = Modifier
                 .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
                 .fillMaxWidth(),
         )
-        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+        ExposedDropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            // The app's own curve and surface rather than Material's menu default:
+            // a menu that is a rectangle with a stock elevation reads as a widget
+            // borrowed from another product, and this one is the same shape as every
+            // other raised surface in the app.
+            shape = AppRadii.smallShape,
+            containerColor = AppTheme.colors.surface,
+        ) {
             choices.forEach { choice ->
                 DropdownMenuItem(
                     text = {
-                        Column {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                             Text(choice.label)
                             choice.detail?.let {
                                 Text(it, fontSize = 13.sp, color = secondaryTint)
                             }
                         }
+                    },
+                    // Which one you are on, said in the menu as well as in the field
+                    // above it: an open menu covers the field it came from.
+                    trailingIcon = if (choice.id == selected) {
+                        {
+                            Icon(
+                                imageVector = Icons.Filled.Check,
+                                contentDescription = null,
+                                tint = AppTheme.colors.accent,
+                                modifier = Modifier.size(AppSizes.glyph),
+                            )
+                        }
+                    } else {
+                        null
                     },
                     enabled = choice.enabled,
                     onClick = {
@@ -697,7 +937,7 @@ internal fun FormSection(
     ) {
         header?.let {
             Text(
-                text = it.uppercase(),
+                text = it,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold,
                 color = secondaryTint,
@@ -821,6 +1061,7 @@ private val ProfileFormSaver = listSaver<ProfileForm, Any>(
             it.description,
             it.notifications,
             it.crop.name,
+            it.color,
             it.voice,
             it.speakReplies,
         )
@@ -832,8 +1073,9 @@ private val ProfileFormSaver = listSaver<ProfileForm, Any>(
             description = it[2] as String,
             notifications = it[3] as Boolean,
             crop = AvatarCrop.valueOf(it[4] as String),
-            voice = it[5] as String,
-            speakReplies = it[6] as Boolean,
+            color = it[5] as String,
+            voice = it[6] as String,
+            speakReplies = it[7] as Boolean,
         )
     },
 )

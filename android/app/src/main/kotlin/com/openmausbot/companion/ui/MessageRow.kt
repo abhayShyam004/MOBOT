@@ -1,6 +1,7 @@
 package com.openmausbot.companion.ui
 
 import android.content.ClipData
+import android.graphics.BitmapFactory
 import android.util.Base64
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -43,7 +45,6 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -63,6 +64,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
@@ -79,9 +81,13 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.core.Chat
 import com.openmausbot.companion.core.AttachedMessageContent
+import com.openmausbot.companion.core.CitationRules
+import com.openmausbot.companion.core.NativeCitation
 import com.openmausbot.companion.core.DisplayedMessageAttachment
 import com.openmausbot.companion.core.DownloadedFile
+import com.openmausbot.companion.core.ErrorClassifier
 import com.openmausbot.companion.core.Message
+import com.openmausbot.companion.core.MessageAttachment
 import com.openmausbot.companion.core.OptionCard
 import com.openmausbot.companion.core.ThreadRef
 import com.openmausbot.companion.core.ToolActivity
@@ -94,7 +100,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /** What the clipboard shows this came from. */
-private const val MESSAGE_CLIP_LABEL = "OpenMausMobile message"
+private const val MESSAGE_CLIP_LABEL = "MOBOT message"
 
 /**
  * One row of the transcript — the port of `MessageRow` in `ios/App/ChatView.swift`.
@@ -114,6 +120,14 @@ fun MessageRow(
     openAttachment: ((DisplayedMessageAttachment, Message, DownloadedFile?) -> Unit)? = null,
     /** Where an "Opened thread" chip goes; null leaves the chip a receipt. */
     openThread: ((ThreadRef) -> Unit)? = null,
+    /** A failed turn's "Retry": null when there is nothing to run again, or
+     * the task is already busy. */
+    turnRetry: (() -> Unit)? = null,
+    /** A failed turn's "Change model": null in a room, which has no one model. */
+    changeModel: (() -> Unit)? = null,
+    /** A failed turn's "Provider settings". */
+    openProviders: (() -> Unit)? = null,
+    onPromptAction: ((String) -> Unit)? = null,
 ) {
     val session = LocalCompanion.current.session
     val scope = rememberCoroutineScope()
@@ -155,6 +169,10 @@ fun MessageRow(
                 openLink = openLink,
                 openAttachment = openAttachment,
                 openThread = openThread,
+                turnRetry = turnRetry,
+                changeModel = changeModel,
+                openProviders = openProviders,
+                onPromptAction = onPromptAction,
             )
 
             message.comm?.let {
@@ -292,6 +310,65 @@ fun MessageRow(
                     },
                 )
             }
+            if (!mine && bot != null && onPromptAction != null) {
+                HorizontalDivider()
+                DropdownMenuItem(
+                    text = { Text("Regenerate") },
+                    enabled = bot.busy != true,
+                    onClick = {
+                        menuOpen = false
+                        onPromptAction("Regenerate your previous response with a fresh perspective")
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Shorten") },
+                    enabled = bot.busy != true,
+                    onClick = {
+                        menuOpen = false
+                        onPromptAction("Can you shorten your previous response?")
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Expand") },
+                    enabled = bot.busy != true,
+                    onClick = {
+                        menuOpen = false
+                        onPromptAction("Can you expand on your previous response with more detail?")
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Explain simply") },
+                    enabled = bot.busy != true,
+                    onClick = {
+                        menuOpen = false
+                        onPromptAction("Explain your previous answer more simply.")
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Turn into table") },
+                    enabled = bot.busy != true,
+                    onClick = {
+                        menuOpen = false
+                        onPromptAction("Format the key points of your previous response into a structured table.")
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Turn into checklist") },
+                    enabled = bot.busy != true,
+                    onClick = {
+                        menuOpen = false
+                        onPromptAction("Turn the action items from your previous response into a checklist.")
+                    },
+                )
+                DropdownMenuItem(
+                    text = { Text("Make a plan") },
+                    enabled = bot.busy != true,
+                    onClick = {
+                        menuOpen = false
+                        onPromptAction("Create a step-by-step action plan based on your previous response.")
+                    },
+                )
+            }
         }
     }
 
@@ -302,10 +379,10 @@ fun MessageRow(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text("This creates a new version and continues from there.", fontSize = 14.sp)
-                    OutlinedTextField(
+                    AppTextField(
                         value = editText,
                         onValueChange = { editText = it },
-                        label = { Text("Message") },
+                        label = "Message",
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -395,9 +472,45 @@ private fun MessageContent(
     openLink: ((String, Message) -> Unit)?,
     openAttachment: ((DisplayedMessageAttachment, Message, DownloadedFile?) -> Unit)?,
     openThread: ((ThreadRef) -> Unit)?,
+    turnRetry: (() -> Unit)?,
+    changeModel: (() -> Unit)?,
+    openProviders: (() -> Unit)?,
+    onPromptAction: ((String) -> Unit)? = null,
 ) {
+    val session = LocalCompanion.current.session
     when (message.kind) {
-        Message.Kind.TEXT -> TextBubble(chat.threadId, message, endsRun, openLink, openAttachment)
+        Message.Kind.TEXT -> {
+            TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
+            message.structured?.let { structured ->
+                StructuredResponseView(
+                    chat = chat,
+                    message = message,
+                    structured = structured,
+                    onEvent = { componentId, action, payload ->
+                        if (action == "remix" && onPromptAction != null) {
+                            val targetType = payload["targetType"] ?: "remix"
+                            onPromptAction("Remix the ${targetType.replace('_', ' ')} in section \"$componentId\" while keeping the rest of the response stable.")
+                        }
+                    },
+                )
+            }
+        }
+        // Native structured response system (Phase J)
+        Message.Kind.STRUCTURED -> message.structured?.let { structured ->
+            StructuredResponseView(
+                chat = chat,
+                message = message,
+                structured = structured,
+                onEvent = { componentId, action, payload ->
+                    if (action == "remix" && onPromptAction != null) {
+                        val targetType = payload["targetType"] ?: "remix"
+                        onPromptAction("Remix the ${targetType.replace('_', ' ')} in section \"$componentId\" while keeping the rest of the response stable.")
+                    }
+                },
+            )
+        } ?: if (!message.text.isNullOrEmpty()) {
+            TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
+        } else Unit
         // A structured ask draws its own card: its answers are the model's
         // questions, not an allow/deny a tap could stand for.
         Message.Kind.OPTIONS -> if (QuestionCardRules.drawsQuestionCard(message)) {
@@ -405,17 +518,72 @@ private fun MessageContent(
         } else {
             CardView(chat, message, haptics)
         }
-        Message.Kind.ACTIVITY -> ActivityChip(message.tool, message.threadRef, openThread)
+        // An activity row that carries a failure is not a tool step: it is the
+        // turn saying why it produced nothing, and it draws the card that
+        // explains it and offers the way out. Every other receipt stays a chip.
+        Message.Kind.ACTIVITY -> message.failure?.let { failure ->
+            TurnFailureCard(
+                chat = chat,
+                card = failure,
+                onRetry = turnRetry,
+                onChangeModel = changeModel,
+                onOpenProviders = openProviders,
+            )
+        } ?: ActivityChip(
+            tool = message.tool,
+            threadRef = message.threadRef,
+            openThread = openThread,
+            onErrorTap = {
+                message.tool?.let { tool ->
+                    session.postStructuredError(
+                        ErrorClassifier.fromToolActivity(tool, turnId = message.id, chatThreadId = chat.threadId)
+                    )
+                }
+            },
+        )
         Message.Kind.SCREEN -> ScreenShot(chat.threadId, message)
+        // An app the bot needs connected. The card acts on the message it is
+        // stored on; in a room, the requester is the sender on the card.
+        Message.Kind.CONNECTOR -> message.connector?.let {
+            val owner = (chat as? Chat.BotChat)?.bot?.id ?: message.from?.botId
+            if (owner != null) ConnectorRequestCardView(chat, message, owner, haptics)
+        }
         // A message kind from a newer computer. Almost everything the harness
         // sends carries `text`, so showing it is usually the whole message and
         // always better than a gap in the transcript. When there is nothing to
         // show, show nothing — a placeholder saying "unsupported" is a worse gap
         // than the gap.
         Message.Kind.UNKNOWN -> if (!message.text.isNullOrEmpty()) {
-            TextBubble(chat.threadId, message, endsRun, openLink, openAttachment)
+            TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
         }
     }
+}
+
+/**
+ * An image a bot attached to its reply — fetched once from the computer and
+ * shown in the bubble. A failure just renders nothing: a picture that could
+ * not be downloaded must never be an error row in the person's transcript.
+ */
+@Composable
+private fun BotImageAttachment(attachment: MessageAttachment) {
+    val session = LocalCompanion.current.session
+    var bitmap by remember(attachment.path) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(attachment.path) {
+        val bytes = session.attachmentImage(attachment.path) ?: return@LaunchedEffect
+        bitmap = withContext(Dispatchers.IO) {
+            runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }.getOrNull()
+        }
+    }
+    val decoded = bitmap ?: return
+    Image(
+        bitmap = decoded,
+        contentDescription = attachment.name ?: "Image from the internet",
+        contentScale = ContentScale.Fit,
+        modifier = Modifier
+            .widthIn(max = 420.dp)
+            .heightIn(max = 420.dp)
+            .clip(RoundedCornerShape(12.dp)),
+    )
 }
 
 @Composable
@@ -425,6 +593,7 @@ private fun TextBubble(
     endsRun: Boolean,
     openLink: ((String, Message) -> Unit)?,
     openAttachment: ((DisplayedMessageAttachment, Message, DownloadedFile?) -> Unit)?,
+    onPromptAction: ((String) -> Unit)? = null,
 ) {
     val mine = message.role == Message.Role.USER
     val tail = TranscriptLayout.tail(message, endsRun)
@@ -497,6 +666,7 @@ private fun TextBubble(
                                 message = message,
                                 attachment = attachment,
                                 onOpen = openAttachment,
+                                onPromptAction = onPromptAction,
                             )
                         }
                         if (attached.text.isNotEmpty()) {
@@ -510,11 +680,34 @@ private fun TextBubble(
                         }
                     }
                 } else {
-                    SelectionContainer {
-                        MarkdownText(
-                            source = message.text.orEmpty(),
-                            openLink = openLink?.let { open -> { url -> open(url, message) } },
-                        )
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        // Pictures the bot fetched from the internet arrive as
+                        // app-owned attachments, fetched back over the session.
+                        message.attachments?.filter { it.isImage }?.forEach { attachment ->
+                            BotImageAttachment(attachment)
+                        }
+                        if (!message.text.isNullOrEmpty()) {
+                            SelectionContainer {
+                                MarkdownText(
+                                    source = message.text.orEmpty(),
+                                    openLink = openLink?.let { open -> { url -> open(url, message) } },
+                                )
+                            }
+                            val citations = remember(message.text) {
+                                CitationRules.extractCitations(message.text.orEmpty())
+                            }
+                            if (citations.isNotEmpty()) {
+                                FlowRow(
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    modifier = Modifier.padding(top = 2.dp),
+                                ) {
+                                    citations.forEach { citation ->
+                                        NativeCitationPill(citation)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -524,40 +717,121 @@ private fun TextBubble(
 }
 
 @Composable
+private fun NativeCitationPill(citation: NativeCitation) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
+            .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f), RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 3.dp)
+            .semantics { contentDescription = "Citation: ${citation.label}" },
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "📄",
+            fontSize = 11.sp,
+        )
+        Text(
+            text = citation.label,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
+}
+
+@Composable
 private fun SharedAttachmentView(
     threadId: String,
     message: Message,
     attachment: DisplayedMessageAttachment,
     onOpen: ((DisplayedMessageAttachment, Message, DownloadedFile?) -> Unit)?,
+    onPromptAction: ((String) -> Unit)? = null,
 ) {
     if (attachment.kind == DisplayedMessageAttachment.Kind.IMAGE) {
-        SharedImageAttachment(threadId, message, attachment, onOpen)
+        SharedImageAttachment(threadId, message, attachment, onOpen, onPromptAction)
         return
     }
-    Row(
-        modifier = Modifier
-            .widthIn(max = 360.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(BubbleColor.mineText.copy(alpha = 0.10f))
-            .clickable(enabled = onOpen != null, role = Role.Button) {
-                onOpen?.invoke(attachment, message, null)
-            }
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .semantics { contentDescription = "File attachment: ${attachment.name}. Tap to preview." },
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.CenterVertically,
+    SharedGenericAttachment(message, attachment, onOpen, onPromptAction)
+}
+
+@Composable
+private fun SharedGenericAttachment(
+    message: Message,
+    attachment: DisplayedMessageAttachment,
+    onOpen: ((DisplayedMessageAttachment, Message, DownloadedFile?) -> Unit)?,
+    onPromptAction: ((String) -> Unit)? = null,
+) {
+    val isPdf = attachment.name.endsWith(".pdf", ignoreCase = true)
+    Column(
+        modifier = Modifier.widthIn(max = 360.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Text("FILE", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = BubbleColor.mineText.copy(alpha = 0.68f))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                attachment.name,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = BubbleColor.mineText,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text("Tap to preview", fontSize = 12.sp, color = BubbleColor.mineText.copy(alpha = 0.68f))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(16.dp))
+                .background(BubbleColor.mineText.copy(alpha = 0.10f))
+                .clickable(enabled = onOpen != null, role = Role.Button) {
+                    onOpen?.invoke(attachment, message, null)
+                }
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+                .semantics { contentDescription = "${if (isPdf) "PDF document" else "File attachment"}: ${attachment.name}. Tap to preview." },
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (isPdf) Color(0xFFE53935).copy(alpha = 0.20f) else BubbleColor.mineText.copy(alpha = 0.16f))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            ) {
+                Text(
+                    if (isPdf) "PDF" else "FILE",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isPdf) Color(0xFFEF5350) else BubbleColor.mineText.copy(alpha = 0.85f),
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    attachment.name,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = BubbleColor.mineText,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    if (isPdf) "PDF document • Tap to preview" else "Tap to preview",
+                    fontSize = 12.sp,
+                    color = BubbleColor.mineText.copy(alpha = 0.68f),
+                )
+            }
+        }
+        if (isPdf && onPromptAction != null) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.padding(start = 2.dp),
+            ) {
+                AppPill(
+                    text = "Summarize",
+                    onClick = { onPromptAction("Summarize key takeaways from PDF \"${attachment.name}\"") },
+                    tone = PillTone.Raised,
+                )
+                AppPill(
+                    text = "Extract data",
+                    onClick = { onPromptAction("Extract structured data and metrics from PDF \"${attachment.name}\"") },
+                    tone = PillTone.Raised,
+                )
+                AppPill(
+                    text = "Find contradictions",
+                    onClick = { onPromptAction("Analyze PDF \"${attachment.name}\" for any contradictions or anomalies") },
+                    tone = PillTone.Raised,
+                )
+            }
         }
     }
 }
@@ -574,6 +848,7 @@ private fun SharedImageAttachment(
     message: Message,
     attachment: DisplayedMessageAttachment,
     onOpen: ((DisplayedMessageAttachment, Message, DownloadedFile?) -> Unit)?,
+    onPromptAction: ((String) -> Unit)? = null,
 ) {
     val session = LocalCompanion.current.session
     var attempt by remember(message.id, attachment.path) { mutableStateOf(0) }
@@ -604,45 +879,73 @@ private fun SharedImageAttachment(
 
     val ready = state as? AttachmentThumbnailState.Ready
     Column(
-        modifier = Modifier
-            .widthIn(max = 360.dp)
-            .clip(RoundedCornerShape(16.dp))
-            .background(BubbleColor.mineText.copy(alpha = 0.10f))
-            .clickable(enabled = ready != null && onOpen != null, role = Role.Button) {
-                ready?.let { onOpen?.invoke(attachment, message, it.file) }
-            }
-            .semantics { contentDescription = "Image attachment: ${attachment.name}. Tap to preview." },
+        modifier = Modifier.widthIn(max = 360.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        Box(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(4f / 3f),
-            contentAlignment = Alignment.Center,
+                .clip(RoundedCornerShape(16.dp))
+                .background(BubbleColor.mineText.copy(alpha = 0.10f))
+                .clickable(enabled = ready != null && onOpen != null, role = Role.Button) {
+                    ready?.let { onOpen?.invoke(attachment, message, it.file) }
+                }
+                .semantics { contentDescription = "Image attachment: ${attachment.name}. Tap to preview." },
         ) {
-            when (val current = state) {
-                AttachmentThumbnailState.Loading ->
-                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
-                AttachmentThumbnailState.Failed -> AttachmentLoadFailure(
-                    label = "Image unavailable",
-                    onRetry = { attempt += 1 },
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(4f / 3f),
+                contentAlignment = Alignment.Center,
+            ) {
+                when (val current = state) {
+                    AttachmentThumbnailState.Loading ->
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    AttachmentThumbnailState.Failed -> AttachmentLoadFailure(
+                        label = "Image unavailable",
+                        onRetry = { attempt += 1 },
+                    )
+                    is AttachmentThumbnailState.Ready -> Image(
+                        bitmap = current.image,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxWidth().aspectRatio(4f / 3f),
+                    )
+                }
+            }
+            Text(
+                attachment.name,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = BubbleColor.mineText,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
+            )
+        }
+        if (onPromptAction != null) {
+            FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+                modifier = Modifier.padding(start = 2.dp),
+            ) {
+                AppPill(
+                    text = "Explain",
+                    onClick = { onPromptAction("Explain what is in this image: \"${attachment.name}\"") },
+                    tone = PillTone.Raised,
                 )
-                is AttachmentThumbnailState.Ready -> Image(
-                    bitmap = current.image,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxWidth().aspectRatio(4f / 3f),
+                AppPill(
+                    text = "Extract text",
+                    onClick = { onPromptAction("Extract and transcribe all visible text in this image: \"${attachment.name}\"") },
+                    tone = PillTone.Raised,
+                )
+                AppPill(
+                    text = "Describe",
+                    onClick = { onPromptAction("Describe this image in detail: \"${attachment.name}\"") },
+                    tone = PillTone.Raised,
                 )
             }
         }
-        Text(
-            attachment.name,
-            fontSize = 13.sp,
-            fontWeight = FontWeight.Medium,
-            color = BubbleColor.mineText,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp),
-        )
     }
 }
 
@@ -682,6 +985,7 @@ private fun ActivityChip(
     tool: ToolActivity?,
     threadRef: ThreadRef? = null,
     openThread: ((ThreadRef) -> Unit)? = null,
+    onErrorTap: (() -> Unit)? = null,
 ) {
     if (tool == null) return
     val status = ActivityReceipt.status(tool.ok)
@@ -691,54 +995,100 @@ private fun ActivityChip(
         ActivityStatus.ERROR -> MaterialTheme.colorScheme.error
     }
     val haptics = rememberHaptics()
-    val linked = if (threadRef != null && openThread != null) {
-        Modifier
-            .heightIn(min = MIN_TOUCH_TARGET)
-            .clickable(role = Role.Button) {
-                haptics.play(TactileAction.OPEN_THREAD_CHIP)
-                openThread(threadRef)
-            }
-    } else {
-        Modifier
+    val isError = status == ActivityStatus.ERROR
+    val linked = when {
+        isError && onErrorTap != null -> {
+            Modifier
+                .heightIn(min = MIN_TOUCH_TARGET)
+                .clickable(role = Role.Button) {
+                    haptics.play(TactileAction.OPEN_THREAD_CHIP)
+                    onErrorTap()
+                }
+        }
+        threadRef != null && openThread != null -> {
+            Modifier
+                .heightIn(min = MIN_TOUCH_TARGET)
+                .clickable(role = Role.Button) {
+                    haptics.play(TactileAction.OPEN_THREAD_CHIP)
+                    openThread(threadRef)
+                }
+        }
+        else -> Modifier
     }
-    Row(
-        modifier = Modifier
-            .padding(start = 4.dp)
-            .then(linked)
-            .semantics(mergeDescendants = true) {
-                contentDescription = ActivityReceipt.announcement(tool.name, status)
-            },
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (status == ActivityStatus.ERROR) {
+
+    if (isError) {
+        Row(
+            modifier = Modifier
+                .padding(start = 4.dp, top = 2.dp, bottom = 2.dp)
+                .background(MaterialTheme.colorScheme.error.copy(alpha = 0.10f), RoundedCornerShape(14.dp))
+                .border(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.28f), RoundedCornerShape(14.dp))
+                .then(linked)
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = ActivityReceipt.announcement(tool.name, status)
+                },
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Icon(
                 imageVector = Icons.Filled.Warning,
                 contentDescription = null,
                 tint = tint,
-                modifier = Modifier.size(14.dp),
+                modifier = Modifier.size(15.dp),
             )
-        } else {
+            Text(
+                text = tool.name,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                color = tint,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Text(
+                text = "Failed",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Medium,
+                color = tint,
+            )
+            Text(
+                text = "• View details ➔",
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                color = tint,
+            )
+        }
+    } else {
+        Row(
+            modifier = Modifier
+                .padding(start = 4.dp)
+                .then(linked)
+                .semantics(mergeDescendants = true) {
+                    contentDescription = ActivityReceipt.announcement(tool.name, status)
+                },
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Box(
                 modifier = Modifier
                     .size(ACTIVITY_DOT)
                     .background(tint, CircleShape),
             )
-        }
-        Text(
-            text = tool.name,
-            fontSize = 13.sp,
-            maxLines = 1,
-            color = if (status == ActivityStatus.ERROR) tint else secondaryTint,
-        )
-        if (ActivityReceipt.showsLabel(status)) {
             Text(
-                text = ActivityReceipt.label(status),
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Medium,
+                text = tool.name,
+                fontSize = 13.sp,
                 maxLines = 1,
-                color = tint,
+                color = secondaryTint,
             )
+            if (ActivityReceipt.showsLabel(status)) {
+                Text(
+                    text = ActivityReceipt.label(status),
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 1,
+                    color = tint,
+                )
+            }
         }
     }
 }
@@ -747,21 +1097,21 @@ private fun ActivityChip(
 @Composable
 fun ActivityRunChip(items: List<Message>, openThread: ((ThreadRef) -> Unit)? = null) {
     if (items.isEmpty()) return
+    val session = LocalCompanion.current.session
     val haptics = rememberHaptics()
-    // Keyed on the run's identity — the same one the LazyColumn keys the row by
-    // (`TranscriptRow.ActivityRun.id = "run.${head.id}"`). Keying on the last id
-    // too would throw the reader's disclosure away on every receipt that lands
-    // while the run is still going. iOS holds a `@State` with no key at all.
     var expanded by remember(items.first().id) { mutableStateOf(false) }
     val running = items.any { it.tool?.ok == null }
-    val summary = if (running) "Running ${items.size} steps" else "Ran ${items.size} steps"
+    val failedCount = items.count { it.tool?.ok == false }
+    val hasError = failedCount > 0
+    val summary = when {
+        running -> "Running ${items.size} steps"
+        hasError -> "$failedCount of ${items.size} steps failed"
+        else -> "Ran ${items.size} steps"
+    }
     Column(
         modifier = Modifier.padding(start = 4.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
-        // The pill is ~30 dp tall; the target around it is MIN_TOUCH_TARGET, the
-        // way TouchTarget does it for the round buttons. Not TouchTarget itself:
-        // that helper is a square box, which would clip a capsule this wide.
         Box(
             modifier = Modifier
                 .heightIn(min = MIN_TOUCH_TARGET)
@@ -776,13 +1126,23 @@ fun ActivityRunChip(items: List<Message>, openThread: ((ThreadRef) -> Unit)? = n
         ) {
             Row(
                 modifier = Modifier
-                    .background(secondaryTint.copy(alpha = 0.10f), RoundedCornerShape(18.dp))
+                    .background(
+                        if (hasError) MaterialTheme.colorScheme.error.copy(alpha = 0.12f) else secondaryTint.copy(alpha = 0.10f),
+                        RoundedCornerShape(18.dp)
+                    )
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 if (running) {
                     CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.5.dp)
+                } else if (hasError) {
+                    Icon(
+                        imageVector = Icons.Filled.Warning,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(14.dp),
+                    )
                 } else {
                     Icon(
                         imageVector = Icons.Filled.Check,
@@ -791,13 +1151,35 @@ fun ActivityRunChip(items: List<Message>, openThread: ((ThreadRef) -> Unit)? = n
                         modifier = Modifier.size(14.dp),
                     )
                 }
-                Text(summary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                Text(if (expanded) "Hide" else "Show", fontSize = 12.sp, color = secondaryTint)
+                Text(
+                    summary,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = if (hasError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+                )
+                Text(
+                    if (expanded) "Hide" else "Show",
+                    fontSize = 12.sp,
+                    color = if (hasError) MaterialTheme.colorScheme.error else secondaryTint,
+                )
             }
         }
         if (expanded) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items.forEach { item -> ActivityChip(item.tool, item.threadRef, openThread) }
+                items.forEach { item ->
+                    ActivityChip(
+                        tool = item.tool,
+                        threadRef = item.threadRef,
+                        openThread = openThread,
+                        onErrorTap = {
+                            item.tool?.let { tool ->
+                                session.postStructuredError(
+                                    ErrorClassifier.fromToolActivity(tool, turnId = item.id)
+                                )
+                            }
+                        },
+                    )
+                }
             }
         }
     }

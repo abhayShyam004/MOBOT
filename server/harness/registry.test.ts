@@ -3,7 +3,7 @@
 // unavailable shadow, never crash the fleet. These tests pin that.
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ModelCatalog } from "../contracts.ts";
@@ -242,7 +242,10 @@ process.exit(0);
     const binDir = join(scratch, "fake-path");
     mkdirSync(binDir);
     if (present) addFakeNpm(binDir);
-    process.env.PATH = binDir;
+    // The stand-in npm is a `#!/usr/bin/env node` script, so node has to stay
+    // reachable while the fixture PATH is in force — behind the fixture's
+    // directory, so `npm` still resolves to the stand-in.
+    process.env.PATH = `${binDir}${delimiter}${dirname(process.execPath)}`;
     process.env.FAKE_NPM_LOG = join(scratch, "npm-calls.jsonl");
     resetPathCacheForTests();
     return binDir;

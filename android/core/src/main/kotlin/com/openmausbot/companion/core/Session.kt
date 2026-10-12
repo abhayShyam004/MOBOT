@@ -115,11 +115,103 @@ class Session(
     private val _restoreState = MutableStateFlow<RestoreState>(RestoreState.Pending)
     val restoreState: StateFlow<RestoreState> = _restoreState.asStateFlow()
 
+    /** One owner for the custom-MCP catalog: null = not yet loaded, a list =
+     * what the host currently serves. Settings renders it and every mutation
+     * lands here, so an open bot sheet sees changes without a reopen. */
+    // (the mcp catalog state lives in `mcp`, a McpCatalog owned by Session)
+
     private val _actionError = MutableStateFlow<String?>(null)
     var actionError: String?
         get() = _actionError.value
-        set(value) { _actionError.value = value }
+        set(value) {
+            if (value != null) {
+                reportError(value)
+            } else {
+                _actionError.value = null
+            }
+        }
     val actionErrorFlow: StateFlow<String?> = _actionError.asStateFlow()
+
+    private val _activeStructuredError = MutableStateFlow<StructuredAppError?>(null)
+    val activeStructuredError: StateFlow<StructuredAppError?> = _activeStructuredError.asStateFlow()
+
+    private val _errorHistory = MutableStateFlow<List<StructuredAppError>>(emptyList())
+    val errorHistory: StateFlow<List<StructuredAppError>> = _errorHistory.asStateFlow()
+
+    private var lastErrorTimestamp: Long = 0L
+    private var lastErrorFingerprint: String? = null
+
+    fun reportError(
+        rawMessage: String?,
+        operation: String = "Application Operation",
+        error: Throwable? = null,
+        statusCode: Int? = null,
+    ) {
+        if (rawMessage.isNullOrBlank()) {
+            _actionError.value = null
+            return
+        }
+        val structured = ErrorClassifier.classify(
+            operation = operation,
+            error = error,
+            rawMessage = rawMessage,
+            statusCode = statusCode,
+        )
+        postStructuredError(structured)
+    }
+
+    fun postStructuredError(error: StructuredAppError) {
+        val now = System.currentTimeMillis()
+        val fingerprint = "${error.category}:${error.operation}:${error.headline}:${error.diagnostics.rawMessage}"
+        if (fingerprint == lastErrorFingerprint && (now - lastErrorTimestamp) < 2000L) {
+            return
+        }
+        lastErrorFingerprint = fingerprint
+        lastErrorTimestamp = now
+
+        _activeStructuredError.value = error
+        _errorHistory.update { history ->
+            (listOf(error) + history).take(20)
+        }
+        _actionError.value = error.explanation
+    }
+
+    fun clearActiveError() {
+        _activeStructuredError.value = null
+        _actionError.value = null
+    }
+
+    /** Deterministic hardware test hook for controlled error verification (§2). */
+    fun triggerSimulatedError(type: String) {
+        val simulated = when (type.lowercase()) {
+            "network" -> ErrorClassifier.classify(
+                operation = "Sync with Companion Server",
+                rawMessage = "java.net.SocketTimeoutException: failed to connect to 127.0.0.1:18799 after 15000ms. Connection timed out.",
+            )
+            "preview" -> ErrorClassifier.classify(
+                operation = "Local HTML Preview",
+                rawMessage = "Preview server error: listen EADDRINUSE: address already in use 0.0.0.0:3006. Process 7856 holding socket.",
+            )
+            "build" -> ErrorClassifier.classify(
+                operation = "Project Build",
+                rawMessage = "Build failed with exit code 1: SyntaxError: Unexpected token '<' at src/App.jsx:14:8",
+            )
+            "tool" -> ErrorClassifier.classify(
+                operation = "tool_bash_execute",
+                rawMessage = "Tool execution failed: /system/bin/sh: command not found: unknown_binary_tool",
+            )
+            "auth" -> ErrorClassifier.classify(
+                operation = "Deploy to Vercel",
+                rawMessage = "401 Unauthorized: Invalid Vercel token: ver_sec1234567890abcdef",
+                statusCode = 401,
+            )
+            else -> ErrorClassifier.classify(
+                operation = "Application Operation",
+                rawMessage = "Unexpected runtime exception: unknown failure condition triggered.",
+            )
+        }
+        postStructuredError(simulated)
+    }
 
     private val _focusedMessageId = MutableStateFlow<String?>(null)
     val focusedMessageId: StateFlow<String?> = _focusedMessageId.asStateFlow()
@@ -1073,6 +1165,32 @@ class Session(
     }
 
     /**
+     * Run the request behind [source] again — what a failed turn's Retry does.
+     *
+     * A bot chat forks from the person's own message with the same words (the
+     * edit route), the way the desktop's Regenerate does: the failed attempt
+     * stays reachable as an earlier version of the conversation and nothing is
+     * duplicated on screen. A room has no per-message fork, so there the same
+     * words are simply sent again — a visible duplicate is the honest cost of
+     * retrying inside a shared conversation.
+     *
+     * Returns whether the harness took it. A refusal travels through
+     * [actionError], like every other action's.
+     */
+    suspend fun retryTurn(chat: Chat, source: Message): Boolean {
+        val text = source.text ?: return false
+        var accepted = false
+        perform {
+            when (chat) {
+                is Chat.BotChat -> it.edit(chat.bot.id, source.id, text, chat.threadId)
+                is Chat.RoomChat -> it.sendToRoom(chat.room.id, text, chat.threadId)
+            }
+            accepted = true
+        }
+        return accepted
+    }
+
+    /**
      * A send the harness held rather than ran has to stay on screen, or the
      * words simply vanish from the phone until the turn settles. [text] is
      * what the person typed; the harness echoes back only an id.
@@ -1143,11 +1261,11 @@ class Session(
                     activeClient.imageCapableInstanceIds()
                 } catch (error: APIError.Status) {
                     if (error.code != 404) throw error
-                    _actionError.value = "Update OpenMausBot on this computer before sending images."
+                    _actionError.value = "Update MOBOT on this computer before sending images."
                     return false
                 }
-                if (!imageSupported(to, capable)) {
-                    _actionError.value = imageCompatibilityMessage(to)
+                imageProblem(to, capable)?.let {
+                    _actionError.value = it
                     return false
                 }
             }
@@ -1207,19 +1325,46 @@ class Session(
         }
     }
 
-    private fun imageSupported(chat: Chat, capableInstances: Set<String>): Boolean = when (chat) {
-        is Chat.BotChat -> chat.bot.modelSelection.instanceId in capableInstances
-        is Chat.RoomChat -> chat.room.memberIds.isNotEmpty() && chat.room.memberIds.all { id ->
-            val bot = _state.value.bot(id) ?: return@all false
-            bot.modelSelection.instanceId in capableInstances
+    /**
+     * Why an image cannot be sent to this conversation, or null when it can.
+     *
+     * The old version only ever said "doesn't support images", which is
+     * wrong for a bot with no model at all — that is the far more common
+     * case on a fresh install, and the fix for it is different. Every answer
+     * names the bot blocking the send and what to do about it, so the
+     * message is never a dead end.
+     */
+    private fun imageProblem(chat: Chat, capableInstances: Set<String>): String? = when (chat) {
+        is Chat.BotChat -> {
+            val selection = chat.bot.modelSelection
+            when {
+                selection.instanceId.isBlank() ->
+                    "${chat.bot.name} has no model chosen yet. Pick one in its settings, then attach a photo."
+                selection.instanceId !in capableInstances ->
+                    "${chat.bot.name}'s model can't read images. Pick a model that can, or remove the photo."
+                else -> null
+            }
         }
-    }
-
-    private fun imageCompatibilityMessage(chat: Chat): String = when (chat) {
-        is Chat.BotChat ->
-            "${chat.bot.name}'s current model doesn't support images. Choose another model or remove the image."
-        is Chat.RoomChat ->
-            "Every bot that may answer in this channel must use a model that supports images."
+        is Chat.RoomChat -> {
+            // The room reads each member's model exactly as a room turn now
+            // does: forTask projects the member's ACTIVE thread selection over
+            // its bot-level default, which is so often just a placeholder
+            // ("{instanceId: '', model: ''}"). Checking the raw default is
+            // what said "no model chosen" for bots that answer in here fine.
+            val members = chat.room.memberIds
+                .mapNotNull { _state.value.bot(it) }
+                .map { it.forTask(it.threadId) ?: it }
+            val noModel = members.firstOrNull { it.modelSelection.instanceId.isBlank() }
+            val noImages = members.firstOrNull {
+                it.modelSelection.instanceId.isNotBlank() && it.modelSelection.instanceId !in capableInstances
+            }
+            when {
+                members.isEmpty() -> "This channel has no bots that may answer yet."
+                noModel != null -> "${noModel.name} has no model chosen yet. Pick one, then attach a photo."
+                noImages != null -> "${noImages.name}'s model can't read images. Pick a model that can, or remove the photo."
+                else -> null
+            }
+        }
     }
 
     /**
@@ -1349,7 +1494,7 @@ class Session(
         val endpoints = saved.automaticEndpoints
         if (endpoints.isEmpty()) {
             throw APIError.Transport(
-                "Couldn't reach ${saved.name}. Keep OpenMausBot open and Phone access on, then try again.",
+                "Couldn't reach ${saved.name}. Keep MOBOT open and Phone access on, then try again.",
             )
         }
         var lastError: Throwable? = null
@@ -1365,7 +1510,7 @@ class Session(
             }
         }
         throw lastError ?: APIError.Transport(
-            "Couldn't reach ${saved.name}. Keep OpenMausBot open and Phone access on, then try again.",
+            "Couldn't reach ${saved.name}. Keep MOBOT open and Phone access on, then try again.",
         )
     }
 
@@ -1432,6 +1577,151 @@ class Session(
             _state.update { it.apply(Frame.Bot(bot)) }
             bot
         } catch (error: Throwable) {
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /**
+     * One coherent creation: name, role, persona line and model land together
+     * or not at all. A blank name is omitted so the host picks one of its own
+     * (never "New bot 4821"); a null selection follows the workspace default.
+     */
+    suspend fun createBot(
+        name: String?,
+        model: ModelSelection?,
+        title: String? = null,
+        description: String? = null,
+    ): Bot? {
+        val activeClient = client ?: return null
+        return try {
+            val bot = activeClient.createBot(name, model, title, description)
+            _state.update { it.apply(Frame.Bot(bot)) }
+            bot
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /**
+     * Save the OpenAI-compatible workspace endpoint/key on this phone's own
+     * host and refresh its model list, so the new engine is immediately
+     * selectable in the model picker. Errors surface through the same
+     * [actionError] channel every other action uses.
+     */
+    suspend fun saveOpenAICompatProvider(url: String, key: String?): List<Instance>? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.updateOpenAICompat(url, key)
+            activeClient.refreshOpenAICompatModels()
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /** Set or replace one provider's credential; null key keeps the stored one. */
+    suspend fun saveProviderKey(instanceId: String, url: String?, key: String?): ConfigStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.updateProviderKey(instanceId, url, key)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /** Start an account sign-in for one engine, or null when the request failed. */
+    suspend fun startInstanceAuth(instanceId: String): InstanceAuthStart? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.startInstanceAuth(instanceId)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /** Poll a sign-in flow; failures return null with [actionError] set. */
+    suspend fun instanceAuthStatus(instanceId: String, flowId: String): InstanceAuthStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.instanceAuthStatus(instanceId, flowId)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    /** Complete a paste-code or callback sign-in. */
+    suspend fun completeInstanceAuth(instanceId: String, flowId: String, code: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.completeInstanceAuth(instanceId, flowId, code)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
+    /** Remove an engine's stored sign-in; returns the refreshed catalog. */
+    suspend fun signOutInstance(instanceId: String): List<Instance>? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.signOutInstance(instanceId)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /**
+     * Re-read one engine's models from the provider — the provider card's
+     * "Test connection": success refills the model count; failure surfaces
+     * through [actionError] and the card keeps showing the server's reason.
+     */
+    suspend fun testProviderModels(instanceId: String): List<Instance>? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.refreshInstanceModels(instanceId)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /**
+     * Point new chats at one provider/model. Patched through the workspace
+     * config, the same write the desktop's default-model picker sends.
+     */
+    suspend fun setDefaultModelSelection(instanceId: String, model: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.setDefaultModelSelection(ModelSelection(instanceId = instanceId, model = model))
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
+    /** One-shot config read for screens that need provider status on demand. */
+    suspend fun readProviderStatus(): ConfigStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.config()
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
@@ -1740,6 +2030,65 @@ class Session(
         }
     }
 
+    /** Settle a room's owed first-run setup (bulletin + who answers by
+     * default), so its first message can land. Returns the updated room. */
+    suspend fun finishRoomSetup(forRoom: Room, bulletin: String, everyone: Boolean): Room? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.finishRoomSetup(forRoom.id, bulletin, everyone).also { updated ->
+                _state.update { it.apply(Frame.Room(updated)) }
+            }
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /** Change a room's own settings: name, bulletin, members, default
+     * responder. Returns the updated room, or null when the host refused
+     * (a working room, an unknown member) — the sheet surfaces why. */
+    suspend fun updateRoomSettings(
+        forRoom: Room,
+        name: String? = null,
+        bulletin: String? = null,
+        memberIds: List<String>? = null,
+        responder: GroupResponder? = null,
+    ): Room? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.updateRoomSettings(forRoom.id, name, bulletin, memberIds, responder).also { updated ->
+                _state.update { it.apply(Frame.Room(updated)) }
+            }
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /**
+     * Deletes the whole room — every task and transcript — not just the
+     * conversation. The sheet leaves via its own [Frame.RoomDeleted]; the
+     * stream's `group.deleted` frame is the same removal seen by every other
+     * paired screen, and [Store] applies it idempotently. Fails with
+     * [actionError] set while the room is mid-turn or mid-credential-save;
+     * the server's message is actionable, so it is surfaced verbatim.
+     */
+    suspend fun deleteRoom(forRoom: Room): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.deleteRoom(forRoom.id)
+            currentCoroutineContext().ensureActive()
+            _state.update { it.apply(Frame.RoomDeleted(forRoom.id)) }
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
     suspend fun createTask(forRoom: Room, title: String?): Room? = mutateTask(null) { client ->
         client.createRoomTask(forRoom.id, title).also { updated ->
             _state.update { it.apply(Frame.Room(updated)) }
@@ -1767,6 +2116,29 @@ class Session(
         }
     }
 
+    /**
+     * Deletes the whole agent — every thread, transcript and its workspace —
+     * not just the conversation. The roster row leaves via the local
+     * [Frame.BotDeleted]; the stream's own `bot.deleted` frame is the same
+     * removal seen by every other paired screen, and [Store] applies it
+     * idempotently. Fails with [actionError] set while the bot (or one of
+     * its channels) is mid-turn, mid-routine or mid-credential-save; the
+     * server's message is actionable, so it is surfaced verbatim.
+     */
+    suspend fun deleteBot(forBot: Bot): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.deleteBot(forBot.id)
+            currentCoroutineContext().ensureActive()
+            _state.update { it.apply(Frame.BotDeleted(forBot.id)) }
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
     suspend fun updateProfile(patch: BotProfilePatch, forBot: Bot): Bot? {
         val activeClient = client ?: return null
         return try {
@@ -1781,6 +2153,19 @@ class Session(
         }
     }
 
+    /** MCP server catalog: state, mutations, and probe live in one owner
+     * (McpCatalog.kt); Session wires it to the live client and its
+     * action-error surface. */
+    val mcp = McpCatalog(
+        client = { client },
+        onError = { _actionError.value = it },
+    )
+
+    /** Fetch the MCP catalog into [mcp]. Null flow value means
+     * "not loaded"; a failed load keeps the previous value and reports
+     * through [actionError], returning false so the UI can offer a retry. */
+    suspend fun refreshMcpServers(): Boolean = mcp.refresh()
+
     /**
      * The model catalog lives on the paired computer because availability
      * depends on which engines are installed and signed in there.
@@ -1793,6 +2178,287 @@ class Session(
             if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             emptyList()
+        }
+    }
+
+    suspend fun capabilities(): List<CapabilityConfig> {
+        val activeClient = client ?: return emptyList()
+        return try {
+            activeClient.capabilities()
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            emptyList()
+        }
+    }
+
+    suspend fun deviceCapabilities(): List<DeviceCapabilityItem> {
+        val activeClient = client ?: return emptyList()
+        return try {
+            activeClient.deviceCapabilities()
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            emptyList()
+        }
+    }
+
+    suspend fun appProjects(): List<AppProjectRecord> {
+        val activeClient = client ?: return emptyList()
+        return try {
+            activeClient.appProjects()
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            emptyList()
+        }
+    }
+
+    suspend fun appProject(id: String): AppProjectDetailResponse? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.appProject(id)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    suspend fun deleteAppProject(id: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.deleteAppProject(id)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            false
+        }
+    }
+
+    suspend fun getSmartRecap(since: String? = null, botId: String? = null): SmartRecapData? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.smartRecap(since, botId).recap
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    suspend fun getDailyBriefing(): DailyBriefingData? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.dailyBriefing().briefing
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    suspend fun updateDailyBriefingConfig(config: kotlinx.serialization.json.JsonObject): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.updateDailyBriefingConfig(config)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            false
+        }
+    }
+
+    suspend fun startAppProjectPreview(id: String, port: Int? = null): AppProjectPreviewActionResponse? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.startAppProjectPreview(id, port)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            val structured = ErrorClassifier.classify(
+                operation = "start_preview",
+                error = error,
+                rawMessage = error.message ?: "Failed to start preview for project $id",
+            )
+            postStructuredError(structured)
+            null
+        }
+    }
+
+    suspend fun stopAppProjectPreview(id: String): AppProjectPreviewActionResponse? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.stopAppProjectPreview(id)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    suspend fun deploymentAccounts(): List<DeploymentAccountInfo> {
+        val activeClient = client ?: return emptyList()
+        return try {
+            activeClient.deploymentAccounts()
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            emptyList()
+        }
+    }
+
+    suspend fun connectDeploymentAccount(provider: String, token: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.connectDeploymentAccount(provider, token)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            val structured = ErrorClassifier.classify(
+                operation = "connect_deployment_account",
+                error = error,
+                rawMessage = error.message ?: "Failed to connect $provider account",
+            )
+            postStructuredError(structured)
+            false
+        }
+    }
+
+    suspend fun disconnectDeploymentAccount(provider: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.disconnectDeploymentAccount(provider)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            false
+        }
+    }
+
+    suspend fun testDeploymentAccount(provider: String, token: String? = null): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.testDeploymentAccount(provider, token)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            val structured = ErrorClassifier.classify(
+                operation = "test_deployment_account",
+                error = error,
+                rawMessage = error.message ?: "Failed to test $provider credentials",
+            )
+            postStructuredError(structured)
+            false
+        }
+    }
+
+    suspend fun deployProject(id: String, provider: String = "vercel", target: String = "preview"): DeployProjectResponse? {
+        val activeClient = client ?: return null
+        return try {
+            val response = activeClient.deployProject(id, provider, target)
+            if (!response.ok && response.error != null) {
+                val structured = ErrorClassifier.classify(
+                    operation = "deploy_project",
+                    rawMessage = response.error,
+                )
+                postStructuredError(structured)
+            }
+            response
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            val structured = ErrorClassifier.classify(
+                operation = "deploy_project",
+                error = error,
+                rawMessage = error.message ?: "Failed to deploy project to $provider",
+            )
+            postStructuredError(structured)
+            null
+        }
+    }
+
+    suspend fun redeployProject(id: String): DeployProjectResponse? {
+        val activeClient = client ?: return null
+        return try {
+            val response = activeClient.redeployProject(id)
+            if (!response.ok && response.error != null) {
+                val structured = ErrorClassifier.classify(
+                    operation = "redeploy_project",
+                    rawMessage = response.error,
+                )
+                postStructuredError(structured)
+            }
+            response
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            val structured = ErrorClassifier.classify(
+                operation = "redeploy_project",
+                error = error,
+                rawMessage = error.message ?: "Failed to redeploy project",
+            )
+            postStructuredError(structured)
+            null
+        }
+    }
+
+    suspend fun cancelProjectDeployment(id: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.cancelProjectDeployment(id)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            false
+        }
+    }
+
+    suspend fun projectDeployment(id: String): DeployProjectResponse? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.projectDeployment(id)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+
+    suspend fun updateCapability(
+        id: String,
+        enabled: Boolean,
+        provider: String,
+        model: String,
+        apiKey: String? = null,
+    ): CapabilityConfig? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.updateCapability(id, enabled, provider, model, apiKey)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /** Add a named custom API provider; the fresh fleet comes back for the
+     * provider screen to redraw. */
+    suspend fun createCustomProvider(
+        driver: String,
+        name: String,
+        url: String,
+        key: String,
+        model: String?,
+        icon: ProviderIconDto? = null,
+    ): List<Instance>? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.createCustomProvider(driver, name, url, key, model, icon)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun removeCustomProvider(instanceId: String): List<Instance>? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.deleteCustomProvider(instanceId)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
         }
     }
 
@@ -1889,6 +2555,92 @@ class Session(
     }
 
     /**
+     * Turn the owner's standing "never stop for approvals" grant on or off.
+     * Returns the refreshed status on success, null when the host refused or
+     * could not be reached — the caller keeps the toggle where it was.
+     */
+    suspend fun setNeverAskPermissions(enabled: Boolean): ConfigStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.setNeverAskPermissions(enabled)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /**
+     * An image a bot attached to its reply, fetched once and cached for the
+     * session so a scrolling transcript never re-downloads it. Null when the
+     * computer could not be reached — the row simply shows no picture.
+     */
+    private val attachmentImageCache = LinkedHashMap<String, ByteArray>()
+    suspend fun attachmentImage(path: String): ByteArray? {
+        attachmentImageCache[path]?.let { return it }
+        val activeClient = client ?: return null
+        return try {
+            activeClient.attachmentImage(path).also { bytes ->
+                if (attachmentImageCache.size >= 32) attachmentImageCache.clear()
+                attachmentImageCache[path] = bytes
+            }
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            null
+        }
+    }
+
+    /** A bot's memory overview, or null when the host could not be reached. */
+    suspend fun memoryOverview(botId: String): MemoryOverview? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.memoryOverview(botId)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun memoryFile(botId: String, path: String): MemoryDoc? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.memoryFile(botId, path)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /** Save one memory document. Returns true on success; a hash conflict
+     * (the bot wrote between read and save) leaves `actionError` explaining
+     * it so the page can reload rather than silently overwrite. */
+    suspend fun saveMemoryFile(botId: String, path: String, text: String, expectedHash: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.saveMemoryFile(botId, path, text, expectedHash)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
+    suspend fun deleteMemoryFile(botId: String, path: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.deleteMemoryFile(botId, path)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
+    /**
      * Switch the workspace's voice engine. The sheet reloads the voice list
      * afterwards, because every engine names its own voices.
      */
@@ -1933,6 +2685,88 @@ class Session(
             if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
+        }
+    }
+
+    /** Save the host's connected-apps project or consumer key ("" clears it). */
+    suspend fun saveComposioKey(key: String, surface: String? = null): ConfigStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.updateComposioApiKey(key, surface)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun disconnectConnector(slug: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.removeConnectorService(slug)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
+    /** Per-bot gate on the workspace's connected apps. */
+    suspend fun setBotConnectedApps(botId: String, enabled: Boolean): Bot? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.updateBotComposio(botId, enabled)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun authorizeConnectorCard(botId: String, messageId: String, threadId: String): URI? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.authorizeConnectorCard(botId, messageId, threadId)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun connectorCardStatus(botId: String, messageId: String, threadId: String): ConnectorStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.connectorCardStatus(botId, messageId, threadId)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun resumeConnectorCard(botId: String, messageId: String, threadId: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.resumeConnectorCard(botId, messageId, threadId)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
+    suspend fun dismissConnectorCard(botId: String, messageId: String, threadId: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.dismissConnectorCard(botId, messageId, threadId)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
         }
     }
 

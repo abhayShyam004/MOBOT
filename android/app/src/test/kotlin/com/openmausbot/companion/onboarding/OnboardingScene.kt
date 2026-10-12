@@ -9,6 +9,7 @@ import com.openmausbot.companion.core.CompanionClient
 import com.openmausbot.companion.core.Connection
 import com.openmausbot.companion.core.ConnectionStore
 import com.openmausbot.companion.core.Fleet
+import com.openmausbot.companion.core.Frame
 import com.openmausbot.companion.core.PairResponse
 import com.openmausbot.companion.core.PairedDevice
 import com.openmausbot.companion.core.PairingOutcome
@@ -19,7 +20,9 @@ import com.openmausbot.companion.dictation.SpeechDictation
 import com.openmausbot.companion.discovery.CompanionDiscovery
 import com.openmausbot.companion.discovery.DiscoveryState
 import com.openmausbot.companion.permissions.CompanionPermissions
+import com.openmausbot.companion.notifications.NoOpNotificationVisibility
 import com.openmausbot.companion.sharing.ShareInbox
+import com.openmausbot.companion.storage.AppearancePreferences
 import com.openmausbot.companion.storage.ChatPreferences
 import com.openmausbot.companion.storage.OnboardingPreferences
 import com.openmausbot.companion.ui.CameraPermissionController
@@ -36,7 +39,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.awaitCancellation
 import org.robolectric.RuntimeEnvironment
@@ -123,8 +125,22 @@ class OnboardingScene(
         // A 401 straight out of the stream is the shortest deterministic path
         // to Unauthorized: `runStream` catches it and stops, with no reconnect
         // delay for a test to wait out.
+        //
+        // Otherwise the stream opens and stays open, the way a paired phone's
+        // does: a hello frame settles the status on Live and the collector then
+        // suspends. An *empty* flow used to stand in for that, but an empty flow
+        // is a closed stream — the session spent every such test reporting
+        // Connecting then Offline, which the paired-world screens now say out
+        // loud during startup, so the fixture has to be a computer that answers.
         eventsFn = { _, _, _ ->
-            if (revoked) flow<StreamFrame> { throw APIError.Status(401, "revoked") } else emptyFlow()
+            if (revoked) {
+                flow<StreamFrame> { throw APIError.Status(401, "revoked") }
+            } else {
+                flow {
+                    emit(StreamFrame(Frame.Hello(cursor = "c0", resumed = true)))
+                    awaitCancellation()
+                }
+            }
         },
         hydrateFn = { _, _ -> Fleet(emptyList(), emptyList()) },
         metadataFn = { throw APIError.Status(404) },
@@ -136,6 +152,7 @@ class OnboardingScene(
         discovery = discovery,
         onboarding = onboarding,
         chatPreferences = ChatPreferences(context),
+        appearance = AppearancePreferences(context),
         camera = CameraPermissionController(
             isGranted = { "android.permission.CAMERA" in granted },
             request = { record(listOf("android.permission.CAMERA")) },
@@ -161,6 +178,9 @@ class OnboardingScene(
         shareInbox = ShareInbox(),
         alwaysOnEnabled = MutableStateFlow(false),
         onToggleAlwaysOn = {},
+        // These scenes drive onboarding, not the shade; the notification policy
+        // has its own suites.
+        notificationVisibility = NoOpNotificationVisibility,
     )
 
     init {

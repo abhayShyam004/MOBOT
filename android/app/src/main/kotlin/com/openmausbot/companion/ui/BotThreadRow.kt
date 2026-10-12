@@ -104,8 +104,10 @@ internal fun BotThreadRow(
                     }
                 }
             }
+            // The newest line, not the day the thread was made: these rows are
+            // ordered by recency, so the stamp has to be the same clock.
             val byline = listOfNotNull(
-                RelativeStamp.list(task.createdAt, now).takeIf { it.isNotEmpty() },
+                RelativeStamp.list(task.lastMessageAt ?: task.createdAt, now).takeIf { it.isNotEmpty() },
                 task.bylineLabel,
             ).joinToString(" · ")
             if (byline.isNotEmpty()) {

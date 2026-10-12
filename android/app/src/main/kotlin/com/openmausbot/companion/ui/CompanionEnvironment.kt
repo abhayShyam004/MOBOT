@@ -9,9 +9,11 @@ import com.openmausbot.companion.core.Session
 import com.openmausbot.companion.dictation.SpeechDictation
 import java.net.URI
 import com.openmausbot.companion.discovery.CompanionDiscovery
+import com.openmausbot.companion.notifications.NotificationVisibility
 import com.openmausbot.companion.permissions.CompanionPermissions
 import com.openmausbot.companion.sharing.ShareInbox
 import com.openmausbot.companion.storage.OnboardingPreferences
+import com.openmausbot.companion.storage.AppearancePreferences
 import com.openmausbot.companion.storage.ChatPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -106,9 +108,17 @@ class CompanionEnvironment(
     val onboarding: OnboardingPreferences,
     /** Phone-local transcript and composer presentation choices. */
     val chatPreferences: ChatPreferences,
+    /** The theme, as the person chose it in Appearance. */
+    val appearance: AppearancePreferences,
     val camera: CameraPermissionController,
     val mic: MicPermissionController,
     val notifications: NotificationPermissionController,
+    /**
+     * Where the person is, as the notification surface needs to know it:
+     * which conversation is on screen and whether this app is in front of
+     * them. The UI is the only layer that knows either.
+     */
+    val notificationVisibility: NotificationVisibility,
     /** Bounded in-memory avatar bytes/bitmaps; cleared on sign-out. */
     val avatars: AvatarImageStore,
     /** One-at-a-time TTS preview; bind to the profile screen lifecycle. */

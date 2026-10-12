@@ -1109,6 +1109,14 @@ describe("agents-proxy MCP surface", () => {
     expect(lastMemoryBody).toEqual({
       fromBotId: "bot-asker", fromThreadId: "thread-asker-routine", action: "append", text: "- Another fact",
     });
+    // An agent CLI that fills in every schema property sends old_text on an
+    // append. It is noise, not a replace: only the action's own fields travel
+    // to the harness, so the fact still saves instead of being refused.
+    const noisy = await callTool("memory_update", { action: "append", text: "- Noisy fact", old_text: "x" });
+    expect(noisy.result.isError).toBe(false);
+    expect(lastMemoryBody).toEqual({
+      fromBotId: "bot-asker", fromThreadId: "thread-asker-routine", action: "append", text: "- Noisy fact",
+    });
     const missing = await callTool("memory_update", { action: "replace", text: "unsafe replacement" });
     expect(missing.result.isError).toBe(true);
     expect(lastMemoryBody.action).toBe("append");

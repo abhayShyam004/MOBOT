@@ -39,6 +39,7 @@ import {
 } from "@/state/store";
 import { EngineSetup } from "./EngineSetup";
 import { isProviderSafetyBlock, PROVIDER_SAFETY_GUIDANCE, PROVIDER_SAFETY_HELP_URL } from "../../shared/provider-safety";
+import type { FailureCardData } from "../../shared/wire";
 import { BotAvatar } from "./Avatar";
 import { TurnPresence } from "./TurnPresence";
 import { showToolCallsEnabled, skillAuthoringEnabled } from "@/lib/feature-flags";
@@ -137,9 +138,12 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
       {copied ? <Check size={14} className="text-success" /> : <Copy size={14} />}
     </button>
   );
-}
-
-/** A failed turn: a real error block with a retry, not a truncated pill.
+}/** A failed turn: a real error block with a retry, not a truncated pill.
+ *
+ * [failure] is the server's classification of the same failure when it has one:
+ * the engine and model it happened to, and the one thing to do about it. It
+ * carries no provider text — the report itself is in the server's log — so a
+ * card can be read as what happened rather than as what a provider emitted.
  *
  * A `setup` error — CLI missing, or installed but not signed in — shows what
  * to do instead of a Retry, because retrying hits the same wall every time.
@@ -147,22 +151,35 @@ function CopyButton({ text, className }: { text: string; className?: string }) {
  * (with the on-focus re-probe) happens by itself when the user returns from
  * the terminal. */
 export function ErrorRow({
-  message,
-  onRetry,
-  setupInstance,
+    message,
+    onRetry,
+    setupInstance,
+    failure,
 }: {
-  message: string;
-  onRetry?: () => void;
-  setupInstance?: InstanceInfo;
+    message: string;
+    onRetry?: () => void;
+    setupInstance?: InstanceInfo;
+    failure?: FailureCardData;
 }) {
-  return (
-    <div className="flex justify-start">
-      <div className="w-fit max-w-[min(42rem,78%)] rounded-xl border border-danger/30 bg-danger/10 px-3.5 py-2.5 text-[13.5px] text-danger">
-        <div className="flex items-start gap-2">
-          <AlertTriangle size={15} className="mt-0.5 shrink-0" />
-          <span className="min-w-0 break-words">{message}</span>
-        </div>
-        {isProviderSafetyBlock(message) ? (
+    const where = [failure?.provider, failure?.model].filter(Boolean).join(" · ");
+    return (
+        <div className="flex justify-start">
+            <div className="w-fit max-w-[min(42rem,78%)] rounded-xl border border-danger/30 bg-danger/10 px-3.5 py-2.5 text-[13.5px] text-danger">
+                <div className="flex items-start gap-2">
+                    <AlertTriangle size={15} className="mt-0.5 shrink-0" />
+                    <span className="min-w-0 break-words">{message}</span>
+                    {failure?.status !== undefined && (
+                        <span className="shrink-0 rounded-full bg-danger/15 px-2 py-0.5 text-[12px]">{failure.status}</span>
+                    )}
+                </div>
+                {where && <div className="mt-1 text-[12.5px] text-ink-secondary">{where}</div>}
+                {failure && <p className="mt-1.5 text-[12.5px] leading-relaxed text-ink-secondary">{failure.detail}</p>}
+                {failure && (
+                    <div className="mt-2 rounded-lg bg-raised/60 px-3 py-2 text-[12.5px] leading-relaxed text-ink-secondary">
+                        {failure.advice}
+                    </div>
+                )}
+                {failure?.kind === "safety" || isProviderSafetyBlock(message) ? (
           <p className="mt-2 text-[12.5px] leading-relaxed text-ink-secondary">
             {PROVIDER_SAFETY_GUIDANCE}{" "}
             <a href={PROVIDER_SAFETY_HELP_URL} target="_blank" rel="noreferrer" className="underline">About provider safety checks</a>
@@ -767,6 +784,7 @@ const MessagesList = memo(function MessagesList({
                     message={m.tool.name.slice(6).trim()}
                     onRetry={m.id === messages.at(-1)?.id && canRetryLast ? onRegenerate : undefined}
                     setupInstance={m.tool.setup ? engine : undefined}
+                    failure={m.failure}
                   />
                 );
               }

@@ -1,6 +1,7 @@
 package com.openmausbot.companion.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -137,7 +138,12 @@ internal fun MascotStack(colors: List<String>, size: Dp = 28.dp, overlap: Dp = 1
 /** What the pill opens: the active chats, grouped by what they need. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-internal fun UpdatesSheet(onOpen: (Chat) -> Unit, onDismiss: () -> Unit) {
+internal fun UpdatesSheet(
+    onOpen: (Chat) -> Unit,
+    onDismiss: () -> Unit,
+    onOpenSmartRecap: () -> Unit = {},
+    onOpenDailyBriefing: () -> Unit = {},
+) {
     val session = LocalCompanion.current.session
     val state by session.state.collectAsState()
 
@@ -166,6 +172,43 @@ internal fun UpdatesSheet(onOpen: (Chat) -> Unit, onDismiss: () -> Unit) {
                     Text("Updates", fontSize = 22.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.weight(1f))
                     Text(UpdatesSummary.count(updates), fontSize = 13.sp, color = secondaryTint)
+                }
+            }
+
+            item(key = "delight-actions") {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .clip(AppRadii.pill)
+                            .background(AppTheme.colors.surfaceRaised)
+                            .border(1.dp, AppTheme.colors.hairline, AppRadii.pill)
+                            .clickable {
+                                onDismiss()
+                                onOpenSmartRecap()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text("⚡ Smart Recap", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .clip(AppRadii.pill)
+                            .background(AppTheme.colors.surfaceRaised)
+                            .border(1.dp, AppTheme.colors.hairline, AppRadii.pill)
+                            .clickable {
+                                onDismiss()
+                                onOpenDailyBriefing()
+                            }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text("☀️ Daily Briefing", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                    }
                 }
             }
 

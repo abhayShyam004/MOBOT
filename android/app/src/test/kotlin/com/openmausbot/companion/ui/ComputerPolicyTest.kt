@@ -77,6 +77,19 @@ class ComputerPolicyTest {
             ComputerPolicy.waitingHeadline(bot(id = "b", busy = true)),
         )
     }
+
+    @Test
+    fun `the spinner is bounded - a frameless wait ends in an honest state`() {
+        // A busy bot may spin only while a frame could still arrive.
+        assertTrue(ComputerPolicy.showsSpinner(busy = true, gaveUp = false))
+        // After the bounded wait, or for an idle bot, there is no spinner: an
+        // honest explanation stands in its place.
+        assertFalse(ComputerPolicy.showsSpinner(busy = true, gaveUp = true))
+        assertFalse(ComputerPolicy.showsSpinner(busy = false, gaveUp = false))
+        assertFalse(ComputerPolicy.showsSpinner(busy = null, gaveUp = false))
+        // The give-up copy names what is true instead of implying a slow host.
+        assertTrue(ComputerPolicy.GAVE_UP_EXPLANATION.contains("does not provide screen captures"))
+    }
 }
 
 /**

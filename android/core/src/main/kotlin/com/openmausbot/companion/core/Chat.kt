@@ -104,7 +104,26 @@ fun CompanionState.chatSummary(
     activity: ActivityDetail = ActivityDetail.FULL,
 ): ChatSummary? = chat(target)?.let { chat ->
     val messages = visibleTranscript(chat.threadId)
-    ChatSummary(chat, rosterPreview(messages, activity), messages.lastOrNull()?.at ?: 0.0, pinned(chat))
+    ChatSummary(chat, rosterPreview(messages, activity), lastActivityOf(chat, messages), pinned(chat))
+}
+
+/**
+ * When this conversation last moved. The transcript is the answer whenever
+ * this device holds it — it includes lines the harness does not count as
+ * messages — and a thread the app has never opened falls back to the
+ * harness's own last-message stamp, so an unopened thread that just got a
+ * reply still rises instead of sitting at the bottom with no time on it.
+ */
+private fun CompanionState.lastActivityOf(chat: Chat, messages: List<Message>): Double {
+    messages.lastOrNull()?.at?.let { return it }
+    val tasks = when (chat) {
+        is Chat.BotChat -> chat.bot.tasks
+        is Chat.RoomChat -> chat.room.tasks
+    }
+    return tasks.orEmpty()
+        .firstOrNull { it.threadId == chat.threadId }
+        ?.lastMessageAt
+        ?: 0.0
 }
 
 /**
@@ -126,7 +145,7 @@ fun CompanionState.chatSummaries(
             ChatSummary(
                 chat = chat,
                 preview = rosterPreview(messages, activity),
-                lastActivity = messages.lastOrNull()?.at ?: 0.0,
+                lastActivity = lastActivityOf(chat, messages),
                 pinned = pinned(chat),
             )
         }

@@ -126,6 +126,10 @@ private fun CompanionState.lastLine(threadId: String): String {
         Message.Kind.OPTIONS -> last.card?.title.orEmpty()
         Message.Kind.ACTIVITY -> last.tool?.name.orEmpty()
         Message.Kind.SCREEN -> "Screenshot"
+        Message.Kind.CONNECTOR -> last.connector?.let { "Connect ${it.label}" }.orEmpty()
+        Message.Kind.STRUCTURED -> last.text.takeIf { !it.isNullOrBlank() }
+            ?: last.structured?.components?.firstOrNull()?.title
+            ?: "Structured update"
     }
 }
 
@@ -178,9 +182,11 @@ internal object UpdatesSummary {
     }
 
     /**
-     * The heading as the sheet draws it. Uppercased by the invariant rules, which
-     * is what Swift's `uppercased()` does — a reader in `tr-TR` must still read
-     * WORKING and not WORKİNG.
+     * The heading as the sheet draws it — the kind's own name, in sentence case.
+     *
+     * This used to uppercase under Swift parity (`uppercased()`, with the tr-TR
+     * dotted-i trap that came with it). The locale hazard goes with it: there is no
+     * case mapping left to get wrong.
      */
-    fun sectionLabel(kind: UpdateKind): String = section(kind).uppercase()
+    fun sectionLabel(kind: UpdateKind): String = section(kind)
 }

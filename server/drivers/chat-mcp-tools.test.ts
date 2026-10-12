@@ -1,12 +1,16 @@
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spawn, type ChildProcess } from "node:child_process";
 import { ChatToolSessionError, mountChatTools, type ChatToolSession } from "./chat-mcp-tools.ts";
+import { deviceMcpServerScript } from "../../scripts/lib/omb-mcp-server-script.mjs";
+import { remoteMcpFixtureScript } from "../../scripts/lib/omb-mcp-remote-fixture.mjs";
 
 const dirs: string[] = [];
 const sessions: ChatToolSession[] = [];
 const controllers: AbortController[] = [];
+const children: ChildProcess[] = [];
 const schema = { type: "object", properties: { value: { type: "string" } }, required: ["value"], additionalProperties: false };
 
 function fixture(body = "", toolSchema: Record<string, unknown> = schema) {
@@ -54,6 +58,29 @@ function fixture(body = "", toolSchema: Record<string, unknown> = schema) {
   };
 }
 
+// The Phase 5 device fixture, byte-for-byte: the same script the phones run
+// (scripts/test-android-mcp.mjs generates it). Executed here through the real
+// ChatMcpClient spawn so the on-device transport is exercised in CI before a
+// phone is ever attached — any protocol drift fails here first.
+function deviceFixture(workspace: string) {
+  const dir = mkdtempSync(join(tmpdir(), "omb-chat-mcp-device-"));
+  dirs.push(dir);
+  const script = join(dir, "omb-mcp-server.cjs");
+  writeFileSync(script, deviceMcpServerScript());
+  chmodSync(script, 0o755);
+  const controller = new AbortController();
+  controllers.push(controller);
+  const server = { command: script, args: [], env: { AC_WORKSPACE: workspace } };
+  return {
+    dir, controller, server,
+    async mount() {
+      const session = await mountChatTools({ custom: { ombmcp: server } }, controller.signal);
+      sessions.push(session);
+      return session;
+    },
+  };
+}
+
 function alive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
 }
@@ -61,6 +88,7 @@ function alive(pid: number): boolean {
 afterEach(async () => {
   for (const controller of controllers.splice(0)) controller.abort();
   await Promise.all(sessions.splice(0).map((session) => session.close()));
+  for (const child of children.splice(0)) child.kill();
   for (const dir of dirs.splice(0)) rmSync(dir, { force: true, recursive: true });
 });
 
@@ -261,5 +289,124 @@ describe("Chat MCP schema validation", () => {
     const f = fixture("", toolSchema);
     await expect(f.mount()).rejects.toThrow("schema could not be validated");
     expect(alive(f.read().pid)).toBe(false);
+  });
+
+  // Lifecycle: the mount path is per-turn by design (the driver remounts for
+  // every send), so "restart" here means: after a server crash mid-session,
+  // a freshly mounted session against the same config must work, and the
+  // crashed session must not have leaked its process.
+  it("recovers with a fresh mount after a server crash and leaves no orphaned process", async () => {
+    const f = fixture("");
+    const session = await f.mount();
+    expect(session.definitions.map((t) => t.function.name)).toEqual(["audit_write"]);
+    const firstPid = f.read().pid;
+    // Crash the server exactly as a misbehaving integration would.
+    process.kill(firstPid, "SIGKILL");
+    await expect(session.execute("audit_write", { value: "x" }, new AbortController().signal))
+      .rejects.toThrow(/exited|MCP/);
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(alive(firstPid)).toBe(false);
+    // Recovery: a new mount from the same server config gets a new process
+    // and completes a full discovery + execution round.
+    const second = await f.mount();
+    const secondPid = f.read().pid;
+    expect(secondPid).not.toBe(firstPid);
+    const result = await second.execute("audit_write", { value: "again" }, new AbortController().signal);
+    expect(result.ok).toBe(true);
+    await expect(second.close()).resolves.toBeUndefined();
+    expect(alive(secondPid)).toBe(false);
+  });
+
+  it("fails a mount when the server emits a malformed JSON frame instead of accepting it", async () => {
+    // Emit garbage on stdout immediately after the first inbound frame —
+    // the strict parser must fail the whole session rather than skip a
+    // corrupt line, and the spawned process must not survive the failure.
+    const f = fixture("if (calls.length === 1) process.stdout.write('@@not-json@@\\n');");
+    await expect(f.mount()).rejects.toThrow(/invalid JSON|invalid RPC envelope|exited/);
+    expect(alive(f.read().pid)).toBe(false);
+  });
+
+  // ── the Phase 5 device fixture, run through the identical spawn the phones use ──
+  describe("device MCP fixture (scripts/lib/omb-mcp-server-script.mjs)", () => {
+    it("discovers ombmcp tools, executes writes inside the workspace, and reads them back", async () => {
+      const ws = mkdtempSync(join(tmpdir(), "omb-mcp-ws-"));
+      dirs.push(ws);
+      const f = deviceFixture(ws);
+      const session = await f.mount();
+      // Dynamic check: the names the device driver cues are derived from the
+      // mount, not hardcoded assumptions about them.
+      const names = session.definitions.map((t) => t.function.name);
+      expect(names).toEqual(["ombmcp_ombmcp_write", "ombmcp_ombmcp_read"]);
+      const written = await session.execute("ombmcp_ombmcp_write", { path: "nested/mcp-proof.txt", text: "device fixture payload" }, new AbortController().signal);
+      expect(written.ok).toBe(true);
+      expect(written.text).toBe("MCP wrote nested/mcp-proof.txt");
+      expect(readFileSync(join(ws, "nested/mcp-proof.txt"), "utf8")).toBe("device fixture payload");
+      const read = await session.execute("ombmcp_ombmcp_read", { path: "nested/mcp-proof.txt" }, new AbortController().signal);
+      expect(read.ok).toBe(true);
+      expect(read.text).toBe("device fixture payload");
+      await expect(session.close()).resolves.toBeUndefined();
+    });
+
+    it.each([
+      { path: "../escape.txt", label: "a ../ traversal" },
+      { path: "/etc/passwd", label: "an absolute path" },
+      { path: "a/../../b.txt", label: "a nested traversal" },
+    ])("refuses $label with an isError result and writes nothing", async ({ path }) => {
+      const ws = mkdtempSync(join(tmpdir(), "omb-mcp-ws-"));
+      dirs.push(ws);
+      const f = deviceFixture(ws);
+      const session = await f.mount();
+      const result = await session.execute("ombmcp_ombmcp_write", { path, text: "nope" }, new AbortController().signal);
+      expect(result.ok).toBe(false);
+      expect(result.text).toContain("escapes the workspace");
+      await expect(session.close()).resolves.toBeUndefined();
+      expect(existsSync(join(ws, "escape.txt"))).toBe(false);
+    });
+  });
+
+  // ── the Phase 5 REMOTE device fixture (scripts/lib/omb-mcp-remote-fixture.mjs):
+  // spawned standalone exactly as the phones run it, mounted through the same
+  // url-transport client — CI and device share one fixture implementation ──
+  describe.each(["http", "sse"] as const)("remote MCP device fixture (%s transport)", (transport) => {
+    function remoteDeviceFixture(workspace: string) {
+      const dir = mkdtempSync(join(tmpdir(), "omb-mcp-remote-"));
+      dirs.push(dir);
+      const script = join(dir, "omb-mcp-remote-fixture.mjs");
+      writeFileSync(script, remoteMcpFixtureScript(18_791, transport, "mcp-remote-effect.txt"));
+      const controller = new AbortController();
+      controllers.push(controller);
+      const child = spawn(process.execPath, [script], {
+        env: { ...process.env, AC_WORKSPACE: workspace }, stdio: ["ignore", "pipe", "pipe"],
+      });
+      children.push(child);
+      const url = transport === "sse" ? "http://127.0.0.1:18791/mcp-sse" : "http://127.0.0.1:18791/mcp";
+      return {
+        controller, server: { type: transport, url, headers: {} } as const,
+        async up() {
+          for (let i = 0; i < 30; i += 1) {
+            try { await fetch(url, { signal: AbortSignal.timeout(500) }); return true; } catch {
+              await new Promise((r) => setTimeout(r, 100));
+            }
+          }
+          return false;
+        },
+      };
+    }
+
+    it("discovers the write tool and executes it inside the workspace", async () => {
+      const ws = mkdtempSync(join(tmpdir(), "omb-mcp-rws-"));
+      dirs.push(ws);
+      const f = remoteDeviceFixture(ws);
+      expect(await f.up()).toBe(true);
+      const session = await mountChatTools({ custom: { ombremote: f.server } }, f.controller.signal);
+      sessions.push(session);
+      const names = session.definitions.map((t) => t.function.name);
+      expect(names).toEqual(["ombremote_write"]);
+      const written = await session.execute("ombremote_write", { name: "receipt", value: "done" }, new AbortController().signal);
+      expect(written.ok).toBe(true);
+      expect(written.text).toBe("Stored receipt=done");
+      expect(readFileSync(join(ws, "mcp-remote-effect.txt"), "utf8")).toBe("receipt=done");
+      await expect(session.close()).resolves.toBeUndefined();
+    });
   });
 });

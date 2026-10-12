@@ -23,6 +23,7 @@ import type { RuntimeEvent } from "./runtime-events.ts";
 import type { Notification } from "./notification.ts";
 import type { Routine, RoutineRun } from "./routines.ts";
 import type { WebhookAttempt, WebhookTrigger } from "./webhooks.ts";
+import type { StructuredResponseData } from "./structured-response.ts";
 
 /** Reasoning-effort levels, ascending. A union of everything any engine
  * accepts; each driver declares the subset its CLI will take. Lives here
@@ -138,6 +139,10 @@ export interface WireTask {
   turnStartedAt?: number;
   /** Where this conversation works when pinned; absent = follow the bot. */
   surface?: Surface;
+  /** Epoch ms of this thread's newest message, from the harness's own
+   * transcript — what a list that orders by recency sorts on. Absent on a
+   * record from before the field existed. */
+  lastMessageAt?: number;
   /** what this task has spent, banked once per turn */
   usage?: TaskUsage;
   /** the folder this task's turns run in, pinned on its first turn. */
@@ -266,11 +271,13 @@ export interface WireMessage {
   roomRequest?: { id: string; phase: "request" | "result" };
   id: string;
   role: "bot" | "user";
-  kind: "text" | "options" | "activity" | "screen" | "connector" | "secret" | "routine.run" | "goal.run";
+  kind: "text" | "options" | "activity" | "screen" | "connector" | "secret" | "routine.run" | "goal.run" | "structured";
   text?: string;
   /** Durable provider output stored by the harness; renderers receive only
    * the allowlisted /api/attachments URL. */
   attachments?: Array<{ kind: "image"; path: string; mime: string }>;
+  /** Native structured response payload carrying versioned components (Phase J). */
+  structured?: StructuredResponseData;
   card?: OptionCardData;
   connector?: ConnectorCardData;
   secret?: SecretRequestCardData;
@@ -279,7 +286,11 @@ export interface WireMessage {
   /** Terminal receipt for a bounded multi-bot channel goal. */
   goalRun?: GroupGoalRunCardData;
   /** activity messages: tool name + outcome. */
-  tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean; terminal?: boolean; summary?: string; input?: string; output?: string };
+  tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean; terminal?: boolean; summary?: string; input?: string; output?: string; error?: string };
+  /** A turn that failed, reduced to the four things a person needs: what
+   * went wrong, which engine and model it happened to, and what to do about
+   * it. Never the provider's own payload — see [FailureCardData]. */
+  failure?: FailureCardData;
   /** user messages sent INTO a running turn (capabilities.queueing). */
   steered?: boolean;
   /** A user-role message that arrived through the server's HTTP API. */
@@ -319,6 +330,66 @@ export interface WireMessage {
   queueId?: string;
 }
 
+/**
+ * A settled turn that ended in failure, in the words of the harness.
+ *
+ * A provider answers a failed request with a status line and, very often, its
+ * own JSON body. That text is diagnostics: it belongs in the log a maintainer
+ * can read, not in a conversation a person is reading. So every string on this
+ * card is written by the harness — `server/runtime-failure.ts` writes the one
+ * that rides the wire — and none of it is relayed from the provider. That is
+ * the point of the shape: a new provider, or a new shape of failure, cannot
+ * put machine output in front of a person.
+ *
+ * The card rides an activity message, so a client that does not know this
+ * field still shows the harness's own one-line summary instead of a payload,
+ * and one that does can draw the full card with its actions.
+ */
+export interface FailureCardData {
+  kind: FailureKind;
+  /** One line: what went wrong. */
+  title: string;
+  /** A sentence or two of what happened, written for a person. */
+  detail: string;
+  /** The one thing worth doing next. */
+  advice: string;
+  /** The status the provider answered with, when the failure was one. */
+  status?: number;
+  /** The engine that failed, as the app names it, plus the id its settings
+   * row is addressed by. */
+  instanceId?: string;
+  provider?: string;
+  model?: string;
+  /** Automatic attempts the turn made before this card was written. */
+  attempts?: number;
+}
+
+/**
+ * The ways a turn can fail, as one closed set.
+ *
+ * Closed on purpose: each member owns a screenful of copy, so adding a kind is
+ * a decision about what to say — never a place for a provider's own wording to
+ * slip through as a new case. [FailureKind] is what the actions hang off too:
+ * a rate limit wants a retry, a missing model wants a different model, a bad
+ * key wants the provider's settings.
+ */
+export type FailureKind =
+  | "rate_limit"
+  | "quota"
+  | "auth"
+  | "access"
+  | "model_unavailable"
+  | "invalid_request"
+  | "provider_error"
+  | "overloaded"
+  | "network"
+  | "timeout"
+  | "tooling"
+  | "safety"
+  | "setup"
+  | "aborted"
+  | "unknown";
+
 export interface OptionCardData {
   title: string;
   subtitle: string;
@@ -351,6 +422,20 @@ export interface OptionCardData {
   skillRequest?: SkillRequestCardData;
   /** A provider's structured question set. */
   questionRequest?: QuestionRequestCardData;
+  /** A bot's own mid-task question (the ask_user tool): the harness owns the
+   * answer, no provider request is waiting behind it. */
+  askUserRequest?: AskUserRequestCardData;
+}
+
+/** The durable payload behind an ask_user card. The questions ride in
+ * `questionRequest` so every client that can draw one draws this one too;
+ * this block is the harness's routing handle. */
+export interface AskUserRequestCardData {
+  version: 1;
+  /** The id the answer is delivered against — not a provider request. */
+  requestId: string;
+  /** One-line summary of what the bot wants to know. */
+  summary: string;
 }
 
 export interface ConnectorCardData {
@@ -434,6 +519,11 @@ export interface WireGroup {
   /** New user-created rooms start with setup pending. */
   setupCompletedAt?: number | null;
   setupSkippedAt?: number | null;
+  /** The first-run setup is still owed: the room can be filled in and
+   * started from any client (the phone included) before it takes a first
+   * message. Computed at projection time from the two markers above, so no
+   * client has to reconstruct the rule. */
+  setupPending?: boolean;
   /** True while any member (or hand-off) is mid-turn. Computed at
    * projection time, never persisted. */
   working: boolean;

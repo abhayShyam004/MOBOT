@@ -134,6 +134,26 @@ class ThreadNavigationTest {
     }
 
     @Test
+    fun aThreadThatJustMovedRanksAboveOlderIdleThreadsAndTheStampRidesTheWire() {
+        val threads = listOf(
+            task("quiet").copy(lastMessageAt = 4.0),
+            task("busy").copy(busy = true, lastMessageAt = 1.0),
+            task("newest").copy(lastMessageAt = 9.0),
+            // A thread with no message yet, and a harness that never sent the
+            // stamp, both fall back to creation time rather than to zero.
+            task("never").copy(createdAt = 7.0),
+        )
+        assertEquals(
+            listOf("busy", "newest", "never", "quiet"),
+            bot.copy(tasks = threads).threadGroups().single().tasks.map { it.threadId },
+        )
+        val decoded = CompanionJson.decodeFromString<BotTask>(
+            """{"threadId":"t","title":"T","createdAt":2,"lastMessageAt":8}"""
+        )
+        assertEquals(8.0, decoded.lastMessageAt)
+    }
+
+    @Test
     fun archivedThreadsFoldAwayUnlessTheyDemandAttentionOrAreCurrent() {
         val archived = listOf("quiet", "current", "unread", "busy", "waiting", "open").map {
             task(it).copy(

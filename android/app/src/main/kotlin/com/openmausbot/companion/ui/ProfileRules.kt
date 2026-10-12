@@ -21,6 +21,8 @@ data class ProfileForm(
     val description: String,
     val notifications: Boolean,
     val crop: AvatarCrop,
+    /** One of the ten palette names; the mascot tint and the name pill. */
+    val color: String,
     /** Empty is the server's "use the workspace default", not "no value". */
     val voice: String,
     val speakReplies: Boolean,
@@ -33,6 +35,7 @@ data class ProfileForm(
             description = bot.description,
             notifications = bot.notifications,
             crop = bot.avatarCrop ?: AvatarCrop.MASCOT,
+            color = bot.color,
             voice = bot.voice ?: "",
             speakReplies = bot.speakReplies == true,
         )
@@ -67,7 +70,7 @@ object ProfileRules {
             "key is sent to or stored on this phone."
 
     private const val GENERATE_BLOCKED_FOOTER: String =
-        "To generate images, configure the shared image provider in OpenMausBot on your " +
+        "To generate images, configure the shared image provider in MOBOT on your " +
             "computer. Provider keys cannot be added from a phone."
 
     // The ElevenLabs copy below is what iOS ships and is correct under that
@@ -101,7 +104,7 @@ object ProfileRules {
      */
     private const val SYSTEM_VOICE_UNCONFIGURED_FOOTER: String =
         "Your computer's built-in voices need no key, and it reports none it can use. Switch " +
-            "the voice engine in OpenMausBot on the computer to turn speech back on."
+            "the voice engine in MOBOT on the computer to turn speech back on."
 
     private const val VOICE_NO_DEFAULT_FOOTER: String =
         "No workspace default voice is selected. Choose an agent-specific voice above; " +
@@ -110,7 +113,7 @@ object ProfileRules {
     private const val FISH_TTS_UNCONFIGURED: String = "Fish Audio is not configured"
 
     private const val FISH_VOICE_UNCONFIGURED_FOOTER: String =
-        "Add the shared Fish Audio API key in OpenMausBot on the computer. The key is " +
+        "Add the shared Fish Audio API key in MOBOT on the computer. The key is " +
             "never returned to this phone."
 
     private const val FISH_VOICE_NO_DEFAULT_FOOTER: String =
@@ -128,7 +131,7 @@ object ProfileRules {
     private const val CHATTERBOX_TTS_UNCONFIGURED: String = "The Chatterbox server is not connected"
 
     private const val CHATTERBOX_VOICE_UNCONFIGURED_FOOTER: String =
-        "Add the address of your Chatterbox server in OpenMausBot on the computer to turn " +
+        "Add the address of your Chatterbox server in MOBOT on the computer to turn " +
             "speech back on."
 
     private const val CHATTERBOX_VOICE_NO_DEFAULT_FOOTER: String =
@@ -182,6 +185,7 @@ object ProfileRules {
                 form.notifications
             },
             avatarCrop = if (form.crop == baseline.crop) null else form.crop,
+            color = if (form.color == baseline.color) null else form.color,
             voice = if (form.voice == baseline.voice) null else form.voice,
             speakReplies = if (savedSpeakReplies == baseline.speakReplies) {
                 null

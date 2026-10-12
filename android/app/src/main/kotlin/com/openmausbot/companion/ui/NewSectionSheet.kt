@@ -14,7 +14,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -137,10 +136,10 @@ internal fun NewSectionSheet(onDismiss: () -> Unit) {
                 )
             }
 
-            OutlinedTextField(
+            AppTextField(
                 value = name,
                 onValueChange = { name = it },
-                label = { Text("Section name") },
+                label = "Section name",
                 isError = trimmed.length > SectionRules.MAX_NAME_LENGTH,
                 supportingText = {
                     Row(modifier = Modifier.fillMaxWidth()) {

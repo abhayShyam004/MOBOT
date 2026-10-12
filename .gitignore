@@ -16,6 +16,7 @@ electron/resources/OpenMausBot Speech.app
 electron/resources/OpenMausBot Recorder.app
 release
 .omb-scratch
+.omb-native-host
 .wrangler/
 .dev.vars
 .dev.vars.*
@@ -40,3 +41,19 @@ deploy/podman/.env
 deploy/podman/.env.*
 !deploy/podman/.env.example
 /.env
+
+# Freebuff preview-sandbox data (bots/config for the preview worktree only)
+.omb-preview-data/
+
+# Local-only agent-skill installs (npx skills add ...) — not project content.
+.agents/
+.claude/skills/
+
+# Freebuff thread workspace metadata.
+.freebuff/
+
+# Local process logs and scratch backups
+.omb-proc-logs/
+backups/
+bg/
+

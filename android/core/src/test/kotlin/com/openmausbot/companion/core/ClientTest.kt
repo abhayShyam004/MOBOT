@@ -480,6 +480,87 @@ class ClientTest {
         assertEquals("/api/groups/g1/read", server.takeRequest().path)
     }
 
+    @Test
+    fun openaiCompatSaveAndRefreshHitTheStandaloneProviderRoutes() = runBlocking {
+        server.enqueue(json("""{"openaiCompat":{"configured":true,"url":"http://10.0.0.2:1234/v1"}}"""))
+        val status = client.updateOpenAICompat("http://10.0.0.2:1234/v1", "sk-test")
+        assertTrue(status.openaiCompat?.configured == true)
+
+        server.enqueue(json(fixtureText("instances")))
+        val instances = client.refreshOpenAICompatModels()
+        assertTrue(instances.isNotEmpty())
+
+        val requests = List(2) { server.takeRequest() }
+        assertEquals("PUT /api/config", "${requests[0].method} ${requests[0].path}")
+        assertEquals(
+            mapOf("openaiCompat" to mapOf("url" to "http://10.0.0.2:1234/v1", "key" to "sk-test")),
+            nestedBody(requests[0].body.readUtf8()),
+        )
+        assertEquals(
+            "POST /api/instances/openaiCompat/refresh-models",
+            "${requests[1].method} ${requests[1].path}",
+        )
+        requests.forEach { assertEquals("Bearer device-token", it.getHeader("Authorization")) }
+    }
+
+    @Test
+    fun openaiCompatSaveOmitsTheKeyWhenAbsentSoTheStoredOneSurvives() = runBlocking {
+        server.enqueue(json("""{"openaiCompat":{"configured":true,"url":"http://10.0.0.2:1234/v1"}}"""))
+        client.updateOpenAICompat("http://10.0.0.2:1234/v1", null)
+
+        val body = CompanionJson.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        val openaiCompat = body.getValue("openaiCompat").jsonObject
+        assertTrue("key" !in openaiCompat)
+        assertEquals("http://10.0.0.2:1234/v1", openaiCompat.getValue("url").jsonPrimitive.content)
+    }
+
+    @Test
+    fun roomSetupAndCustomProvidersReachTheirRoutes() = runBlocking {
+        server.enqueue(json("""{"group":${roomJson()}}"""))
+        val room = client.finishRoomSetup("g new", "shared brief", everyone = true)
+        assertEquals("g-new", room.id)
+
+        server.enqueue(json(fixtureText("instances")))
+        val created = client.createCustomProvider(
+            "anthropic-compat",
+            "Work gateway",
+            "https://gateway.example",
+            "sk-test",
+            "team-claude",
+        )
+        assertTrue(created.isNotEmpty())
+
+        server.enqueue(json("""{"instances":[]}"""))
+        client.deleteCustomProvider("api-work-gateway")
+
+        server.enqueue(json("""{"instances":[]}"""))
+        client.updateProviderKey("api-work-gateway", "https://home.example", "k2")
+
+        val requests = List(4) { server.takeRequest() }
+        assertEquals("PATCH /api/groups/g%20new/setup", "${requests[0].method} ${requests[0].path}")
+        val setupBody = CompanionJson.parseToJsonElement(requests[0].body.readUtf8()).jsonObject
+        assertEquals("complete", setupBody.getValue("action").jsonPrimitive.content)
+        assertEquals("shared brief", setupBody.getValue("bulletin").jsonPrimitive.content)
+        assertEquals(
+            "everyone",
+            setupBody.getValue("defaultResponder").jsonObject.getValue("kind").jsonPrimitive.content,
+        )
+
+        assertEquals("POST /api/instances", "${requests[1].method} ${requests[1].path}")
+        val createdBody = CompanionJson.parseToJsonElement(requests[1].body.readUtf8()).jsonObject
+        assertEquals("anthropic-compat", createdBody.getValue("driver").jsonPrimitive.content)
+        assertEquals("Work gateway", createdBody.getValue("name").jsonPrimitive.content)
+        assertEquals("https://gateway.example", createdBody.getValue("url").jsonPrimitive.content)
+        assertEquals("team-claude", createdBody.getValue("model").jsonPrimitive.content)
+
+        assertEquals("DELETE /api/instances/api-work-gateway", "${requests[2].method} ${requests[2].path}")
+        // A custom provider's own row, never the shared openaiCompat section.
+        assertEquals("PATCH /api/instances/api-work-gateway", "${requests[3].method} ${requests[3].path}")
+        val keyBody = CompanionJson.parseToJsonElement(requests[3].body.readUtf8()).jsonObject
+        assertEquals("https://home.example", keyBody.getValue("url").jsonPrimitive.content)
+        assertEquals("k2", keyBody.getValue("key").jsonPrimitive.content)
+    }
+
     private fun json(body: String, code: Int = 200) = MockResponse()
         .setResponseCode(code)
         .setHeader("Content-Type", "application/json")
@@ -487,6 +568,16 @@ class ClientTest {
 
     private fun stringBody(raw: String): Map<String, String> =
         CompanionJson.parseToJsonElement(raw).jsonObject.mapValues { it.value.jsonPrimitive.content }
+
+    private fun nestedBody(raw: String): Map<String, Any> =
+        CompanionJson.parseToJsonElement(raw).jsonObject.mapValues { (key, value) ->
+            val obj = value.jsonObject
+            if (key == "openaiCompat") {
+                obj.mapValues { (_, v) -> v.jsonPrimitive.content }
+            } else {
+                obj
+            }
+        }
 
     private fun botJson(): String {
         val root = CompanionJson.parseToJsonElement(fixtureText("bots-full")).jsonObject

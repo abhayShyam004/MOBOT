@@ -94,6 +94,8 @@ const ALLOWED: ReadonlyArray<{ method: string; path: RegExp }> = [
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/respond$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/interrupt$/ },
   { method: "DELETE", path: /^\/api\/bots\/[\w-]+\/queue\/[\w-]+$/ },
+  // Deleting the agent itself — a roster long-press action, not a settings maze.
+  { method: "DELETE", path: /^\/api\/bots\/[\w-]+$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/read$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/always-allow$/ },
   { method: "POST", path: /^\/api\/bots\/[\w-]+\/messages\/[\w-]+\/edit$/ },

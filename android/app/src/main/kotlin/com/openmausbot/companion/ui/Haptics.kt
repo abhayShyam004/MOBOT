@@ -146,7 +146,7 @@ object CompanionHaptics {
      */
     fun forCommand(effect: SlashEffect): HapticCue? = when (effect) {
         is SlashEffect.Send -> null
-        SlashEffect.OpenComputer, SlashEffect.OpenTasks -> HapticCue.SELECT
+        SlashEffect.OpenComputer, SlashEffect.OpenTasks, SlashEffect.Stop, SlashEffect.NewThread -> HapticCue.SELECT
     }
 }
 

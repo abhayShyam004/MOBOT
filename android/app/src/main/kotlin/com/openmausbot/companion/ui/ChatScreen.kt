@@ -16,6 +16,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -98,6 +99,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.openmausbot.companion.R
 import com.openmausbot.companion.core.AttachmentPolicy
 import com.openmausbot.companion.core.Chat
+import com.openmausbot.companion.core.ErrorClassifier
 import com.openmausbot.companion.core.ChatTarget
 import com.openmausbot.companion.core.LocalMessageLink
 import com.openmausbot.companion.core.PendingMessageAttachment
@@ -107,6 +109,8 @@ import com.openmausbot.companion.core.Dictation
 import com.openmausbot.companion.core.DisplayedMessageAttachment
 import com.openmausbot.companion.core.DownloadedFile
 import com.openmausbot.companion.core.Message
+import com.openmausbot.companion.core.BotMood
+import com.openmausbot.companion.core.BotMoodRules
 import com.openmausbot.companion.core.ThreadRef
 import com.openmausbot.companion.core.TranscriptRow
 import com.openmausbot.companion.core.target
@@ -138,6 +142,10 @@ fun ChatScreen(
     onBack: () -> Unit,
     onOpenComputer: (String) -> Unit,
     onOpenOverview: (String) -> Unit,
+    /** Bot settings' Memory page, addressed by bot id. */
+    onOpenMemory: (String) -> Unit = {},
+    /** The provider fix panel's one remedy: Model providers. */
+    onOpenModelProviders: () -> Unit = {},
     /**
      * True while this conversation is still on the navigator stack (including
      * under Computer). Used on dispose to keep the in-memory draft across a
@@ -165,7 +173,7 @@ fun ChatScreen(
             // Resolve the owner without changing the task named by the destination.
             val resolved = (destination as? Destination.Thread)?.let { resolution.chat.target }
             LaunchedEffect(resolved) { if (resolved != null) onResolved(resolved) }
-            LoadedChat(resolution.chat, state, onBack, onOpenComputer, onOpenOverview, retainsDraft, onResolved, onOpenChat)
+            LoadedChat(resolution.chat, state, onBack, onOpenComputer, onOpenOverview, onOpenMemory, onOpenModelProviders, retainsDraft, onResolved, onOpenChat)
         }
     }
 }
@@ -180,13 +188,17 @@ private fun OpeningThread(onBack: () -> Unit) {
                 .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            BackPill(unreadElsewhere = 0, onBack = onBack)
+            BackChevron(unreadElsewhere = 0, onBack = onBack)
         }
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
         }
     }
 }
+
+/** Every message id visible right now — the baseline a send records so the
+ * fix panel can tell a failure of THIS send from one already in the log. */
+private fun transcriptIds(rows: List<Message>): Set<String> = rows.mapTo(mutableSetOf()) { it.id }
 
 @Composable
 private fun LoadedChat(
@@ -195,6 +207,8 @@ private fun LoadedChat(
     onBack: () -> Unit,
     onOpenComputer: (String) -> Unit,
     onOpenOverview: (String) -> Unit,
+    onOpenMemory: (String) -> Unit,
+    onOpenModelProviders: () -> Unit,
     retainsDraft: (chatId: String) -> Boolean,
     onSelectTask: (ChatTarget) -> Unit,
     onOpenChat: (Chat) -> Unit,
@@ -247,10 +261,13 @@ private fun LoadedChat(
         }
     }
     var showingTasks by remember { mutableStateOf(false) }
+    var showingGroupSettings by remember { mutableStateOf(false) }
     var creatingThread by remember(chatId) { mutableStateOf(false) }
     // Saveable: the profile form is a form, and a rotation must not throw away
     // what was typed into it — the sheet has to come back for that to matter.
     var showingProfile by rememberSaveable { mutableStateOf(false) }
+    // …opened specifically for the model list, by a failure card's Change model.
+    var showingModelPicker by rememberSaveable { mutableStateOf(false) }
     var showingPlus by remember(threadId) { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val context = LocalContext.current
@@ -272,6 +289,7 @@ private fun LoadedChat(
     var fileOpenError by remember(threadId) { mutableStateOf<String?>(null) }
     var filePreview by remember(threadId) { mutableStateOf<FilePreviewItem?>(null) }
     var fileDownloadJob by remember(threadId) { mutableStateOf<Job?>(null) }
+    var startingRoom by remember(threadId) { mutableStateOf(false) }
     val filePreviews = remember(context) { FilePreviews(context) }
     DisposableEffect(filePreviews) {
         onDispose {
@@ -430,6 +448,62 @@ private fun LoadedChat(
     // preference, so changing the choice never mutates server state.
     val transcript = remember(rawTranscript, activityDetail) {
         transcriptRows(rawTranscript, activityDetail)
+    }
+    // A failure whose cause is fixable (key, endpoint, model) becomes the
+    // provider panel above the composer instead of the composer's one red
+    // line. Two doors lead here: a send that threw, and a turn the harness
+    // refused AFTER it was posted — the model/provider error the transcript
+    // keeps as a failed activity chip.
+    //
+    // A row that carries a failure card is not one of these: the card is the
+    // failure's own surface, drawn in the transcript with its own actions, and
+    // two competing explanations of one failure is exactly what the card was
+    // built to end. A computer too old to send the card still arrives here as
+    // an "error:" chip, which is what this branch is now for.
+    val turnIssue = remember(transcript) {
+        transcript.asReversed().firstNotNullOfOrNull { row ->
+            val rows = when (row) {
+                is TranscriptRow.Single -> listOf(row.message)
+                is TranscriptRow.ActivityRun -> row.items
+            }
+            rows.lastOrNull { message ->
+                val tool = message.tool
+                tool != null && tool.ok == false && tool.name.startsWith("error:") && message.failure == null
+            }?.let { message ->
+                val tool = message.tool ?: return@let null
+                message.id to tool.name.removePrefix("error:").trim()
+            }
+        }
+    }
+    // What each failure card in this thread would run if its Retry were tapped,
+    // keyed by the card's message id. Absent while the task is busy: there is
+    // nothing to retry into a turn that is already running.
+    val retrySources: Map<String, Message> = remember(rawTranscript, chat.busy) {
+        if (chat.busy) {
+            emptyMap()
+        } else {
+            rawTranscript.filter { it.failure != null }
+                .mapNotNull { card -> RetryPlan.sourceFor(rawTranscript, card.id)?.let { card.id to it } }
+                .toMap()
+        }
+    }
+    // Dismissing the panel holds it shut for THIS failure; a new one arrives
+    // under a new message id and opens the panel again.
+    var dismissedTurnIssue by remember(threadId) { mutableStateOf<String?>(null) }
+    // The transcript's message ids at the last send. A panel is armed by a send
+    // — the moment a failure can actually be this screen's — and may then only
+    // show a failure that send PRODUCED. Without this baseline, one old
+    // "error:" chip anywhere in the transcript reopened the panel on every
+    // send, even on a turn that answered perfectly. Null means no send on this
+    // screen yet, so a screen opened onto a failed conversation shows history
+    // as history.
+    var sendBaseline by remember(threadId) { mutableStateOf<Set<String>?>(null) }
+    val providerIssue = remember(fileOpenError, attachmentError, turnIssue, dismissedTurnIssue, sendBaseline) {
+        val source = fileOpenError ?: attachmentError
+            ?: turnIssue
+                ?.takeIf { (id, _) -> sendBaseline?.contains(id) == false && id != dismissedTurnIssue }
+                ?.second
+        source?.let { ApiErrorRules.classify(it) }?.takeIf { it.configureProviders }
     }
     val predictiveChips = remember(quickReplies) {
         quickReplies.map { PredictiveChip(title = it.title, prompt = it.prompt, icon = it.icon) }
@@ -665,6 +739,9 @@ private fun LoadedChat(
             sendingMessage = true
             attachmentError = null
             showingPlus = false
+            // Same arming as a text-only send: what fails now belongs here.
+            sendBaseline = transcriptIds(rawTranscript)
+            dismissedTurnIssue = null
             scope.launch {
                 val sent = try {
                     session.send(text, outgoing, chat)
@@ -696,10 +773,25 @@ private fun LoadedChat(
         // motor only: the sound there is an Apple system id with no counterpart
         // here, and the keyboard already owns that job on this platform.
         haptics.play(HapticCue.SEND)
+        // A send arms the fix panel and reopens it for a fresh failure: what
+        // follows is this screen's own outcome, not the transcript's history.
+        sendBaseline = transcriptIds(rawTranscript)
+        dismissedTurnIssue = null
         // Deliberately not disabled while the bot is busy: the harness answers
         // 409 and Session surfaces "The bot is busy — stop it first." That is a
         // clearer answer than a dead button.
-        scope.launch { session.send(text, chat) }
+        scope.launch {
+            session.actionError = null
+            session.send(text, chat)
+            session.actionError?.let { message ->
+                // A send that failed BEFORE the harness accepted it belongs to
+                // this conversation: the composer's red line — or, when the
+                // cause is a provider setting, the fix panel — instead of a
+                // global dialog the chat can't act on.
+                attachmentError = message
+                session.actionError = null
+            }
+        }
     }
 
     fun selectCommand(command: SlashCommand) {
@@ -722,6 +814,35 @@ private fun LoadedChat(
                 dictation.stop()
                 clearDraft()
                 showingTasks = true
+            }
+
+            SlashEffect.Stop -> {
+                dictation.stop()
+                clearDraft()
+                if (bot != null && chat.busy) scope.launch { session.interrupt(bot) }
+            }
+
+            SlashEffect.NewThread -> if (!creatingThread && TaskRules.canCreate(chat)) {
+                creatingThread = true
+                scope.launch {
+                    try {
+                        val created = when (chat) {
+                            is Chat.BotChat -> session.createTask(chat.bot, null)?.let(Chat::BotChat)
+                            is Chat.RoomChat -> if (chat.supportsTasks) session.createTask(chat.room, null)
+                                ?.let(Chat::RoomChat) else null
+                        }
+                        if (created == null) {
+                            attachmentError = session.actionError ?: "Couldn't create this thread. Try again."
+                            session.actionError = null
+                        } else {
+                            dictation.stop()
+                            clearDraft()
+                            onSelectTask(created.target)
+                        }
+                    } finally {
+                        creatingThread = false
+                    }
+                }
             }
 
             is SlashEffect.Send -> submit(effect.prompt)
@@ -758,6 +879,11 @@ private fun LoadedChat(
     BackHandler(enabled = !showingPlus && !hudOpen) { leaveToRoster() }
 
     Box(modifier = Modifier.fillMaxSize()) {
+        // Two rings and nothing else, in the band the floating header occupies.
+        // A conversation is the one screen that may not have shapes further down:
+        // a bubble has to be read through whatever is behind it, so the treatment
+        // stops where the transcript starts.
+        DecorativeBackdrop(motif = BackdropMotif.CHAT, height = 150.dp)
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
@@ -852,6 +978,24 @@ private fun LoadedChat(
                                     openLink = ::openLink,
                                     openAttachment = ::openAttachment,
                                     openThread = ::openThread,
+                                    // A failed turn's own actions. Retry appears only
+                                    // when there is a request to run again; Change
+                                    // model only for a bot, and Provider settings
+                                    // always, because the card decides per kind which
+                                    // of them is worth offering.
+                                    turnRetry = retrySources[message.message.id]?.let { source ->
+                                        { scope.launch { session.retryTurn(chat, source) } }
+                                    },
+                                    changeModel = if (bot != null) {
+                                        {
+                                            showingModelPicker = true
+                                            showingProfile = true
+                                        }
+                                    } else {
+                                        null
+                                    },
+                                    openProviders = onOpenModelProviders,
+                                    onPromptAction = ::submit,
                                 )
                                 is TranscriptRow.ActivityRun -> ActivityRunChip(message.items, ::openThread)
                             }
@@ -869,11 +1013,21 @@ private fun LoadedChat(
                     }
                 }
 
+                val currentMood = remember(chat.busy, pendingApproval, reasoning, rawTranscript) {
+                    BotMoodRules.resolve(
+                        busy = chat.busy,
+                        hasPendingApproval = pendingApproval,
+                        hasReasoning = !reasoning.isNullOrBlank(),
+                        lastMessage = rawTranscript.lastOrNull(),
+                    )
+                }
+
                 ChatHeader(
                     chat = chat,
                     face = remember(chat, rawTranscript) {
                         MausState.forChat(chat, rawTranscript.lastOrNull())
                     },
+                    mood = currentMood,
                     unreadElsewhere = remember(state, chat) {
                         (state.unreadCount - if (chat.unread) 1 else 0).coerceAtLeast(0)
                     },
@@ -887,16 +1041,24 @@ private fun LoadedChat(
                         dictation.stop()
                         if (bot != null) onOpenComputer(bot.id)
                     },
+                    // A room's header is the door to the room's OWN settings —
+                    // name, members, bulletin, who answers. It must never lead
+                    // to a single bot's model pickers: a group has no one model.
+                    onOpenRoomSettings = {
+                        dictation.stop()
+                        focusManager.clearFocus()
+                        showingGroupSettings = true
+                    },
                     // A bot's face and its name pill are both the door to its
-                    // profile; a room has no profile, so its pill opens the same
-                    // sheet the + does.
+                    // profile; a room has no profile, so its pill opens room
+                    // settings.
                     onOpenProfile = {
                         if (bot != null) {
                             showingProfile = true
                         } else {
                             dictation.stop()
                             focusManager.clearFocus()
-                            showingPlus = true
+                            showingGroupSettings = true
                         }
                     },
                     modifier = Modifier
@@ -905,6 +1067,46 @@ private fun LoadedChat(
                 )
             }
 
+            // Setup and provider fixes render here, in the conversation that
+            // hit the problem, above the composer they unblock.
+            val room = (chat as? Chat.RoomChat)?.room
+            if (room != null && room.setupPending == true) {
+                RoomSetupPanel(
+                    room = room,
+                    busy = startingRoom,
+                    onSubmit = { bulletin, everyone ->
+                        if (!startingRoom) {
+                            startingRoom = true
+                            scope.launch {
+                                session.finishRoomSetup(room, bulletin, everyone)
+                                startingRoom = false
+                            }
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .widthIn(max = CHAT_CONTENT_MAX_WIDTH),
+                )
+            }
+            if (providerIssue != null) {
+                ProviderFixPanel(
+                    classification = providerIssue,
+                    onOpenProviders = {
+                        fileOpenError = null
+                        attachmentError = null
+                        dismissedTurnIssue = turnIssue?.first
+                        onOpenModelProviders()
+                    },
+                    onDismiss = {
+                        fileOpenError = null
+                        attachmentError = null
+                        dismissedTurnIssue = turnIssue?.first
+                    },
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .widthIn(max = CHAT_CONTENT_MAX_WIDTH),
+                )
+            }
             Composer(
                 modifier = Modifier
                     .align(Alignment.CenterHorizontally)
@@ -937,7 +1139,9 @@ private fun LoadedChat(
                     scope.launch { session.cancelQueued(queued, chat) }
                 },
                 openingFileName = openingFileName,
-                attachmentError = fileOpenError ?: attachmentError,
+                // A provider-class failure is shown by the panel above, not
+                // twice; everything else keeps the composer's own line.
+                attachmentError = if (providerIssue != null) null else fileOpenError ?: attachmentError,
                 onRemoveAttachment = { attachment ->
                     if (!preparingAttachments && !sendingMessage) {
                         attachments.removeAll { it.id == attachment.id }
@@ -999,14 +1203,39 @@ private fun LoadedChat(
         if (chat.supportsTasks) TaskSheet(chat = chat, onDismiss = { showingTasks = false }, onSelectTask = onSelectTask, onDeletedCurrent = onBack)
     }
 
+    if (showingGroupSettings) {
+        val roomSettings = (chat as? Chat.RoomChat)?.room
+        if (roomSettings != null) {
+            GroupSettingsSheet(
+                room = roomSettings,
+                onDismiss = { showingGroupSettings = false },
+                // The room is gone; the conversation under this sheet no
+                // longer exists, so the screen leaves the way a deleted
+                // thread's does — one pop, back to the roster.
+                onDeleted = onBack,
+            )
+        }
+    }
+
     if (showingProfile && bot != null) {
         AgentProfileSheet(
             bot = bot,
-            onDismiss = { showingProfile = false },
+            onDismiss = {
+                showingProfile = false
+                showingModelPicker = false
+            },
             onOpenOverview = {
                 onOpenOverview(it)
-                showingProfile = false
             },
+            onOpenMemory = {
+                onOpenMemory(it)
+                showingProfile = false
+                showingModelPicker = false
+            },
+            // A failure card asked for this sheet because its remedy is a
+            // different model, so it opens on the list rather than on the
+            // profile the person would then have to scroll.
+            openModelPicker = showingModelPicker,
         )
     }
 
@@ -1038,7 +1267,9 @@ private fun share(
 
 private const val LOAD_EARLIER_KEY = "companion.loadEarlier"
 private const val LIVE_BUBBLE_KEY = "companion.live"
-private val CHAT_CONTENT_MAX_WIDTH = 840.dp
+/** The chat's content column. Shared with the transcript's own cards (the
+ * failure card), which sit in the same column as the chrome around them. */
+internal val CHAT_CONTENT_MAX_WIDTH = 840.dp
 
 /** `itemsIndexed` with the message id as the key — one call site, one helper. */
 private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedKeyed(
@@ -1070,14 +1301,16 @@ private val HEADER_CLEARANCE = 128.dp
 private fun ChatHeader(
     chat: Chat,
     face: MausState,
+    mood: BotMood = BotMood.READY,
     unreadElsewhere: Int,
     onBack: () -> Unit,
     onWatchComputer: () -> Unit,
     onOpenProfile: () -> Unit,
     onOpenThreads: () -> Unit,
+    onOpenRoomSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val surface = MaterialTheme.colorScheme.surface
+    val surface = AppTheme.colors.background
     Box(modifier = modifier.fillMaxWidth()) {
         Spacer(
             modifier = Modifier
@@ -1094,137 +1327,171 @@ private fun ChatHeader(
                 },
         )
 
+        // One row, in reading order: where you came from, who you are talking to,
+        // and what else that bot has. It used to be a stack of three floating
+        // pills — a back pill, a 60 dp avatar and a name pill — which spent the
+        // top quarter of the screen on chrome and put the name where the eye
+        // arrives last.
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.Top,
+                .padding(start = AppSpacing.sm, end = AppSpacing.md, top = AppSpacing.xs),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            BackPill(unreadElsewhere = unreadElsewhere, onBack = onBack)
-            Spacer(Modifier.weight(1f))
+            BackChevron(unreadElsewhere = unreadElsewhere, onBack = onBack)
+            ChatIdentity(
+                chat = chat,
+                face = face,
+                mood = mood,
+                onOpenProfile = onOpenProfile,
+                onOpenThreads = onOpenThreads,
+                onOpenRoomSettings = onOpenRoomSettings,
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = AppSpacing.sm),
+            )
             // The computer is a bot idea; a room has none (§12).
             if (chat is Chat.BotChat) {
                 ChromeButton(
                     painter = painterResource(R.drawable.ic_display),
                     contentDescription = "Watch ${chat.name}'s computer",
                     onClick = onWatchComputer,
+                    size = 40.dp,
                 )
             } else {
-                Spacer(Modifier.size(MIN_TOUCH_TARGET))
+                Spacer(Modifier.size(40.dp))
             }
-        }
-
-        Column(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .padding(top = 2.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            ChatAvatar(
-                chat = chat,
-                size = 60.dp,
-                state = face,
-                modifier = if (chat is Chat.BotChat) {
-                    Modifier
-                        .clickable(role = Role.Button, onClick = onOpenProfile)
-                        .semantics { contentDescription = "Open ${chat.name} settings" }
-                } else {
-                    Modifier
-                },
-            )
-            NamePill(chat = chat, onOpen = if (chat.supportsTasks) onOpenThreads else onOpenProfile)
         }
     }
 }
 
-/** Leaving, with what is unread everywhere else — the badge Messages puts there. */
+/**
+ * Leaving, with what is unread everywhere else — the badge Messages puts there.
+ *
+ * A bare chevron: the filled capsule it used to be was the first of three
+ * floating controls across the top of the conversation, and the badge alone is
+ * enough to say there is somewhere else to be.
+ */
 @Composable
-private fun BackPill(unreadElsewhere: Int, onBack: () -> Unit) {
+private fun BackChevron(unreadElsewhere: Int, onBack: () -> Unit) {
     Row(
         modifier = Modifier
-            .chromeCapsule()
-            .clip(CircleShape)
             .heightIn(min = MIN_TOUCH_TARGET)
+            .clip(CircleShape)
             .clickable(role = Role.Button, onClick = onBack)
-            .padding(
-                start = 14.dp,
-                end = if (unreadElsewhere > 0) 10.dp else 14.dp,
-            ),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(horizontal = AppSpacing.sm),
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(
             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
             contentDescription = "Back",
-            modifier = Modifier.size(20.dp),
+            tint = AppTheme.colors.textSecondary,
+            modifier = Modifier.size(22.dp),
         )
         if (unreadElsewhere > 0) {
             Text(
                 text = "$unreadElsewhere",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSecondaryContainer,
-                modifier = Modifier
-                    .background(MaterialTheme.colorScheme.secondaryContainer, CircleShape)
-                    .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
-                    .padding(horizontal = 7.dp, vertical = 2.dp),
+                style = MaterialTheme.typography.labelSmall,
+                color = AppTheme.colors.textSecondary,
                 textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .background(AppTheme.colors.surfaceRaised, CircleShape)
+                    .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
     }
 }
 
 /**
- * The bot's name over its job, and the door to its profile — "who this is", as
- * The conversation title opens thread navigation; the avatar opens settings.
+ * Who this conversation is with, as the top line of the screen: the face, the
+ * name, and the thread or job underneath.
+ *
+ * The name opens thread navigation (or the room's settings); the face opens the
+ * bot's own settings. Same two doors as before, without the pills they used to
+ * be carried in.
  */
 @Composable
-private fun NamePill(chat: Chat, onOpen: () -> Unit) {
+private fun ChatIdentity(
+    chat: Chat,
+    face: MausState,
+    mood: BotMood = BotMood.READY,
+    onOpenProfile: () -> Unit,
+    onOpenThreads: () -> Unit,
+    onOpenRoomSettings: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
     val hasThreads = chat.supportsTasks
+    val threadOrJob = if (hasThreads) chat.threadTitle else chat.subtitle
+    val subtitleColor = when (mood) {
+        BotMood.FAILED -> AppTheme.colors.danger
+        BotMood.THINKING, BotMood.RESEARCHING, BotMood.WORKING -> AppTheme.colors.caution
+        BotMood.WAITING_FOR_USER -> AppTheme.colors.accent
+        BotMood.COMPLETED -> AppTheme.colors.positive
+        else -> AppTheme.colors.textTertiary
+    }
     Row(
-        modifier = Modifier
-            .chromeCapsule()
-            .clip(CircleShape)
-            .heightIn(min = MIN_TOUCH_TARGET)
-            .clickable(
-                role = Role.Button,
-                onClickLabel = if (hasThreads) {
-                    "Switch thread"
-                } else {
-                    "Open ${chat.name} chat options"
-                },
-                onClick = onOpen,
-            )
-            .padding(start = 14.dp, end = 10.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = modifier,
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.md),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = chat.name,
-            fontSize = 15.sp,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f, fill = false),
-        )
-        val subtitle = if (hasThreads) chat.threadTitle else chat.subtitle
-        if (subtitle.isNotEmpty()) {
-            Text(
-                text = subtitle,
-                fontSize = 13.sp,
-                color = secondaryTint,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false),
-            )
+        TouchTarget(
+            onClick = if (chat is Chat.BotChat) onOpenProfile else onOpenRoomSettings,
+            size = 40.dp,
+            contentDescription = "Open ${chat.name} settings",
+        ) {
+            ChatAvatar(chat = chat, size = AppSizes.headerAvatar, state = face)
         }
-        Icon(
-            imageVector = if (hasThreads) Icons.Filled.ArrowDropDown else Icons.Filled.MoreVert,
-            contentDescription = null,
-            tint = secondaryTint,
-            modifier = Modifier.size(16.dp),
-        )
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .clip(RoundedCornerShape(AppRadii.small))
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = if (hasThreads) "Switch thread" else "Open ${chat.name} chat options",
+                    onClick = when {
+                        chat is Chat.BotChat -> if (hasThreads) onOpenThreads else onOpenProfile
+                        else -> onOpenRoomSettings
+                    },
+                ),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Text(
+                    text = chat.name,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = AppTheme.colors.textPrimary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (mood != BotMood.READY) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .background(subtitleColor, CircleShape),
+                    )
+                    Text(
+                        text = mood.label,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = subtitleColor,
+                        maxLines = 1,
+                    )
+                }
+            }
+            if (threadOrJob.isNotEmpty()) {
+                Text(
+                    text = threadOrJob,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppTheme.colors.textTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
     }
 }
 
@@ -1442,33 +1709,20 @@ private fun Composer(
             ComposerStatusLine("Opening $openingFileName…")
         }
         if (attachmentError != null) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(Color(0xFFFF9800).copy(alpha = 0.12f), RoundedCornerShape(12.dp))
-                    .padding(horizontal = 12.dp, vertical = 9.dp)
-                    .semantics(mergeDescendants = true) { },
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.Warning,
-                    contentDescription = null,
-                    tint = Color(0xFFFF9800),
-                    modifier = Modifier.size(18.dp),
-                )
-                Text(text = attachmentError, fontSize = 13.sp, modifier = Modifier.weight(1f))
-                Text(
-                    text = "Dismiss",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .clickable(role = Role.Button, onClick = onDismissError)
-                        .padding(horizontal = 6.dp, vertical = 4.dp),
-                )
-            }
+            val session = LocalCompanion.current.session
+            ActionableComposerErrorCard(
+                errorMessage = attachmentError,
+                onViewDetails = {
+                    session.postStructuredError(
+                        ErrorClassifier.classify(
+                            operation = "Message Action",
+                            rawMessage = attachmentError,
+                        )
+                    )
+                },
+                onDismiss = onDismissError,
+                modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+            )
         }
         // Everything the computer is holding, stacked straight above the chat
         // bar in the order it was sent.
@@ -1518,17 +1772,19 @@ private fun Composer(
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalAlignment = Alignment.Bottom,
         ) {
+            // The plus is the only control outside the composer that is not part
+            // of the composer: a bare glyph keeps the field the one object in
+            // the row, instead of one capsule beside another.
             TouchTarget(
                 onClick = onTogglePlus,
                 contentDescription = if (plusOpen) "Close" else "More",
             ) {
                 Box(
                     modifier = Modifier
-                        .size(44.dp)
-                        .chromeCapsule()
+                        .size(40.dp)
                         .then(
                             if (plusOpen) {
-                                Modifier.background(MaterialTheme.colorScheme.onSurface, CircleShape)
+                                Modifier.background(AppTheme.colors.surfaceRaised, CircleShape)
                             } else {
                                 Modifier
                             },
@@ -1538,11 +1794,7 @@ private fun Composer(
                     Icon(
                         imageVector = Icons.Filled.Add,
                         contentDescription = null,
-                        tint = if (plusOpen) {
-                            MaterialTheme.colorScheme.surface
-                        } else {
-                            MaterialTheme.colorScheme.onSurface
-                        },
+                        tint = if (plusOpen) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
                         modifier = Modifier
                             .size(22.dp)
                             .graphicsLayer { rotationZ = turn.value },
@@ -1641,6 +1893,9 @@ private fun Composer(
                     )
                 }
 
+                // Bare glyphs until they are doing something. A listening mic is
+                // the one that earns a mark, because at that point it is
+                // broadcasting.
                 TouchTarget(
                     onClick = onToggleDictation,
                     contentDescription = if (dictationListening) {
@@ -1649,26 +1904,12 @@ private fun Composer(
                         "Start dictation"
                     },
                 ) {
-                    Box(
-                        modifier = Modifier
-                            .size(32.dp)
-                            .background(
-                                if (dictationListening) {
-                                    Color.Red.copy(alpha = 0.2f)
-                                } else {
-                                    secondaryTint.copy(alpha = 0.12f)
-                                },
-                                CircleShape,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            painter = painterResource(R.drawable.ic_mic),
-                            contentDescription = null,
-                            tint = if (dictationListening) Color.Red else MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
+                    Icon(
+                        painter = painterResource(R.drawable.ic_mic),
+                        contentDescription = null,
+                        tint = if (dictationListening) AppTheme.colors.danger else AppTheme.colors.textSecondary,
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
 
                 TouchTarget(onClick = onSend, enabled = canSend) {
@@ -1676,7 +1917,7 @@ private fun Composer(
                         modifier = Modifier
                             .size(32.dp)
                             .background(
-                                if (canSend) BubbleColor.mine else secondaryTint.copy(alpha = 0.18f),
+                                if (canSend) AppTheme.colors.accent else AppTheme.colors.surfaceRaised,
                                 CircleShape,
                             ),
                         contentAlignment = Alignment.Center,
@@ -1684,10 +1925,108 @@ private fun Composer(
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.Send,
                             contentDescription = "Send",
-                            tint = if (canSend) BubbleColor.mineText else secondaryTint,
+                            tint = if (canSend) AppTheme.colors.onAccent else AppTheme.colors.textTertiary,
                             modifier = Modifier.size(16.dp),
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ActionableComposerErrorCard(
+    errorMessage: String,
+    onViewDetails: () -> Unit,
+    onDismiss: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.25f))
+            .border(
+                1.dp,
+                MaterialTheme.colorScheme.error.copy(alpha = 0.35f),
+                RoundedCornerShape(12.dp),
+            )
+            .padding(12.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Header: Warning Glyph + Headline + Dismiss 'X'
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(24.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.error.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Warning,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(14.dp),
+                        )
+                    }
+                    Text(
+                        text = "Action Failed",
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(32.dp)
+                        .clip(CircleShape)
+                        .clickable(role = Role.Button, onClick = onDismiss),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Close,
+                        contentDescription = "Dismiss error",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+
+            // Body text
+            Text(
+                text = errorMessage,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurface,
+                lineHeight = 18.sp,
+            )
+
+            // Remedies & Details action button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(
+                    onClick = onViewDetails,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                ) {
+                    Text(
+                        text = "View Remedies & Details ➔",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
                 }
             }
         }

@@ -6,7 +6,7 @@ domain, or configuration to verify these controls.
 ## Automated checks
 
 ```sh
-pnpm exec vitest run server/custom-domain.test.ts server/provider-auth-sessions.test.ts server/drivers/codex-device-auth.test.ts server/request-auth.test.ts server/config.test.ts src/components/CodexDeviceSignIn.test.ts src/components/CustomDomainSettings.test.ts src/components/EngineSetup.test.ts src/components/EnginesSettings.test.ts
+pnpm exec vitest run server/custom-domain.test.ts server/provider-auth-sessions.test.ts server/drivers/codex-native-auth.test.ts server/request-auth.test.ts server/config.test.ts src/components/CodexDeviceSignIn.test.ts src/components/CustomDomainSettings.test.ts src/components/EngineSetup.test.ts src/components/EnginesSettings.test.ts
 pnpm typecheck
 pnpm build
 pnpm build:server
@@ -44,22 +44,21 @@ not prove a customer's real DNS, certificate, or reverse proxy is configured.
    Switch sections, copy a DNS value, and confirm the form remains readable.
    Tab and Shift-Tab must stay inside the dialog, skipping the hidden sidebar
    and links inside the collapsed advanced guide.
-4. To exercise Codex, add an instance to **only the fixture's config.json**:
-   driver `codex`, CLI set to the absolute path of
-   `server/testing/fake-codex-login-cli.ts`, environment
-   `OMB_DEVICE_AUTH_FIXTURE=1`, `HOME` set to the fixture's temporary directory,
-   and `CODEX_HOME` set to its `.codex` subdirectory. Reload that isolated
-   provider registry and refresh the preview. Never substitute the real Codex
-   executable. The fixture requires an explicit opt-in and makes no network
-   requests.
-5. Settings → Engines → Connect ChatGPT should display `TEST-12345`, the
-   official link, expiry, and Cancel. **Do not enter the fake code at OpenAI.**
-   Cancel and restart, then switch Settings sections and return; Connect should
-   recover the same active flow without spawning a second login.
-6. Create the empty `.omb-fake-codex-login-approved` marker in the fixture's
-   temporary HOME. The offline process records a fake signed-in state. Confirm
-   the real Settings UI changes to “ChatGPT connected on this server.”
-7. Stop the Vite process and interrupt the foreground fixture launcher. Only
+4. Codex sign-in is the provider's own device and browser-redirect flow: the
+   app calls `auth.openai.com` for a code, polls it, exchanges it, and binds a
+   loopback port for the browser leg. Nothing is spawned, so the offline
+   fake-CLI recipe this recipe used to describe — a fake Codex login CLI driven
+   with `OMB_DEVICE_AUTH_FIXTURE=1` and an approved marker in the fixture's
+   HOME — went away with it, and with it any way to walk the
+   Connect ChatGPT dialog in Settings without a real account. That flow's
+   coverage is `server/drivers/codex-native-auth.test.ts`, which scripts the
+   transport against a disposable `CODEX_HOME`: code, poll and exchange, pending
+   polls, an already-signed-in host, an expired code, a refused start,
+   sign-out, the browser redirect and its state check, the fallback to the
+   device flow when no loopback port binds, and a case asserting the module
+   spawns no process at all. Run it; **never perform a real sign-in in a
+   verification fixture and never enter a code at OpenAI.**
+5. Stop the Vite process and interrupt the foreground fixture launcher. Only
    its owned child and disposable data are removed; retain the printed log.
 
 For deployment acceptance, separately test an actual public domain and an

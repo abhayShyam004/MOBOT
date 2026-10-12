@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
+import { attemptPublish, readlinkTarget, removeDanglingLease, removeQuietly } from "../electron/fs-publish.mjs";
 
 const FILE = join(DATA_DIR, "box-delete-requests.json");
 const LOCK_FILE = join(DATA_DIR, "box-delete-requests.lock");
@@ -249,13 +250,9 @@ function publishReaper(path: string, owner: JournalReaperOwner): boolean {
     throw stateError("stale-lock recovery candidate is unavailable", error);
   }
   try {
-    try {
-      linkSync(candidate, path);
-      return true;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code === "EEXIST") return false;
-      throw stateError("stale-lock recovery is unavailable", error);
-    }
+    return attemptPublish(candidate, path).published;
+  } catch (error) {
+    throw stateError("stale-lock recovery is unavailable", error);
   } finally {
     unlinkCandidate(candidate);
   }
@@ -291,6 +288,7 @@ function reapDeadLock(expected: JournalLockOwner): boolean {
   const current = readLockOwner();
   if (!current || current.token !== expected.token) return true;
   if (processIsAlive(current.pid)) return false;
+  const retiredPayload = readlinkTarget(LOCK_FILE);
   try {
     unlinkSync(LOCK_FILE);
   } catch (error) {
@@ -298,6 +296,7 @@ function reapDeadLock(expected: JournalLockOwner): boolean {
       throw stateError("stale lock could not be retired", error);
     }
   }
+  if (retiredPayload !== null) removeQuietly(join(dirname(LOCK_FILE), retiredPayload));
   return true;
 }
 
@@ -324,14 +323,17 @@ function acquireJournalLock(): JournalLockOwner {
   try {
     for (;;) {
       try {
-        linkSync(candidate, LOCK_FILE);
-        return owner;
+        if (attemptPublish(candidate, LOCK_FILE).published) return owner;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
-          throw stateError("lock could not be acquired", error);
-        }
+        throw stateError("lock could not be acquired", error);
       }
       const current = readLockOwner();
+      if (current === null) {
+        // A symlink-published lock whose payload was lost reads as absent
+        // while its name still blocks every publisher; retire the dangling
+        // name instead of waiting out the deadline.
+        removeDanglingLease(LOCK_FILE);
+      }
       const reaped = current !== null && !processIsAlive(current.pid) && reapDeadLock(current);
       if (performance.now() >= deadline) throw stateError("locked by another OpenMausBot process");
       if (reaped) continue;
@@ -347,11 +349,13 @@ function releaseJournalLock(owner: JournalLockOwner): void {
   if (!current || current.token !== owner.token || current.pid !== owner.pid) {
     throw stateError("lock ownership changed unexpectedly");
   }
+  const releasedPayload = readlinkTarget(LOCK_FILE);
   try {
     unlinkSync(LOCK_FILE);
   } catch (error) {
     throw stateError("lock could not be released", error);
   }
+  if (releasedPayload !== null) removeQuietly(join(dirname(LOCK_FILE), releasedPayload));
 }
 
 function withJournalLock<T>(operation: (records: BoxDeletionRecord[]) => T): T {

@@ -13,7 +13,6 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -175,17 +174,18 @@ private fun QuickReplyForm(
         title = { Text(if (initial.title.isBlank()) "New quick reply" else "Edit quick reply") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                OutlinedTextField(
+                AppTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text("Label") },
+                    label = "Label",
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
-                OutlinedTextField(
+                AppTextField(
                     value = prompt,
                     onValueChange = { prompt = it },
-                    label = { Text("Prompt") },
+                    label = "Prompt",
+                    singleLine = false,
                     minLines = 2,
                     maxLines = 5,
                     modifier = Modifier.fillMaxWidth(),

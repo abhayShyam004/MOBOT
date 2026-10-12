@@ -11,11 +11,13 @@ import {
   listToolkits,
   mcpIntegration,
   normalizeAccountAlias,
+  prepareComposioCredential,
   prepareProjectSession,
   removeAccount,
   removeService,
   relayMcp,
   setManagedBrokerAccess,
+  verifyConnectConsumerKey,
 } from "./composio.ts";
 
 let api: Server;
@@ -90,6 +92,16 @@ beforeAll(async () => {
       }
       res.writeHead(404, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: "unknown broker route" }));
+    }
+
+    if (url.pathname.startsWith("/connect/")) {
+      const consumerKey = String(req.headers["x-consumer-api-key"] ?? "");
+      if (consumerKey === "ck_test") {
+        res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "mcp_connect" });
+        return res.end(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools: [{ name: "github_star", description: "Star repo" }] } }));
+      }
+      res.writeHead(401, { "content-type": "application/json" });
+      return res.end(JSON.stringify({ error: "invalid consumer key" }));
     }
 
     const apiKey = String(req.headers["x-api-key"] ?? "");
@@ -287,12 +299,14 @@ beforeAll(async () => {
   base = `${origin}/api/v3.1`;
   process.env.OMB_COMPOSIO_API = base;
   process.env.OMB_COMPOSIO_TOOLKITS_API = `${origin}/api/v3`;
+  process.env.OMB_COMPOSIO_CONNECT_MCP = `${origin}/connect/mcp`;
 });
 
 afterAll(async () => {
   setManagedBrokerAccess(null);
   delete process.env.OMB_COMPOSIO_API;
   delete process.env.OMB_COMPOSIO_TOOLKITS_API;
+  delete process.env.OMB_COMPOSIO_CONNECT_MCP;
   await new Promise<void>((resolve) => api.close(() => resolve()));
 });
 
@@ -578,6 +592,95 @@ describe.sequential("Composio Sessions", () => {
   it("accepts only project API keys", async () => {
     await expect(prepareProjectSession("old_key")).rejects.toThrow(/start with ak_/i);
     await expect(prepareProjectSession("ak_wrong")).rejects.toThrow(/invalid project key/i);
+  });
+
+  describe("Composio Surface and Credential Verification", () => {
+    it("1. Valid ak_ Platform key -> correct Platform authentication path", async () => {
+      const result = await prepareComposioCredential("ak_test", { requestedSurface: "platform" });
+      expect(result.surface).toBe("platform");
+      expect(result.apiKey).toBe("ak_test");
+      expect(result.sessionId).toBe("trs_test");
+      expect(result.userId).toBeDefined();
+    });
+
+    it("2. Valid ck_ Connect key -> correct Connect authentication path", async () => {
+      const result = await prepareComposioCredential("ck_test", { requestedSurface: "connect" });
+      expect(result.surface).toBe("connect");
+      expect(result.apiKey).toBe("ck_test");
+      expect(result.mcpUrl).toContain("/connect/mcp");
+    });
+
+    it("3. ck_ supplied to an ak_-only Platform integration -> clear surface-mismatch error", async () => {
+      await expect(
+        prepareComposioCredential("ck_consumer_12345", { requestedSurface: "platform" }),
+      ).rejects.toThrow(
+        "This Composio connection expects a Platform Project API key (ak_...). You provided a Connect consumer key (ck_...). Choose the appropriate Composio connection type.",
+      );
+      await expect(
+        prepareProjectSession("ck_consumer_12345"),
+      ).rejects.toThrow(
+        "This Composio connection expects a Platform Project API key (ak_...). You provided a Connect consumer key (ck_...). Choose the appropriate Composio connection type.",
+      );
+    });
+
+    it("4. ak_ supplied to a ck_-only Connect integration -> clear surface-mismatch error", async () => {
+      await expect(
+        prepareComposioCredential("ak_project_12345", { requestedSurface: "connect" }),
+      ).rejects.toThrow(
+        "This Composio connection expects a Connect consumer key (ck_...). You provided a Platform Project API key (ak_...). Choose the appropriate Composio connection type.",
+      );
+      await expect(
+        verifyConnectConsumerKey("ak_project_12345"),
+      ).rejects.toThrow(
+        "This Composio connection expects a Connect consumer key (ck_...). You provided a Platform Project API key (ak_...). Choose the appropriate Composio connection type.",
+      );
+    });
+
+    it("5. Malformed/unknown key -> clear invalid-format error", async () => {
+      await expect(
+        prepareComposioCredential("xyz_malformed_key", { requestedSurface: "platform" }),
+      ).rejects.toThrow(/Platform Project API keys must start with ak_/);
+
+      await expect(
+        prepareComposioCredential("xyz_malformed_key", { requestedSurface: "connect" }),
+      ).rejects.toThrow(/Connect consumer keys must start with ck_/);
+
+      await expect(
+        prepareComposioCredential("xyz_malformed_key"),
+      ).rejects.toThrow(
+        "Invalid Composio key format. Keys must start with ak_ (Platform Project API key) or ck_ (Connect / For You consumer key).",
+      );
+    });
+
+    it("6. Never exposes or logs the full credential in errors", async () => {
+      const secret = "ck_sensitive_customer_secret_value_987654321";
+      try {
+        await prepareComposioCredential(secret, { requestedSurface: "platform" });
+        expect.unreachable("should have thrown");
+      } catch (err: any) {
+        expect(err.message).not.toContain(secret);
+        expect(err.message).toContain("ck_...");
+      }
+
+      const secretAk = "ak_sensitive_platform_secret_value_123456789";
+      try {
+        await prepareComposioCredential(secretAk, { requestedSurface: "connect" });
+        expect.unreachable("should have thrown");
+      } catch (err: any) {
+        expect(err.message).not.toContain(secretAk);
+        expect(err.message).toContain("ak_...");
+      }
+    });
+
+    it("relays MCP requests using correct headers for both surfaces", async () => {
+      const connectCfg: AppConfig = {
+        composio: { apiKey: "ck_test", surface: "connect", mcpUrl: `${origin}/connect/mcp` },
+      };
+
+      const connectRelay = await relayMcp(connectCfg, { jsonrpc: "2.0", id: 201, method: "tools/list" });
+      expect(connectRelay.status).toBe(200);
+      expect(connectRelay.transportSessionId).toBe("mcp_connect");
+    });
   });
 
   it("creates one stable per-installation session and reuses it", async () => {

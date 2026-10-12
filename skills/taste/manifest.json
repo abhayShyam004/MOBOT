@@ -1,0 +1,26 @@
+{
+  "id": "taste",
+  "name": "Taste Skill (v2 Frontend)",
+  "version": "2.0.0",
+  "description": "Anti-slop frontend design skill for landing pages, portfolios, and redesigns. Infers visual direction, dials variance/motion/density, and creates original non-templated interfaces.",
+  "source": "https://github.com/Leonxlnx/taste-skill",
+  "license": "MIT",
+  "revision": "b17742737e796305d829b3ad39eda3add0d79060",
+  "defaultEnabled": true,
+  "triggerTerms": [
+    "taste",
+    "aesthetic",
+    "visual originality",
+    "anti-generic",
+    "anti-slop",
+    "landing page",
+    "portfolio",
+    "typography pairing",
+    "motion design",
+    "brutalist",
+    "minimalist",
+    "editorial design",
+    "design variance"
+  ],
+  "requiredCapabilities": []
+}

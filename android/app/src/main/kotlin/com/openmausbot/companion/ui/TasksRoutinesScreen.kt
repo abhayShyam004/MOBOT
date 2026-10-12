@@ -595,13 +595,15 @@ internal fun SectionHeading(text: String) {
         modifier = Modifier.padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        // Sentence case, and no rule under it: a heading over a stretch of
+        // content is a signpost, and the divider was a second separator on a page
+        // that already separates its sections with space.
         Text(
-            text = text.uppercase(),
-            fontSize = 12.sp,
+            text = text,
+            fontSize = 15.sp,
             fontWeight = FontWeight.SemiBold,
-            color = secondaryTint,
+            color = AppTheme.colors.textSecondary,
         )
-        HorizontalDivider()
     }
 }
 

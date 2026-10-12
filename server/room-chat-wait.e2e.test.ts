@@ -266,7 +266,12 @@ describe("chat rooms wait for a member busy elsewhere", { timeout: 45_000 }, () 
         waitChipOk: true,
         waitChips: 1,
         skipped: false,
-        speakers: ["Ace", "Bee"],
+        // Bee's slow fixture echoes the whole room prompt back, and that echo
+        // carries the user's "@Ace" — a real member's reply naming a teammate
+        // now re-summons them (the room debate rules), so Ace speaks once
+        // more; its scripted replies are exhausted by then, so the default
+        // mention-free reply ends the round.
+        speakers: ["Ace", "Bee", "Ace"],
       });
 
       expect(await directReply(bee.id, "Bee, finish this first")).toBe(true);

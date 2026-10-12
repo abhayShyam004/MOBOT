@@ -140,6 +140,9 @@ data class ToolActivity(
     val ok: Boolean? = null,
     val spoken: String? = null,
     val setup: Boolean? = null,
+    val error: String? = null,
+    val output: String? = null,
+    val durationMs: Long? = null,
 )
 
 /**
@@ -172,6 +175,32 @@ data class CommChip(
     val withColor: String,
 )
 
+/**
+ * A turn that failed, as the harness wrote it — what went wrong, which engine
+ * and model it happened to, and what to do about it.
+ *
+ * Every string here is the harness's own. The provider's report — an HTTP
+ * status and often its JSON body — is diagnostics, and the computer keeps it
+ * in its log instead of sending it; a phone cannot render `upstream HTTP 429:
+ * {"error":…}` as anything a person should read. [kind] is what the actions
+ * key off, so a client decides nothing from the copy.
+ */
+@Serializable
+data class FailureCard(
+    val kind: String,
+    val title: String,
+    val detail: String,
+    val advice: String,
+    /** The status the provider answered with, when the failure was one. */
+    val status: Int? = null,
+    /** The engine that failed, so its settings row can be found by id. */
+    val instanceId: String? = null,
+    val provider: String? = null,
+    val model: String? = null,
+    /** Automatic attempts the turn made before giving up. */
+    val attempts: Int? = null,
+)
+
 @Serializable
 data class Message(
     val id: String,
@@ -180,6 +209,18 @@ data class Message(
     val at: Double,
     val text: String? = null,
     val card: OptionCard? = null,
+    /**
+     * Set on the activity row a failed turn leaves behind. Absent on an
+     * ordinary tool receipt, and absent on a computer too old to classify
+     * failures — in which case the row is the quiet chip it always was.
+     */
+    val failure: FailureCard? = null,
+    /**
+     * An app the bot needs connected before it can continue. Cards are live:
+     * the harness patches the same message in place as authorization
+     * progresses, so a client renders whatever this field says right now.
+     */
+    val connector: ConnectorRequestCard? = null,
     val tool: ToolActivity? = null,
     val threadRef: ThreadRef? = null,
     val parentId: String? = null,
@@ -200,9 +241,19 @@ data class Message(
      * finally lands.
      */
     val queueId: String? = null,
+    /**
+     * Files the computer attached to this reply — currently pictures the bot
+     * fetched from the internet, published as app-owned attachments and
+     * fetched back through the session. Absent on older computers.
+     */
+    val attachments: List<MessageAttachment>? = null,
+    /**
+     * Native structured response payload carrying versioned components (Phase J).
+     */
+    val structured: StructuredResponseData? = null,
 ) {
     @Serializable(with = MessageKindSerializer::class)
-    enum class Kind { TEXT, OPTIONS, ACTIVITY, SCREEN, UNKNOWN }
+    enum class Kind { TEXT, OPTIONS, ACTIVITY, SCREEN, CONNECTOR, STRUCTURED, UNKNOWN }
 
     @Serializable(with = MessageRoleSerializer::class)
     enum class Role { BOT, USER }
@@ -216,6 +267,8 @@ object MessageKindSerializer : KSerializer<Message.Kind> {
         "options" -> Message.Kind.OPTIONS
         "activity" -> Message.Kind.ACTIVITY
         "screen" -> Message.Kind.SCREEN
+        "connector" -> Message.Kind.CONNECTOR
+        "structured" -> Message.Kind.STRUCTURED
         else -> Message.Kind.UNKNOWN
     }
 
@@ -283,6 +336,10 @@ data class BotTask(
     val threadId: String,
     val title: String,
     val createdAt: Double,
+    /** When this thread last received a message, from the harness's own
+     * transcript. The thread list orders by it; absent on a harness from
+     * before the field existed, and null on a thread with no messages yet. */
+    val lastMessageAt: Double? = null,
     val modelSelection: ModelSelection? = null,
     val activity: String? = null,
     val busy: Boolean? = null,
@@ -353,6 +410,16 @@ data class Bot(
     val alwaysAllow: List<String>? = null,
     val computer: String? = null,
     val cloudBackend: String? = null,
+    /** Per-bot MCP selection: null = every enabled server; [] = none.
+     * Absent means the harness is too old to carry the field. */
+    val mcpServers: List<String>? = null,
+    /**
+     * Whether this bot may use the workspace's connected apps. The server's
+     * own gate is `bot.composio !== false`, so absent and true mean the same
+     * thing; only an explicit false closes the door. Read it through
+     * [isConnectedAppsAllowed] rather than comparing the raw field.
+     */
+    val composio: Boolean? = null,
     val speakReplies: Boolean? = null,
     val voice: String? = null,
     val mascotExpression: String? = null,
@@ -409,6 +476,62 @@ object AvatarCropSerializer : KSerializer<AvatarCrop> {
 @Serializable
 data class GroupResponder(val kind: String, val botId: String? = null)
 
+/** One file attached to a message by the computer: an image the bot pulled
+ * from the internet, addressed as `/api/attachments/<name>`. */
+@Serializable
+data class MessageAttachment(
+    val kind: String,
+    val path: String,
+    val mime: String? = null,
+    val name: String? = null,
+) {
+    val isImage: Boolean get() = kind == "image"
+}
+
+/** What a bot's memory file costs against the load budget, and its hash so a
+ * save can prove it edited what it read. */
+@Serializable
+data class MemoryCapacity(
+    val lines: Int = 0,
+    val bytes: Int = 0,
+    val maxLines: Int = 0,
+    val maxBytes: Int = 0,
+    val loadedLines: Int = 0,
+    val loadedBytes: Int = 0,
+    val truncated: Boolean = false,
+    val hash: String = "",
+)
+
+/** One topic or log file under a bot's memory folder. */
+@Serializable
+data class MemoryFileInfo(
+    val path: String,
+    val name: String,
+    val bytes: Int = 0,
+    val modifiedAt: Double = 0.0,
+)
+
+/** Everything a bot remembers: the always-loaded index plus its topic and log
+ * files. `workspacePath` is where the plain markdown lives on the computer. */
+@Serializable
+data class MemoryOverview(
+    val botId: String = "",
+    val workspacePath: String = "",
+    val index: MemoryCapacity = MemoryCapacity(),
+    val topics: List<MemoryFileInfo> = emptyList(),
+    val logs: List<MemoryFileInfo> = emptyList(),
+)
+
+/** One memory document, with the hash a save must present. */
+@Serializable
+data class MemoryDoc(
+    val path: String,
+    val text: String = "",
+    val hash: String = "",
+    val exists: Boolean = false,
+    val overview: MemoryOverview? = null,
+)
+
 @Serializable
 data class Room(
     val id: String,
@@ -420,6 +543,9 @@ data class Room(
     val unread: Boolean,
     val createdAt: Double,
     val dm: Boolean? = null,
+    /** True while the room still owes its first-run setup; such a room
+     * refuses its first message until a client finishes or skips it. */
+    val setupPending: Boolean? = null,
     /** Desktop sidebar section. Missing or blank means the built-in Channels area. */
     val section: String? = null,
     val busyBotId: String? = null,
@@ -666,13 +792,36 @@ data class ProviderSnapshot(
     val state: String,
     val reason: String? = null,
     val authenticated: Boolean? = null,
+    /** Vetted display identity from the provider, never credentials. */
+    val account: ProviderAccount? = null,
     val version: String? = null,
 ) {
     val isAvailable: Boolean get() = state == "available"
 }
 
+/** Who the engine reports it is signed in as; display only. */
 @Serializable
-data class ModelOption(val id: String, val label: String)
+data class ProviderAccount(
+    val email: String? = null,
+    val organization: String? = null,
+    val method: String? = null,
+)
+
+@Serializable
+data class ProviderIconDto(
+    val kind: String,
+    val preset: String? = null,
+    val dataUrl: String? = null,
+)
+
+@Serializable
+data class ModelOption(
+    val id: String,
+    val label: String,
+    val custom: Boolean? = null,
+    val provider: String? = null,
+    val contextWindow: Long? = null,
+)
 
 @Serializable
 data class ModelCatalog(
@@ -689,9 +838,74 @@ data class Instance(
     val models: ModelCatalog,
     /** Older computers omit capabilities; omission is intentionally not permission. */
     val capabilities: InstanceCapabilities? = null,
+    /** How this engine is configured — "subscription" (a CLI sign-in) or
+     * "custom" (custom configuration; see EngineAccess in the server's
+     * contracts). Older computers omit it, which reads as the historical
+     * default. Which custom engines are key-and-URL providers is a screen
+     * decision (ModelProvidersRules), not a wire fact. */
+    val access: String? = null,
+    /** The account sign-in this engine offers, absent when it has none. */
+    val authentication: InstanceAuthentication? = null,
+    val icon: ProviderIconDto? = null,
+    val docsUrl: String? = null,
 ) {
     val id: String get() = instanceId
+
+    /** Subscription engines authenticate by sign-in; the rest by a key in settings. */
+    val isSubscription: Boolean get() = access != "apikey"
 }
+
+/** One engine's account sign-in, as the server describes it. */
+@Serializable
+data class InstanceAuthentication(
+    /** "browser" | "device-code" | "paste-code" — how the sign-in completes. */
+    val method: String,
+    /** The stored sign-in can be removed to switch accounts. */
+    val signOut: Boolean? = null,
+    /** Whether the sign-in can run on this host WITHOUT the engine's runtime
+     * installed. The Codex ChatGPT device flow is native (true); Claude's
+     * sign-in is the CLI's own login and exists exactly while the runtime
+     * does (false, with a reason). Absent reads as available, preserving
+     * older hosts that only ever offered sign-in next to a working runtime. */
+    val available: Boolean? = null,
+    /** Why sign-in is not offered, in the server's own words. */
+    val reason: String? = null,
+)
+
+/** A just-started account sign-in flow. */
+@Serializable
+data class InstanceAuthStart(
+    val phase: String,
+    val flowId: String? = null,
+    val authorizationUrl: String? = null,
+    val expiresAt: String? = null,
+    val userCode: String? = null,
+)
+
+/** Where a sign-in flow stands; `message` is server-authored, safe copy. */
+@Serializable
+data class InstanceAuthStatus(
+    val phase: String,
+    val flowId: String? = null,
+    val authorizationUrl: String? = null,
+    val expiresAt: String? = null,
+    val userCode: String? = null,
+    val message: String? = null,
+) {
+    val succeeded: Boolean get() = phase == "succeeded"
+    val waiting: Boolean get() = phase == "waiting"
+    val dead: Boolean get() = phase == "failed" || phase == "expired" || phase == "cancelled"
+}
+
+/** The harness wraps sign-in responses in an `auth` envelope
+ * (`json(res, 200, { auth })` in server/index.ts); reading the bare flow
+ * object instead is exactly how the phone failed every sign-in with a
+ * decode error before the flow could even start. */
+@Serializable
+data class AuthStartResponse(val auth: InstanceAuthStart)
+
+@Serializable
+data class AuthStatusResponse(val auth: InstanceAuthStatus)
 
 /**
  * The small, phone-safe part of an engine's capabilities. Missing capabilities
@@ -734,6 +948,12 @@ enum class VoiceProvider(val wire: String) {
 @Serializable
 data class ConfigFlag(
     val configured: Boolean,
+    /**
+     * How the host reaches the connected-apps service: "managed" (the
+     * packaged app's own service), "self-hosted" (a project API key on this
+     * host), or "unavailable". Only the composio flag carries it today.
+     */
+    val mode: String? = null,
     val apiKeyConfigured: Boolean? = null,
     val ready: Boolean? = null,
     val voice: String? = null,
@@ -749,12 +969,23 @@ data class ConfigFlag(
 data class Profile(val name: String, val email: String)
 
 @Serializable
+data class OpenAICompatStatus(val configured: Boolean = false, val url: String = "")
+
+@Serializable
 data class ConfigStatus(
     val composio: ConfigFlag? = null,
     val box: ConfigFlag? = null,
     val tts: ConfigFlag? = null,
     val imageGen: ConfigFlag? = null,
     val profile: Profile? = null,
+    /** Base URL is a setting, not a secret; the key is reported as configured-or-not. */
+    val openaiCompat: OpenAICompatStatus? = null,
+    /**
+     * The owner's standing "never stop for approvals" grant. When true the
+     * host runs every bot's turns with full access, so no permission card is
+     * opened. Absent on older hosts, so it defaults to the asking behaviour.
+     */
+    val neverAskPermissions: Boolean = false,
 ) {
     /**
      * "This engine can speak", not "a key is on file" — under the built-in
@@ -865,16 +1096,84 @@ data class ConnectorStatuses(
         get() = credentialStore != "unavailable"
 }
 
+/**
+ * One connection the bot asked for, as the harness stores it on the message.
+ * The card is live: the same message is patched in place as the person opens
+ * the provider's sign-in page, finishes it, or dismisses the request.
+ */
+@Serializable
+data class ConnectorRequestCard(
+    val slug: String,
+    val label: String,
+    val description: String,
+    /** required | authorizing | connected | failed */
+    val status: String,
+    /** Cards created by one agent request are continued together. */
+    val resumeKey: String,
+    val alias: String? = null,
+    val error: String? = null,
+    val dismissed: Boolean? = null,
+    val resumed: Boolean? = null,
+)
+
+/**
+ * The card's status words, kept in one place so the renderer and every test
+ * read the same rule. The wire values are protocol words, not prose — case
+ * never matters, and an unknown word is treated as "still required" so a
+ * newer harness cannot strand the person on a blank card.
+ */
+object ConnectorCardRules {
+    const val NOT_NOW = "Not now"
+
+    fun isDismissed(card: ConnectorRequestCard): Boolean = card.dismissed == true
+
+    fun isConnected(card: ConnectorRequestCard): Boolean = word(card) == "connected"
+
+    fun isAuthorizing(card: ConnectorRequestCard): Boolean = word(card) == "authorizing"
+
+    fun isFailed(card: ConnectorRequestCard): Boolean = word(card) == "failed"
+
+    fun isResumed(card: ConnectorRequestCard): Boolean = card.resumed == true
+
+    /** The sign-in button speaks the state: open again while waiting,
+     * try again after a failure, connect otherwise. */
+    fun connectActionLabel(card: ConnectorRequestCard): String = when {
+        isAuthorizing(card) -> "Open again"
+        isFailed(card) -> "Try again"
+        else -> "Connect securely"
+    }
+
+    /** The footer line under the card. */
+    fun progressLabel(card: ConnectorRequestCard): String = when {
+        isAuthorizing(card) -> "Waiting for sign-in…"
+        isConnected(card) -> "Ready to use"
+        else -> "Requested by the bot"
+    }
+
+    private fun word(card: ConnectorRequestCard): String = card.status.trim().lowercase()
+}
+
+/** [Bot.composio] holds three states in one nullable boolean; this is the
+ * single reader of that contract. */
+fun Bot.isConnectedAppsAllowed(): Boolean = composio != false
+
 @Serializable(with = BotProfilePatchSerializer::class)
 data class BotProfilePatch(
     val name: String? = null,
     val title: String? = null,
     val description: String? = null,
     val notifications: Boolean? = null,
+    /** The bot's own colour (mascot tint and name pill), one of the ten
+     * palette names. Null keeps the saved one. */
+    val color: String? = null,
     val avatarUrl: AvatarURL? = null,
     val avatarCrop: AvatarCrop? = null,
     val voice: String? = null,
     val speakReplies: Boolean? = null,
+    /** Sentinel-free: `null` here means "send mcpServers: null" (all enabled).
+     * Omitted keeps the current selection. Use [BotMcpSelection] wrappers. */
+    val mcpServers: List<String>? = null,
+    val mcpServersAbsent: Boolean = true,
 ) {
     sealed interface AvatarURL {
         data class Set(val path: String) : AvatarURL
@@ -882,16 +1181,101 @@ data class BotProfilePatch(
     }
 }
 
+/** The three states of a bot's MCP server selection, phrased the way the
+ * server defines them: `null` = every enabled server, `[]` = none, a list =
+ * exactly those names (disabled servers in the list stay unmounted). */
+object BotMcpSelection {
+    fun all(): BotProfilePatch = BotProfilePatch(mcpServers = null, mcpServersAbsent = false)
+    fun none(): BotProfilePatch = BotProfilePatch(mcpServers = emptyList(), mcpServersAbsent = false)
+    fun only(names: List<String>): BotProfilePatch =
+        BotProfilePatch(mcpServers = names, mcpServersAbsent = false)
+}
+
+/** One configured custom MCP server, as GET /api/mcp/servers returns it.
+ * Secrets never round-trip: a stdio entry exposes env key NAMES only, a
+ * remote entry header key NAMES only — values live in the server's own
+ * write-only store. */
+@Serializable
+data class McpServerListing(
+    val name: String,
+    val enabled: Boolean = false,
+    // stdio shape
+    val command: String? = null,
+    val args: List<String>? = null,
+    val envKeys: List<String>? = null,
+    // remote shape ("http" or "sse")
+    val type: String? = null,
+    val url: String? = null,
+    val headerKeys: List<String>? = null,
+) {
+    val isRemote: Boolean get() = url != null
+}
+
+@Serializable
+data class McpServerList(val servers: List<McpServerListing> = emptyList())
+
+/** POST /api/mcp/servers/:name/test — the bounded handshake probe. */
+@Serializable
+data class McpProbeResult(
+    val ok: Boolean,
+    val tools: List<McpProbeTool> = emptyList(),
+    val error: String? = null,
+)
+
+@Serializable
+data class McpProbeTool(
+    val name: String,
+    val description: String? = null,
+)
+
+/** A server to add or edit, the way the desktop form sends it. Secrets (env
+ * values / header values) live only in this object, never in any listing.
+ * [KeepEnv] / [KeepHeader] send the registry's write-only `true` placeholder,
+ * which keeps an already stored value — the API refuses it for a key it has
+ * never saved, which is the honest error. */
+sealed interface McpServerConfig {
+    val enabled: Boolean
+
+    data class Command(
+        val command: String,
+        val args: List<String> = emptyList(),
+        val env: Map<String, McpSecret> = emptyMap(),
+        override val enabled: Boolean = false,
+    ) : McpServerConfig
+
+    /** @param type "http" or "sse", matching the upstream registry. */
+    data class Url(
+        val type: String,
+        val url: String,
+        val headers: Map<String, McpSecret> = emptyMap(),
+        override val enabled: Boolean = false,
+    ) : McpServerConfig
+}
+
+/** One value of an env/header map: newly typed, or "keep the stored one". */
+sealed interface McpSecret {
+    data class Value(val value: String) : McpSecret
+    data object KeepStored : McpSecret
+}
+
+/** The ten palette names the wire accepts (shared MausColor); an unknown
+ * value is dropped rather than forwarded to a server that would reject it. */
+private val MAUS_COLOR_NAMES = setOf(
+    "green", "blue", "red", "orange", "purple", "cyan", "pink", "yellow", "teal", "coral",
+)
+
 object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
     private val fieldNames = setOf(
         "name",
         "title",
         "description",
         "notifications",
+        "color",
         "avatarUrl",
         "avatarCrop",
         "voice",
         "speakReplies",
+        "mcpServers",
     )
 
     override val descriptor = buildClassSerialDescriptor("BotProfilePatch") {
@@ -899,10 +1283,12 @@ object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
         element<String>("title", isOptional = true)
         element<String>("description", isOptional = true)
         element<Boolean>("notifications", isOptional = true)
+        element<String>("color", isOptional = true)
         element<JsonElement>("avatarUrl", isOptional = true)
         element<String>("avatarCrop", isOptional = true)
         element<String>("voice", isOptional = true)
         element<Boolean>("speakReplies", isOptional = true)
+        element<List<String>>("mcpServers", isOptional = true)
     }
 
     override fun serialize(encoder: Encoder, value: BotProfilePatch) {
@@ -913,6 +1299,7 @@ object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
             value.title?.let { put("title", it) }
             value.description?.let { put("description", it) }
             value.notifications?.let { put("notifications", it) }
+            value.color?.let { put("color", it) }
             when (val avatarUrl = value.avatarUrl) {
                 is BotProfilePatch.AvatarURL.Set -> put("avatarUrl", avatarUrl.path)
                 BotProfilePatch.AvatarURL.Clear -> put("avatarUrl", JsonNull)
@@ -921,6 +1308,7 @@ object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
             value.avatarCrop?.let { put("avatarCrop", it.name.lowercase()) }
             value.voice?.let { put("voice", it) }
             value.speakReplies?.let { put("speakReplies", it) }
+            if (!value.mcpServersAbsent) put("mcpServers", value.mcpServers?.let { names -> JsonArray(names.map { JsonPrimitive(it) }) } ?: JsonNull) // null = all enabled
         })
     }
 
@@ -964,6 +1352,7 @@ object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
             title = string("title"),
             description = string("description"),
             notifications = boolean("notifications"),
+            color = string("color")?.takeIf { it in MAUS_COLOR_NAMES },
             avatarUrl = avatarUrl,
             avatarCrop = crop,
             voice = string("voice"),

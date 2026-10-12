@@ -273,6 +273,18 @@ export interface ThreadTailRows extends ThreadRows {
   hasMore?: boolean;
 }
 
+/** The `at` of a thread's newest message, or null for a thread with none.
+ * One bounded index read, for callers that only need "when did this thread
+ * last move" — the thread list and the roster order themselves by it.
+ * A thread's rows are contiguous in the thread_id index, so this never
+ * scans the whole table. */
+export function readThreadLastAt(threadId: string): number | null {
+  const row = db()
+    .prepare("SELECT at FROM messages WHERE thread_id = ? ORDER BY rowid DESC LIMIT 1")
+    .get(threadId) as { at: number } | undefined;
+  return row ? row.at : null;
+}
+
 /** The newest `limit` rows only, read at the SQL boundary — the fast path
  * for a display page (startup hydrate, a fresh scrollback view) that never
  * needs the rest of a long transcript. Falls back to a full legacy import

@@ -1,6 +1,7 @@
 package com.openmausbot.companion.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,7 +24,9 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.LinkInteractionListener
@@ -157,6 +160,67 @@ private fun MarkdownBlockView(block: MarkdownBlock, tail: Boolean) {
             }
 
         MarkdownBlock.Rule -> HorizontalDivider(Modifier.padding(vertical = 2.dp))
+
+        is MarkdownBlock.Table -> MarkdownTableView(block)
+    }
+}
+
+@Composable
+private fun MarkdownTableView(table: MarkdownBlock.Table) {
+    if (table.headers.isEmpty()) return
+    val muted = secondaryTint
+    val ruleColour = muted.copy(alpha = 0.25f)
+    val scroll = rememberScrollState()
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(
+                MaterialTheme.colorScheme.surfaceContainer.copy(alpha = 0.5f),
+                RoundedCornerShape(10.dp),
+            )
+            .border(
+                width = 1.dp,
+                color = muted.copy(alpha = 0.2f),
+                shape = RoundedCornerShape(10.dp),
+            )
+            .clip(RoundedCornerShape(10.dp))
+            .horizontalScroll(scroll)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Layout(
+            content = {
+                table.headers.forEachIndexed { column, header ->
+                    Text(
+                        text = inline(header, tail = false, muted = muted),
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary,
+                        softWrap = true,
+                    )
+                }
+                repeat(table.headers.size) {
+                    HorizontalDivider(color = ruleColour)
+                }
+                table.rows.forEach { row ->
+                    table.headers.indices.forEach { column ->
+                        Text(
+                            text = inline(row.getOrElse(column) { "" }, tail = false, muted = muted),
+                            fontSize = 13.sp,
+                            softWrap = true,
+                        )
+                    }
+                }
+            },
+            measurePolicy = tableGridMeasurePolicy(
+                columnCount = table.headers.size,
+                minColumnWidth = 64.dp,
+                maxColumnWidth = 260.dp,
+                columnGap = 16.dp,
+                rowGap = 6.dp,
+                alignments = table.alignments,
+            ),
+        )
     }
 }
 

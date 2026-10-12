@@ -1,7 +1,7 @@
 // Scripted provider fixture that exercises the REAL injected agents MCP proxy.
 // The plan and evidence are confined to the isolated launcher's temporary home.
 import { spawn } from "node:child_process";
-import { appendFileSync, readFileSync, existsSync } from "node:fs";
+import { appendFileSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { waitForExit } from "./cleanup.ts";
 
@@ -34,6 +34,13 @@ export async function runRoomHandoffAgent(argv: string[], planPath: string, prom
   for (const expected of plan.expectSystemIncludes ?? []) if (!system.includes(expected)) throw new Error(`Missing discussion context: ${expected}`);
   for (const expected of plan.expectContextIncludes ?? []) if (!turnContext.includes(expected)) throw new Error(`Missing conversation context: ${expected}`);
   const steps = basePlan.turns ? plan.steps ?? [] : resumed ? plan.resumeSteps ?? [] : plan.steps ?? [];
+  appendFileSync(`${planPath}.evidence.jsonl`, JSON.stringify({
+    botId, turnIndex, threadId: integration.env.OMB_THREAD_ID,
+    model: argv.includes("--model") ? arg("--model") : undefined,
+    permissionMode: argv.includes("--permission-mode") ? arg("--permission-mode") : undefined,
+    snapshotMode: argv.includes("--system-prompt-snapshot") ? arg("--system-prompt-snapshot") : undefined,
+    resumed, system, prompt, evidence: [], ...launch?.evidence,
+  }) + "\n");
   const child = spawn(integration.command, integration.args, { env: { ...process.env, ...integration.env }, stdio: ["pipe", "pipe", "pipe"] });
   const pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void }>();
   let serial = 0;
@@ -99,10 +106,22 @@ export async function runRoomHandoffAgent(argv: string[], planPath: string, prom
     closing = true;
     clearTimeout(timer); clearTimeout(delayTimer); clearInterval(gateTimer); lines.close(); child.stdin.destroy();
     await waitForExit(child, { signal: "SIGTERM", graceMs: 500 });
-    appendFileSync(`${planPath}.evidence.jsonl`, JSON.stringify({ botId, turnIndex, threadId: integration.env.OMB_THREAD_ID,
-      model: argv.includes("--model") ? arg("--model") : undefined,
-      permissionMode: argv.includes("--permission-mode") ? arg("--permission-mode") : undefined,
-      snapshotMode: argv.includes("--system-prompt-snapshot") ? arg("--system-prompt-snapshot") : undefined,
-      resumed, system, prompt, evidence, ...launch?.evidence }) + "\n");
+    if (existsSync(`${planPath}.evidence.jsonl`)) {
+      const all = readFileSync(`${planPath}.evidence.jsonl`, "utf8").trim().split("\n").filter(Boolean).map(line => JSON.parse(line));
+      const idx = all.findLastIndex((entry: any) => entry.botId === botId && entry.turnIndex === turnIndex);
+      const record = {
+        botId, turnIndex, threadId: integration.env.OMB_THREAD_ID,
+        model: argv.includes("--model") ? arg("--model") : undefined,
+        permissionMode: argv.includes("--permission-mode") ? arg("--permission-mode") : undefined,
+        snapshotMode: argv.includes("--system-prompt-snapshot") ? arg("--system-prompt-snapshot") : undefined,
+        resumed, system, prompt, evidence, ...launch?.evidence,
+      };
+      if (idx !== -1) {
+        all[idx] = record;
+        writeFileSync(`${planPath}.evidence.jsonl`, all.map((e: any) => JSON.stringify(e)).join("\n") + "\n");
+      } else {
+        appendFileSync(`${planPath}.evidence.jsonl`, JSON.stringify(record) + "\n");
+      }
+    }
   }
 }

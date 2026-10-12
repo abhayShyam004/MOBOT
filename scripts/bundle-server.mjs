@@ -41,6 +41,21 @@ const yamlEsmPlugin = {
 // Every file run as its own process. Keep in sync with the spawn sites above.
 const ENTRY_POINTS = [
   "index.ts",
+  // Android harness entry: seeds the android_computer MCP server into the
+  // config before loading index. Not referenced by the desktop; shipped for
+  // the Android build's server.zip (scripts/prepare-android-host.mjs).
+  "index-android.ts",
+  // Phase 4 Android computer adapter: a stdio MCP server the harness spawns
+  // via a seeded mcpServers entry (android-seed.ts), like any other proxy.
+  "android-computer.ts",
+  // Android npx shim: the bot terminal runs this with the embedded Node
+  // runtime (`node android-npx-shim.js …`) when a user types `npx`. Node
+  // reads it as a script, so the W^X exec block that breaks npm's own npx
+  // (it spawns .bin binaries) does not apply.
+  "android-npx-shim.ts",
+  // Phase 7 Android browser adapter: same stdio MCP pattern, speaks to the
+  // app-side WebView driver over loopback HTTP (env handoff from HarnessHost).
+  "android-browser.ts",
   // the `openmausbot` command (serve/pair/sessions/status) for the npm
   // package, the container image and checkouts; pair-cli.ts stays as an alias
   "openmausbot.ts",

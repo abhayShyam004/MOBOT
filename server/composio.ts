@@ -7,6 +7,9 @@ import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
 
 const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
+const DEFAULT_CONNECT_MCP_ENDPOINT = "https://connect.composio.dev/mcp";
+
+export type ComposioSurface = "platform" | "connect";
 
 function apiBase() {
   return (process.env.OMB_COMPOSIO_API ?? `${DEFAULT_BACKEND_ORIGIN}/api/v3.1`).replace(/\/$/, "");
@@ -14,6 +17,83 @@ function apiBase() {
 
 function toolkitBase() {
   return (process.env.OMB_COMPOSIO_TOOLKITS_API ?? `${DEFAULT_BACKEND_ORIGIN}/api/v3`).replace(/\/$/, "");
+}
+
+export function connectMcpEndpoint(cfg?: AppConfig): string {
+  return cfg?.composio?.mcpUrl ?? process.env.OMB_COMPOSIO_CONNECT_MCP ?? DEFAULT_CONNECT_MCP_ENDPOINT;
+}
+
+export function detectComposioKeyType(key: string): ComposioSurface | "unknown" {
+  const trimmed = key.trim();
+  if (trimmed.startsWith("ak_")) return "platform";
+  if (trimmed.startsWith("ck_")) return "connect";
+  return "unknown";
+}
+
+export function composioSurface(cfg: AppConfig): ComposioSurface {
+  if (cfg.composio?.surface) return cfg.composio.surface;
+  const key = projectApiKey(cfg);
+  if (key?.startsWith("ck_")) return "connect";
+  return "platform";
+}
+
+export function validatePlatformKey(key: string): string {
+  const trimmed = key.trim();
+  if (!trimmed) throw new Error("Enter a Composio project API key");
+  if (trimmed.startsWith("ck_")) {
+    throw new Error(
+      "This Composio connection expects a Platform Project API key (ak_...). You provided a Connect consumer key (ck_...). Choose the appropriate Composio connection type.",
+    );
+  }
+  if (!trimmed.startsWith("ak_")) {
+    throw new Error("Invalid Composio key format. Platform Project API keys must start with ak_.");
+  }
+  return trimmed;
+}
+
+export function validateConnectKey(key: string): string {
+  const trimmed = key.trim();
+  if (!trimmed) throw new Error("Enter a Composio Connect consumer key");
+  if (trimmed.startsWith("ak_")) {
+    throw new Error(
+      "This Composio connection expects a Connect consumer key (ck_...). You provided a Platform Project API key (ak_...). Choose the appropriate Composio connection type.",
+    );
+  }
+  if (!trimmed.startsWith("ck_")) {
+    throw new Error("Invalid Composio key format. Connect consumer keys must start with ck_.");
+  }
+  return trimmed;
+}
+
+export async function verifyConnectConsumerKey(
+  consumerKey: string,
+  endpoint?: string,
+): Promise<{ ok: boolean }> {
+  const validKey = validateConnectKey(consumerKey);
+  const mcpUrl = endpoint ?? connectMcpEndpoint();
+  const res = await fetch(mcpUrl, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-consumer-api-key": validKey,
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+      params: {},
+    }),
+    signal: AbortSignal.timeout(15_000),
+  });
+
+  if (res.status === 401 || res.status === 403) {
+    throw new Error("Composio rejected this consumer key (invalid or unauthorized)");
+  }
+  if (!res.ok) {
+    throw new Error(await responseError(res, `Composio Connect error: HTTP ${res.status}`));
+  }
+  return { ok: true };
 }
 
 const sessionResponseSchema = z.object({
@@ -420,15 +500,24 @@ function authConfigsKey(sessionId: string, wanted: AuthConfigMap): string {
   return `${sessionId}:${JSON.stringify(wanted)}`;
 }
 
-/** Validate a project key and return one reusable Session for this install. */
+/** Validate a project key and return one reusable Session for this install.
+ *
+ *  Identity model (multi-device compatibility — do not casually change):
+ *  each install mints its own Composio user (`openmausbot_<uuid>`) and
+ *  connections belong to that Composio user, NOT to the project key. A
+ *  second device sharing the same project key therefore starts with zero
+ *  connections until it adopts the first device's user via
+ *  `PUT /api/config {"composio":{"userId":"openmausbot_…","sessionId":""}}`
+ *  — clearing sessionId forces a Session rebuild under the adopted user and
+ *  every existing connection becomes visible. Replacing the random-user
+ *  minting here with, say, a shared constant would silently change which
+ *  accounts every existing install sees. */
 export async function prepareProjectSession(
   apiKey: string,
   current?: { apiKey?: string; userId?: string; sessionId?: string },
   knownAuthConfigs?: AuthConfigMap,
 ): Promise<{ apiKey: string; userId: string; sessionId: string }> {
-  const trimmed = apiKey.trim();
-  if (!trimmed) throw new Error("Enter a Composio project API key");
-  if (!trimmed.startsWith("ak_")) throw new Error("Composio project API keys start with ak_");
+  const trimmed = validatePlatformKey(apiKey);
 
   // The project's own auth configs must be named at creation — a Session
   // cannot be edited later — so they are read before deciding whether the
@@ -480,6 +569,60 @@ export async function prepareProjectSession(
   // the same creation again — remember this attempt so it happens once.
   authConfigUpgradeAttempted.add(authConfigsKey(session.session_id, authConfigs));
   return { apiKey: trimmed, userId, sessionId: session.session_id };
+}
+
+export interface PreparedComposioCredential {
+  apiKey: string;
+  surface: ComposioSurface;
+  userId?: string;
+  sessionId?: string;
+  mcpUrl?: string;
+}
+
+export async function prepareComposioCredential(
+  apiKey: string,
+  options?: {
+    requestedSurface?: ComposioSurface;
+    current?: { apiKey?: string; userId?: string; sessionId?: string; surface?: ComposioSurface };
+    knownAuthConfigs?: AuthConfigMap;
+    endpoint?: string;
+  },
+): Promise<PreparedComposioCredential> {
+  const trimmed = apiKey.trim();
+  if (!trimmed) throw new Error("Enter a Composio key");
+
+  const surface =
+    options?.requestedSurface ??
+    (trimmed.startsWith("ck_") ? "connect" : trimmed.startsWith("ak_") ? "platform" : undefined);
+
+  if (!surface) {
+    throw new Error(
+      "Invalid Composio key format. Keys must start with ak_ (Platform Project API key) or ck_ (Connect / For You consumer key).",
+    );
+  }
+
+  if (surface === "platform") {
+    const validKey = validatePlatformKey(trimmed);
+    const session = await prepareProjectSession(validKey, options?.current, options?.knownAuthConfigs);
+    return {
+      apiKey: session.apiKey,
+      surface: "platform",
+      userId: session.userId,
+      sessionId: session.sessionId,
+    };
+  }
+
+  if (surface === "connect") {
+    const validKey = validateConnectKey(trimmed);
+    await verifyConnectConsumerKey(validKey, options?.endpoint);
+    return {
+      apiKey: validKey,
+      surface: "connect",
+      mcpUrl: options?.endpoint ?? connectMcpEndpoint(),
+    };
+  }
+
+  throw new Error(`Unknown Composio surface: ${surface}`);
 }
 
 async function ensureProjectSession(cfg: AppConfig): Promise<SessionResponse> {
@@ -571,11 +714,18 @@ export async function relayMcp(
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
   });
+  const surface = composioSurface(cfg);
   if (apiKey) {
-    const session = await ensureProjectSession(cfg);
-    url = session.mcp.url;
-    headers.set("x-api-key", apiKey);
-    identity = backendFingerprint("project-mcp", url, apiKey);
+    if (surface === "connect") {
+      url = connectMcpEndpoint(cfg);
+      headers.set("x-consumer-api-key", apiKey);
+      identity = backendFingerprint("connect-mcp", url, apiKey);
+    } else {
+      const session = await ensureProjectSession(cfg);
+      url = session.mcp.url;
+      headers.set("x-api-key", apiKey);
+      identity = backendFingerprint("project-mcp", url, apiKey);
+    }
   } else {
     const broker = brokerAccess();
     if (!broker) throw new Error("Connected apps are unavailable");
@@ -747,6 +897,69 @@ function allServiceStates(
   return Object.fromEntries(services);
 }
 
+async function queryConnectMcpTools(apiKey: string, endpoint: string): Promise<string[]> {
+  const res = await fetch(endpoint, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-consumer-api-key": apiKey,
+      accept: "application/json, text/event-stream",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (!res.ok) return [];
+  const json: any = await res.json().catch(() => ({}));
+  const tools = json?.result?.tools ?? json?.tools ?? [];
+  if (!Array.isArray(tools)) return [];
+  return tools.map((t: any) => String(t.name ?? "")).filter(Boolean);
+}
+
+function toolkitSlugsFromTools(toolNames: string[]): Set<string> {
+  const slugs = new Set<string>();
+  for (const name of toolNames) {
+    const parts = name.split(/[-_]/);
+    if (parts[0]) slugs.add(canonicalToolkitSlug(parts[0]));
+  }
+  return slugs;
+}
+
+async function connectServicesFromMcp(apiKey: string, endpoint: string): Promise<Record<string, ConnectorServiceState>> {
+  const tools = await queryConnectMcpTools(apiKey, endpoint);
+  const slugs = toolkitSlugsFromTools(tools);
+  return Object.fromEntries(
+    [...slugs].map((slug) => [
+      slug,
+      {
+        connected: true,
+        pending: false,
+        status: "ACTIVE",
+        accounts: [{ id: `connect_${slug}`, status: "ACTIVE" }],
+      },
+    ]),
+  );
+}
+
+async function connectStatusFromMcp(apiKey: string, slugs: string[], endpoint: string): Promise<Record<string, ConnectorServiceState>> {
+  const tools = await queryConnectMcpTools(apiKey, endpoint);
+  const connected = toolkitSlugsFromTools(tools);
+  return Object.fromEntries(
+    slugs.map((slug) => {
+      const canonical = canonicalToolkitSlug(slug);
+      const isConnected = connected.has(canonical);
+      return [
+        slug,
+        {
+          connected: isConnected,
+          pending: false,
+          status: isConnected ? "ACTIVE" : "not_connected",
+          accounts: isConnected ? [{ id: `connect_${canonical}`, status: "ACTIVE" }] : [],
+        },
+      ];
+    }),
+  );
+}
+
 /**
  * Enumerate the user's complete connected-account inventory without depending
  * on marketplace ordering or catalog pagination.
@@ -766,6 +979,10 @@ export async function connectedServices(cfg: AppConfig): Promise<Record<string, 
         accounts: state.accounts ?? [],
       }]),
     );
+  }
+  const surface = composioSurface(cfg);
+  if (surface === "connect") {
+    return connectServicesFromMcp(apiKey, connectMcpEndpoint(cfg)).catch(() => ({}));
   }
   const session = await ensureProjectSession(cfg);
   const userId = session.config?.user_id ?? cfg.composio?.userId;
@@ -788,6 +1005,14 @@ export async function connectionStatus(cfg: AppConfig, slugs: string[]) {
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     const body = connectorServicesResponseSchema.parse(await response.json());
     return requestedServiceRecord(body.services ?? {}, slugs);
+  }
+  const surface = composioSurface(cfg);
+  if (surface === "connect") {
+    return connectStatusFromMcp(apiKey, slugs, connectMcpEndpoint(cfg)).catch(() => {
+      return Object.fromEntries(
+        slugs.map((slug) => [slug, { connected: false, pending: false, status: "not_connected", accounts: [] }]),
+      );
+    });
   }
   const session = await ensureProjectSession(cfg);
   const params = new URLSearchParams({ limit: "50" });
@@ -849,6 +1074,8 @@ export async function removeService(cfg: AppConfig, slug: string) {
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     return removalResponseSchema.parse(await response.json());
   }
+  const surface = composioSurface(cfg);
+  if (surface === "connect") return { removed: 1 };
   const session = await ensureProjectSession(cfg);
   const params = new URLSearchParams({ limit: "50", toolkits: toolkit });
   const list = await fetch(
@@ -880,6 +1107,8 @@ export async function removeAccount(cfg: AppConfig, slug: string, accountId: str
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     return removalResponseSchema.parse(await response.json());
   }
+  const surface = composioSurface(cfg);
+  if (surface === "connect") return { removed: 1 };
   const session = await ensureProjectSession(cfg);
   const userId = session.config?.user_id ?? cfg.composio?.userId;
   if (!userId) throw new Error("Composio Session has no user ID");
@@ -913,6 +1142,10 @@ export async function authorizeService(cfg: AppConfig, slug: string, requestedAl
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     const body = authUrlResponseSchema.parse(await response.json());
     return { url: trustedAuthUrl(body.url, toolkit) };
+  }
+  const surface = composioSurface(cfg);
+  if (surface === "connect") {
+    return { url: "https://dashboard.composio.dev" };
   }
   const session = await ensureProjectSession(cfg);
   const userId = session.config?.user_id ?? cfg.composio?.userId;

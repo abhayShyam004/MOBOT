@@ -21,7 +21,7 @@ import kotlin.test.assertTrue
  */
 class SlashCommandsTest {
     @Test
-    fun `the five commands, in the order the HUD lists them`() {
+    fun `the seven commands, in the order the HUD lists them`() {
         assertEquals(
             listOf(
                 SlashCommandId.COMPUTER,
@@ -29,11 +29,13 @@ class SlashCommandsTest {
                 SlashCommandId.DIFF,
                 SlashCommandId.RETRY,
                 SlashCommandId.STEER,
+                SlashCommandId.STOP,
+                SlashCommandId.NEW_THREAD,
             ),
             SlashCommands.ALL.map { it.id },
         )
         assertEquals(
-            listOf("/computer", "/threads", "/diff", "/retry", "/steer"),
+            listOf("/computer", "/threads", "/diff", "/retry", "/steer", "/stop", "/new"),
             SlashCommands.ALL.map { it.title },
         )
     }
@@ -43,6 +45,17 @@ class SlashCommandsTest {
         assertEquals(SlashEffect.Send("Show git diff and list modified files"), effect("/diff"))
         assertEquals(SlashEffect.Send("Please retry the last turn"), effect("/retry"))
         assertEquals(SlashEffect.Send("Pause and explain your current plan"), effect("/steer"))
+    }
+
+    @Test
+    fun `stop and new thread act rather than send`() {
+        assertEquals(SlashEffect.Stop, effect("/stop"))
+        assertEquals(SlashEffect.NewThread, effect("/new"))
+        // Nothing that carries a prompt may be labelled as one.
+        assertEquals(
+            listOf("/diff", "/retry", "/steer"),
+            SlashCommands.ALL.filter { it.effect is SlashEffect.Send }.map { it.title },
+        )
     }
 
     @Test
@@ -58,7 +71,7 @@ class SlashCommandsTest {
     @Test
     fun `a room has no computer and no task list`() {
         assertEquals(
-            listOf("/diff", "/retry", "/steer"),
+            listOf("/diff", "/retry", "/steer", "/stop", "/new"),
             SlashCommands.forChat(Chat.RoomChat(room())).map { it.title },
         )
     }
@@ -67,7 +80,7 @@ class SlashCommandsTest {
     fun `a channel with tasks keeps tasks but never computer`() {
         val channel = Chat.RoomChat(room().copy(tasks = listOf(BotTask("task-1", "Plan", 0.0))))
         assertEquals(
-            listOf("/threads", "/diff", "/retry", "/steer"),
+            listOf("/threads", "/diff", "/retry", "/steer", "/stop", "/new"),
             SlashCommands.forChat(channel).map { it.title },
         )
     }
@@ -83,13 +96,13 @@ class SlashCommandsTest {
         )
         assertFalse(dm.supportsTasks)
         assertEquals(
-            listOf("/diff", "/retry", "/steer"),
+            listOf("/diff", "/retry", "/steer", "/stop", "/new"),
             SlashCommands.forChat(dm).map { it.title },
         )
     }
 
     @Test
-    fun `a bot chat keeps all five`() {
+    fun `a bot chat keeps all of them`() {
         assertEquals(SlashCommands.ALL, SlashCommands.forChat(Chat.BotChat(bot())))
     }
 

@@ -21,6 +21,7 @@ object ModelRules {
             "level and lets the provider decide."
 
     const val LOADING: String = "Loading models"
+    const val NO_PROVIDER: String = "No provider"
     const val NONE_AVAILABLE: String = "No model providers are available"
     const val CURRENT_PROVIDER_UNAVAILABLE: String = "Current provider (unavailable)"
     const val DEFAULT_EFFORT_LABEL: String = "Default"

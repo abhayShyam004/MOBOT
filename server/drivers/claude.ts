@@ -47,6 +47,7 @@ import { SPAWNED_PROXIES } from "../proxy-paths.ts";
 import {
   ASK_USER_QUESTION_TOOL,
   askQuestionSummary,
+  normalizeAskUserInput,
   parseAskQuestions,
   parseChoices,
   questionChoices,
@@ -509,10 +510,16 @@ function systemEndedReply(kind: Ask["kind"]): { behavior: AskBehavior; message: 
 }
 
 /** The structured questions behind an ask, when it is one. Claude's own
- * AskUserQuestion carries them; everything else answers null and keeps the
- * plain summary/choices card. */
+ * AskUserQuestion and the ask_user proxy tool both carry them (the proxy
+ * normalizes flat and v2-typed inputs before they reach the broker);
+ * everything else answers null and keeps the plain summary/choices card. */
 function askQuestions(ask: Ask): AskQuestion[] | null {
-  return ask.tool === ASK_USER_QUESTION_TOOL ? parseAskQuestions(ask.input) : null;
+  if (ask.tool === ASK_USER_QUESTION_TOOL) return parseAskQuestions(ask.input);
+  if (ask.tool === "ask_user") {
+    return parseAskQuestions(ask.input)
+      ?? normalizeAskUserInput({ question: ask.input?.question, choices: ask.input?.choices, type: ask.input?.type });
+  }
+  return null;
 }
 
 /** One human-readable line for an ask — what the card subtitle shows. */
@@ -1990,6 +1997,19 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
       completeAuthentication: (flowId, code) => login.complete(flowId, code),
       cancelAuthentication: () => login.cancel(),
       signOut: () => login.signOut(),
+      // Claude's sign-in is the unmodified CLI's own login (see
+      // claude-login-auth.ts) — there is deliberately no OAuth client of ours
+      // to run instead. Sign-in therefore exists exactly while the runtime
+      // does, and says so honestly instead of collecting a spawn failure.
+      authCapability: async () => {
+        const version = await readCliVersion(environment());
+        return version
+          ? { available: true }
+          : {
+              available: false,
+              reason: "Account sign-in runs the Claude Code runtime's own login, and this host does not have it. Connect an Anthropic API provider instead.",
+            };
+      },
       adapter: {
         provider: DRIVER_KIND,
         capabilities: {

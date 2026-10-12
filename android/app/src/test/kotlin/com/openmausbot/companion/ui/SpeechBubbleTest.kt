@@ -1,10 +1,14 @@
 package com.openmausbot.companion.ui
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.unit.dp
+import kotlin.math.pow
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 
 /**
  * DELTA-06: the tailed bubble, pinned against `ios/App/SpeechBubble.swift`.
@@ -89,10 +93,37 @@ class SpeechBubbleTest {
     }
 
     @Test
-    fun `what you said is filled with the mascot palette's blue, not the system's`() {
-        // `BubbleColor.mine = MausPalette.color("blue")`, and `mineText = .white`.
-        assertEquals(0xFF377FE6.toInt(), BubbleColor.mine.toArgb())
-        assertEquals(0xFFFFFFFF.toInt(), BubbleColor.mineText.toArgb())
+    fun `what you said is a whisper of the brand, not a saturated second colour`() {
+        // This used to be the mascot palette's full blue (`Color(MausPalette
+        // .argb("blue"))`), which made every screenful of transcript a two-colour
+        // argument. The redesign's rule is that saturated colour in this app
+        // comes from the bots and from nothing else, so the person's own words
+        // are the brand green held down to a whisper of itself. Both halves of
+        // that rule are asserted, because "not blue" would also be satisfied by
+        // an accidental grey.
+        val dark = DarkAppColors
+        assertNotEquals(0xFF377FE6.toInt(), dark.myBubble.toArgb())
+        assertNotEquals(dark.background.toArgb(), dark.myBubble.toArgb())
+        assertTrue(contrast(dark.myBubble, dark.onMyBubble) >= 4.5)
+
+        val light = LightAppColors
+        assertNotEquals(light.background.toArgb(), light.myBubble.toArgb())
+        assertTrue(contrast(light.myBubble, light.onMyBubble) >= 4.5)
+    }
+
+    /** WCAG relative luminance, so "readable" is a measurement rather than a hope. */
+    private fun luminance(color: Color): Double {
+        fun channel(value: Float): Double {
+            val v = value.toDouble()
+            return if (v <= 0.03928) v / 12.92 else ((v + 0.055) / 1.055).pow(2.4)
+        }
+        return 0.2126 * channel(color.red) + 0.7152 * channel(color.green) + 0.0722 * channel(color.blue)
+    }
+
+    private fun contrast(first: Color, second: Color): Double {
+        val a = luminance(first)
+        val b = luminance(second)
+        return (maxOf(a, b) + 0.05) / (minOf(a, b) + 0.05)
     }
 
     private companion object {

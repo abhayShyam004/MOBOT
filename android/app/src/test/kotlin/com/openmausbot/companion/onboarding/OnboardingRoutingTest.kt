@@ -7,6 +7,7 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import com.openmausbot.companion.core.NotificationAuthorizationState
 import com.openmausbot.companion.core.OnboardingPairingState
 import com.openmausbot.companion.core.Session
@@ -62,6 +63,10 @@ class OnboardingRoutingTest {
         compose.waitUntil(5_000) {
             scene.session.restoreState.value !is Session.RestoreState.Pending
         }
+        // What `OpenMausApp.onCreate` does on a real launch. Without it the scene
+        // is a phone that paired and then never dialled, so every paired-world
+        // assertion here was made against a session that was still connecting.
+        scene.session.connect()
         compose.waitForIdle()
     }
 
@@ -95,7 +100,11 @@ class OnboardingRoutingTest {
         compose.onNodeWithContentDescription("Settings").performClick()
         compose.waitForIdle()
         compose.onNodeWithText("Connect a computer").assertIsDisplayed()
-        compose.onNodeWithText("Enable notifications").assertIsDisplayed()
+        // The redesigned screen is a taller, more spacious list than the one this
+        // was written against, so on the test's short viewport the notifications
+        // group is below the fold. Scrolling is what a person would do on a phone
+        // that small; what the assertion is about is that the row is there.
+        compose.onNodeWithText("Enable notifications").performScrollTo().assertIsDisplayed()
         // And nothing that needs a pairing to mean anything.
         compose.onNodeWithText("Unpair this phone").assertDoesNotExist()
         compose.onNodeWithText("Tasks & Routines").assertDoesNotExist()
@@ -147,7 +156,7 @@ class OnboardingRoutingTest {
         )
         mount(scene)
 
-        compose.onNodeWithText("No bots yet").assertIsDisplayed()
+        compose.onNodeWithText("Your workspace is empty").assertIsDisplayed()
         assertEquals(
             emptyList(),
             scene.asked(),
@@ -184,7 +193,7 @@ class OnboardingRoutingTest {
         )
         // And the step is over: it does not come back for the same pairing, in
         // this process or the next one.
-        compose.onNodeWithText("No bots yet").assertIsDisplayed()
+        compose.onNodeWithText("Your workspace is empty").assertIsDisplayed()
         assertFalse(
             scene.relaunchedOnboarding().notificationPending.value,
             "the prompt was fired but the marker is still pending",
@@ -205,7 +214,7 @@ class OnboardingRoutingTest {
         compose.onNodeWithText(OnboardingCopy.NOT_NOW).performClick()
         compose.waitForIdle()
 
-        compose.onNodeWithText("No bots yet").assertIsDisplayed()
+        compose.onNodeWithText("Your workspace is empty").assertIsDisplayed()
         assertEquals(emptyList(), scene.asked(), "\"Not now\" fired the prompt anyway")
         // And the answer reached disk: a relaunch finds no step still owing.
         // Read through a store that never saw this process, because a marker
@@ -227,7 +236,7 @@ class OnboardingRoutingTest {
         )
         mount(scene)
 
-        compose.onNodeWithText("No bots yet").assertIsDisplayed()
+        compose.onNodeWithText("Your workspace is empty").assertIsDisplayed()
         assertEquals(emptyList(), scene.asked())
     }
 
@@ -248,7 +257,7 @@ class OnboardingRoutingTest {
             welcomeSeen = false,
         )
         mount(scene)
-        compose.onNodeWithText("No bots yet").assertIsDisplayed()
+        compose.onNodeWithText("Your workspace is empty").assertIsDisplayed()
 
         scene.session.signOut()
         compose.waitUntil(5_000) { scene.session.connection.value == null }
@@ -297,7 +306,7 @@ class OnboardingRoutingTest {
 
         compose.onNodeWithText(OnboardingCopy.NOT_NOW).performClick()
         compose.waitForIdle()
-        compose.onNodeWithText("No bots yet").assertIsDisplayed()
+        compose.onNodeWithText("Your workspace is empty").assertIsDisplayed()
 
         scene.session.signOut()
         compose.waitUntil(5_000) { scene.session.connection.value == null }
@@ -377,7 +386,7 @@ class OnboardingRoutingTest {
         )
         mount(scene)
 
-        compose.onNodeWithText("No bots yet").assertIsDisplayed()
+        compose.onNodeWithText("Your workspace is empty").assertIsDisplayed()
         compose.onNodeWithText(OnboardingCopy.NOTIFICATIONS_TITLE).assertDoesNotExist()
         assertEquals(emptyList(), scene.asked())
     }

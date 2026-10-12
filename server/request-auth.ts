@@ -216,6 +216,9 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["POST", "PATCH", "DELETE"], path: /^\/api\/bots\/[\w-]+\/tasks\/[\w-]+$/ },
   { methods: ["PATCH"], path: /^\/api\/bots\/[\w-]+\/profile$/ },
   { methods: ["PATCH"], path: /^\/api\/bots\/[\w-]+$/ }, // display fields only: see clientBotPatchViolation
+  // Deleting a whole agent is a paired-client product behavior (the roster's
+  // long-press offers it); the harness route 409s the busy/routine cases.
+  { methods: ["DELETE"], path: /^\/api\/bots\/[\w-]+$/ },
   // approvals and cards
   { methods: ["POST"], path: /^\/api\/bots\/[\w-]+\/respond$/ },
   { methods: ["POST"], path: /^\/api\/threads\/[\w-]+\/respond$/ },
@@ -233,6 +236,10 @@ export const CLIENT_ALLOW: ReadonlyArray<{ methods: readonly string[]; path: Reg
   { methods: ["POST"], path: /^\/api\/groups\/[\w-]+\/tasks$/ },
   { methods: ["POST", "PATCH", "DELETE"], path: /^\/api\/groups\/[\w-]+\/tasks\/[\w-]+$/ },
   { methods: ["PATCH"], path: /^\/api\/groups\/[\w-]+$/ }, // display fields only: see clientGroupPatchViolation
+  // Deleting a whole room is the paired-client product behavior (the room
+  // settings sheet offers it), exactly like deleting an agent; the harness
+  // route 409s the busy cases and refuses bot-to-bot channels.
+  { methods: ["DELETE"], path: /^\/api\/groups\/[\w-]+$/ },
   { methods: ["POST"], path: /^\/api\/threads\/[\w-]+\/messages\/[\w-]+\/reactions$/ },
   // attachments
   { methods: ["POST"], path: /^\/api\/attachments$/ },

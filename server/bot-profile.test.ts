@@ -27,8 +27,55 @@ describe("parseBotProfilePatch (strict — the paired boundary)", () => {
   });
 
   it("refuses unknown cosmetic keys too — strict means the allowlist IS the contract", () => {
-    const result = parseBotProfilePatch({ color: "red" } as never, true);
-    expect(result).toEqual({ ok: false, error: "unsupported profile field: color" });
+    const result = parseBotProfilePatch({ badge: "gold" } as never, true);
+    expect(result).toEqual({ ok: false, error: "unsupported profile field: badge" });
+  });
+
+  // The bot's colour is a cosmetic identity field, offered by every client's
+  // profile sheet; the ten names are the whole vocabulary.
+  it("accepts a colour from the ten bot colours and refuses anything else", () => {
+    expect(parseBotProfilePatch({ color: "red" }, true)).toEqual({ ok: true, patch: { color: "red" } });
+    expect(parseBotProfilePatch({ color: "purple" }, false)).toEqual({ ok: true, patch: { color: "purple" } });
+    for (const strict of [true, false]) {
+      const bad = parseBotProfilePatch({ color: "chartreuse" } as never, strict);
+      expect(bad.ok, `strict=${strict}`).toBe(false);
+      if (!bad.ok) expect(bad.error).toBe("color must be one of the ten bot colours");
+      expect(parseBotProfilePatch({ color: 7 } as never, strict).ok).toBe(false);
+    }
+  });
+
+  // The Android profile sheet assigns MCP servers through this route; the
+  // field belongs to the identity surface, with the broad PATCH's rules.
+  it("accepts an mcpServers selection and dedupes it", () => {
+    const result = parseBotProfilePatch({ mcpServers: ["notes", "docs", "notes"] }, true);
+    expect(result).toEqual({ ok: true, patch: { mcpServers: ["notes", "docs"] } });
+  });
+
+  it("accepts null and [] as the all/none MCP states", () => {
+    // null normalizes to the record's undefined = "every enabled server";
+    // [] is the explicit none.
+    const all = parseBotProfilePatch({ mcpServers: null }, true);
+    expect(all).toEqual({ ok: true, patch: { mcpServers: undefined } });
+    const none = parseBotProfilePatch({ mcpServers: [] }, true);
+    expect(none).toEqual({ ok: true, patch: { mcpServers: [] } });
+  });
+
+  it("refuses malformed mcpServers values", () => {
+    for (const bad of [
+      ["Notes"],
+      ["1bad"],
+      ["has space"],
+      ["a".repeat(40)],
+      ["ok", 7 as unknown as string],
+    ]) {
+      const result = parseBotProfilePatch({ mcpServers: bad } as never, true);
+      expect(result.ok, JSON.stringify(bad)).toBe(false);
+    }
+    const over = parseBotProfilePatch(
+      { mcpServers: Array.from({ length: 21 }, (_, i) => `srv${i}`) },
+      true,
+    );
+    expect(over).toEqual({ ok: false, error: "Select at most 20 MCP servers." });
   });
 
   it("accepts the full identity surface", () => {
@@ -68,7 +115,7 @@ describe("parseBotProfilePatch (both modes)", () => {
   });
 
   it("lenient mode drops unknown keys instead of failing — the desktop PATCH mixes fields", () => {
-    const result = parseBotProfilePatch({ name: "Mira", color: "red" } as never, false);
+    const result = parseBotProfilePatch({ name: "Mira", badge: "gold" } as never, false);
     expect(result).toEqual({ ok: true, patch: { name: "Mira" } });
   });
 

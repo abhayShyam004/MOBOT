@@ -12,12 +12,14 @@ import {
   mentionPrompt,
   COMPOSIO_PROMPT,
   customMcpPrompt,
+  ASK_PROMPT,
   CREDENTIAL_PROMPT,
   LEARN_PROMPT,
   PROFILE_PROMPT,
   ROUTINE_PROMPT,
   ROUTINE_EXECUTION_PROMPT,
   WEBHOOK_PROMPT,
+  ANDROID_COMPUTER_SYSTEM_PROMPT,
   SIGN_IN_PROMPT,
 } from "./system-prompt.ts";
 
@@ -124,10 +126,23 @@ describe("computerPrompt", () => {
 
 describe("shared sentences", () => {
   it("each begins with one space so they concatenate onto the persona line", () => {
-    for (const sentence of [COMPOSIO_PROMPT, CREDENTIAL_PROMPT, ROUTINE_PROMPT, ROUTINE_EXECUTION_PROMPT, LEARN_PROMPT, WEBHOOK_PROMPT, PROFILE_PROMPT, SIGN_IN_PROMPT]) {
+    for (const sentence of [COMPOSIO_PROMPT, ASK_PROMPT, CREDENTIAL_PROMPT, ROUTINE_PROMPT, ROUTINE_EXECUTION_PROMPT, LEARN_PROMPT, WEBHOOK_PROMPT, PROFILE_PROMPT, SIGN_IN_PROMPT]) {
       expect(sentence.startsWith(" ")).toBe(true);
       expect(sentence.startsWith("  ")).toBe(false);
     }
+  });
+
+  it("tells a bot when to ask the person, and never for permission", () => {
+    expect(ASK_PROMPT).toContain("ask_user");
+    expect(ASK_PROMPT).toContain("continue the SAME task with their answer");
+    expect(ASK_PROMPT).toContain("never ask what you can find out yourself");
+    // The line the permission system must not be confused with.
+    expect(ASK_PROMPT).toContain("never ask for permission to act");
+    // Two abuses a real turn actually produced: asking the person to write the
+    // answer, and ending the turn to announce what is needed instead of asking.
+    expect(ASK_PROMPT).toContain("never ask the person to produce content or do part of the work");
+    expect(ASK_PROMPT).toContain("rather than ending the turn to say what you need");
+    expect(ASK_PROMPT).toContain("single_choice, multiple_choice, confirmation, free_text");
   });
 
   it("customMcpPrompt names the mounted servers and is empty for none", () => {
@@ -159,5 +174,24 @@ describe("shared sentences", () => {
     expect(LEARN_PROMPT).toContain("only when the user explicitly asks to revise that exact name");
     expect(CREDENTIAL_PROMPT).toContain("secure credential request");
     expect(CREDENTIAL_PROMPT).not.toContain("applied immediately");
+  });
+
+  it("tells an Android bot that the phone is the computer, and how to report what it did", () => {
+    // The rules a real conversation cost: a bot told the person to run a
+    // command elsewhere, another asked a selection tool for a terminal it was
+    // already on, and a third reported a package as installed because npx had
+    // run it once.
+    expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("this device is your computer");
+    expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("Never answer a request by telling them to run a command");
+    expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("open it with the open_interactive tool");
+    expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("never with nohup");
+    expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("available_through_npx");
+    expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("it is not installed, and it is not running");
+    expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("never put tool names, command lines, file paths, environment names, exit codes");
+    expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("never claim an outcome the tools did not confirm");
+    // It speaks about the product's limits, not the implementation's names.
+    for (const leak of ["nohup npx", ".omb-bin", "agents_select_computer"]) {
+      expect(ANDROID_COMPUTER_SYSTEM_PROMPT).not.toContain(leak);
+    }
   });
 });

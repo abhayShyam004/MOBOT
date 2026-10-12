@@ -44,7 +44,14 @@ class AlwaysOnConnectionService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        startForeground(NOTIFICATION_ID, buildNotification())
+        // A refused promotion must never crash the process (same rule as
+        // HarnessService): without the grant this is a background service —
+        // weaker, not dead.
+        try {
+            startForeground(NOTIFICATION_ID, buildNotification())
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "foreground promotion refused; continuing without", e)
+        }
         AlwaysOnConnectionState.active = true
         val app = application as OpenMausApp
         // Closes the race where the toggle turns this on and the app
@@ -87,6 +94,7 @@ class AlwaysOnConnectionService : Service() {
     }
 
     companion object {
+        private const val TAG = "AlwaysOnSvc"
         const val CHANNEL_ID = "always_on_status"
         const val NOTIFICATION_ID = 1
 

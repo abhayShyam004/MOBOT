@@ -118,6 +118,11 @@ it("validates MCP grants, refuses live changes and client sessions, and rechecks
     for (const mcpServers of ["notes", [""], ["bad.name"], ["agents"], [1], Array.from({ length: 21 }, (_, i) => `server-${i}`)]) {
       expect((await api("PATCH", `/api/bots/${bot.id}`, { mcpServers })).status).toBe(400);
     }
+    // The paired-client profile route shares the broad PATCH's rules — this
+    // is what the Android AgentProfileSheet's Tools checkboxes call.
+    expect((await api("PATCH", `/api/bots/${bot.id}/profile`, { mcpServers: ["notes", "notes"] })).status).toBe(200);
+    expect((await api("PATCH", `/api/bots/${bot.id}/profile`, { mcpServers: ["bad.name"] })).status).toBe(400);
+    expect((await api("PATCH", `/api/bots/${bot.id}/profile`, { mcpServers: Array.from({ length: 21 }, (_, i) => `srv-${i}`) })).status).toBe(400);
     expect((await api("PATCH", `/api/bots/${bot.id}`, { mcpServers: ["notes", "notes"] })).body.bot.mcpServers).toEqual(["notes"]);
     expect((await api("PATCH", `/api/bots/${bot.id}`, { title: "Unrelated edit" })).body.bot.mcpServers).toEqual(["notes"]);
     expect((await api("PATCH", `/api/bots/${idle.id}`, { mcpServers: [] })).status).toBe(200);

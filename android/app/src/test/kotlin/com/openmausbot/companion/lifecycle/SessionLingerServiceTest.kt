@@ -97,6 +97,10 @@ class SessionLingerServiceTest {
     fun `the anchor starts and stops that exact service, carrying the token`() {
         val anchor = ServiceProcessAnchor(context)
 
+        // OpenMausApp.onCreate starts the embedded host's HarnessService for
+        // the whole process; drop that intent so the queue holds only what
+        // this test's anchor produces.
+        appShadow.clearStartedServices()
         assertTrue(anchor.start(9L))
         val started = appShadow.peekNextStartedService()
         assertEquals(
@@ -130,6 +134,9 @@ class SessionLingerServiceTest {
         val controller = SessionLingerController(session, scope, anchor)
         anchor.attach(controller)
 
+        // Same isolation as the anchor test above: HarnessService was already
+        // queued by the Application under test, not by this coordinator.
+        appShadow.clearStartedServices()
         controller.onStop(TestOwner())
         val startIntent = appShadow.peekNextStartedService()
         assertEquals(1L, controller.openWindow)

@@ -58,9 +58,9 @@ object OnboardingCopy {
 
     const val UNPAIRED_HOME_TITLE = "Connect when you're ready"
     const val UNPAIRED_HOME_BODY =
-        "Pair this phone with OpenMausBot to see your chats and respond to your bots."
+        "Pair this phone with MOBOT to see your chats and respond to your bots."
     const val UNPAIRED_HOME_HINT =
-        "On your computer, open OpenMausBot → Settings → Phone."
+        "On your computer, open MOBOT → Settings → Phone."
     const val UNPAIRED_HOME_CONNECT = "Connect computer"
 
     const val NOTIFICATIONS_TITLE = "Stay in the loop"
@@ -144,7 +144,7 @@ fun UnpairedHomeScreen(onConnect: () -> Unit, onOpenSettings: () -> Unit) {
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "OpenMausBot",
+                text = "MOBOT",
                 fontSize = 17.sp,
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.weight(1f).padding(start = 10.dp),

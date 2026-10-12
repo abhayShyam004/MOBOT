@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "skills": {
+    "composio": {
+      "source": "ComposioHQ/composio",
+      "sourceType": "github",
+      "skillPath": "skills/composio/SKILL.md",
+      "computedHash": "60d7d3cf79e25c061030309af40eaa2a9de6df8f6b87977932996a9909232886"
+    },
+    "ui-ux-pro-max": {
+      "source": "nextlevelbuilder/ui-ux-pro-max-skill",
+      "sourceType": "github",
+      "revision": "50d8a7de0900119855614541f15a1a616691eb33",
+      "skillPath": "skills/ui-ux-pro-max/SKILL.md",
+      "license": "MIT",
+      "computedHash": "c1a7938aab22ac04dedd41c59390a8ebb6b96750350a3f1894489b6da01c6df8"
+    },
+    "taste": {
+      "source": "Leonxlnx/taste-skill",
+      "sourceType": "github",
+      "revision": "b17742737e796305d829b3ad39eda3add0d79060",
+      "skillPath": "skills/taste/SKILL.md",
+      "license": "MIT",
+      "computedHash": "7deb495c84912ca2e486b0631c3731a6018ad880a685db2d46b61a24a0400297"
+    }
+  }
+}

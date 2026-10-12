@@ -88,6 +88,7 @@ class ProfileClientTest {
                 title = "Researcher",
                 description = "Finds evidence.",
                 notifications = false,
+                color = "teal",
                 avatarUrl = BotProfilePatch.AvatarURL.Set(
                     "/api/attachments/123e4567-e89b-12d3-a456-426614174000.webp",
                 ),
@@ -102,6 +103,7 @@ class ProfileClientTest {
                 "title",
                 "description",
                 "notifications",
+                "color",
                 "avatarUrl",
                 "avatarCrop",
                 "voice",
@@ -110,8 +112,11 @@ class ProfileClientTest {
             CompanionJson.parseToJsonElement(encoded).jsonObject.keys,
         )
         assertFailsWith<SerializationException> {
-            CompanionJson.decodeFromString<BotProfilePatch>("""{"color":"red"}""")
+            CompanionJson.decodeFromString<BotProfilePatch>("""{"badge":"gold"}""")
         }
+        // A colour outside the ten names is dropped, not forwarded as nonsense.
+        assertEquals(null, CompanionJson.decodeFromString<BotProfilePatch>("""{"color":"chartreuse"}""").color)
+        assertEquals("coral", CompanionJson.decodeFromString<BotProfilePatch>("""{"color":"coral"}""").color)
     }
 
     @Test

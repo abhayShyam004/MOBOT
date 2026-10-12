@@ -6,7 +6,6 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   fsyncSync,
-  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -16,6 +15,7 @@ import {
 import { hostname } from "node:os";
 import { dirname, join } from "node:path";
 
+import { attemptPublish } from "../electron/fs-publish.mjs";
 import { SERVER_ROOT } from "./proxy-paths.ts";
 
 export interface EnvironmentDescriptor {
@@ -83,12 +83,15 @@ export function loadEnvironmentId(dataDir: string): string {
 
     try {
       // The temporary file is complete before it becomes visible at the final
-      // path. A hard link is an atomic, no-replace publish on every supported
-      // desktop platform, unlike rename (which overwrites on POSIX).
-      linkSync(temporaryFile, file);
+      // path. Publication goes through the shared create-if-absent layer: a
+      // hard link on desktops, a no-replace symlink to the same bytes where
+      // link(2) is unavailable (Android app storage). rename is not an
+      // option: it would overwrite, silently adopting a concurrent writer's
+      // identity as our own.
+      attemptPublish(temporaryFile, file);
       return id;
     } catch (error) {
-      if (!hasCode(error, "EEXIST")) throw error;
+      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") throw error;
       const winner = readEnvironmentId(file);
       if (winner) return winner;
       throw new Error(`The environment identity at ${file} disappeared while it was being created.`);

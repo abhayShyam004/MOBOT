@@ -177,7 +177,10 @@ class ConnectedAppsClientTest {
         assertEquals("POST", first.method)
         assertEquals("/api/connectors/gmail/authorize", first.path)
         assertEquals(0, first.bodySize)
-        assertNull(first.getHeader("Content-Type"))
+        // Body-less POSTs still declare the API's JSON type (zero-length
+        // body parses as {} server-side); the route itself has no
+        // content-type gate, but the header is now uniform across mutations.
+        assertTrue(first.getHeader("Content-Type")!!.startsWith("application/json"))
 
         assertEquals(
             "https://auth.example/connect/personal",
@@ -194,7 +197,8 @@ class ConnectedAppsClientTest {
         client.authorizeConnector("gmail", "  \n  ")
         val whitespaceOnly = server.takeRequest()
         assertEquals(0, whitespaceOnly.bodySize)
-        assertNull(whitespaceOnly.getHeader("Content-Type"))
+        // Same uniform typed-empty-body rule as the first request above.
+        assertTrue(whitespaceOnly.getHeader("Content-Type")!!.startsWith("application/json"))
     }
 
     @Test
@@ -259,6 +263,97 @@ class ConnectedAppsClientTest {
             ),
             List(4) { server.takeRequest().path },
         )
+    }
+
+    @Test
+    fun theProjectKeyIsWriteOnlyAndEmptyStringClearsIt() = runBlocking {
+        server.enqueue(json("""{"composio":{"configured":true,"mode":"self-hosted"}}"""))
+        server.enqueue(json("""{"composio":{"configured":false,"mode":"unavailable"}}"""))
+
+        val saved = client.updateComposioApiKey("ak_live_123")
+        assertEquals(true, saved.composio?.configured)
+        assertEquals("self-hosted", saved.composio?.mode)
+        assertEquals(false, client.updateComposioApiKey("").composio?.configured)
+
+        val save = server.takeRequest()
+        assertEquals("PUT", save.method)
+        assertEquals("/api/config", save.path)
+        val saveBody = CompanionJson.parseToJsonElement(save.body.readUtf8()).jsonObject
+        assertEquals(setOf("composio"), saveBody.keys)
+        val sent = saveBody.getValue("composio").jsonObject
+        assertEquals(setOf("apiKey"), sent.keys)
+        assertEquals("ak_live_123", sent.getValue("apiKey").jsonPrimitive.content)
+
+        val clearBody = CompanionJson.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("", clearBody.getValue("composio").jsonObject.getValue("apiKey").jsonPrimitive.content)
+    }
+
+    @Test
+    fun thePerBotConnectedAppsGrantUsesTheBroadBotPatch() = runBlocking {
+        server.enqueue(json(
+            """{"bot":{"id":"b1","threadId":"t1","name":"Mira","title":"","description":"","notifications":true,"color":"blue","unread":false,"modelSelection":{"instanceId":"i","model":"m"},"createdAt":1,"composio":false}}""",
+        ))
+
+        val bot = client.updateBotComposio("b1", false)
+        assertEquals(false, bot.composio)
+
+        val request = server.takeRequest()
+        assertEquals("PATCH", request.method)
+        assertEquals("/api/bots/b1", request.path)
+        val body = CompanionJson.parseToJsonElement(request.body.readUtf8()).jsonObject
+        assertEquals(setOf("composio"), body.keys)
+        assertEquals("false", body.getValue("composio").jsonPrimitive.content)
+    }
+
+    @Test
+    fun connectionCardsDriveAuthorizeStatusResumeAndDismiss() = runBlocking {
+        server.enqueue(json("""{"url":"https://auth.example/connect"}"""))
+        server.enqueue(json("""{"connected":true,"pending":false,"status":"ACTIVE"}"""))
+        server.enqueue(json("""{"resumed":true}"""))
+        server.enqueue(json("""{"dismissed":true}"""))
+
+        assertEquals("https://auth.example/connect", client.authorizeConnectorCard("b1", "m1", "t1").toString())
+        assertTrue(client.connectorCardStatus("b1", "m1", "t1").connected)
+        client.resumeConnectorCard("b1", "m1", "t1")
+        client.dismissConnectorCard("b1", "m1", "t1")
+
+        val requests = List(4) { server.takeRequest() }
+        assertEquals(
+            listOf(
+                "POST /api/bots/b1/connector-cards/m1/authorize",
+                "GET /api/bots/b1/connector-cards/m1/status?threadId=t1",
+                "POST /api/bots/b1/connector-cards/m1/resume",
+                "POST /api/bots/b1/connector-cards/m1/dismiss",
+            ),
+            requests.map { "${it.method} ${it.path}" },
+        )
+        // Every action is bound to the thread that owns the card.
+        listOf(0, 2, 3).forEach { index ->
+            val body = CompanionJson.parseToJsonElement(requests[index].body.readUtf8()).jsonObject
+            assertEquals("t1", body.getValue("threadId").jsonPrimitive.content)
+        }
+        assertEquals(0, requests[1].bodySize)
+    }
+
+    @Test
+    fun aNonHttpsConnectionCardUrlIsRejectedBeforeItCanBeOpened() = runBlocking {
+        server.enqueue(json("""{"url":"javascript:alert(1)"}"""))
+        assertFailsWith<APIError.BadUrl> { client.authorizeConnectorCard("b1", "m1", "t1") }
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun disconnectUsesTheServiceRouteAndUnsafeSlugsNeverLeaveTheDevice() = runBlocking {
+        server.enqueue(json("""{"ok":true}"""))
+        client.removeConnectorService("google-calendar")
+
+        val request = server.takeRequest()
+        assertEquals("DELETE", request.method)
+        assertEquals("/api/connectors/google-calendar", request.path)
+
+        assertFailsWith<APIError.BadUrl> { client.removeConnectorService("bad/slash") }
+        assertFailsWith<APIError.BadUrl> { client.removeConnectorService("caf\u00e9") }
+        assertEquals(1, server.requestCount)
     }
 
     private fun accounts(count: Int): List<ConnectorAccount> =

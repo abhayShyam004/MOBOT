@@ -1,8 +1,5 @@
 import { augmentedPath } from "./env-path.ts";
-import {
-  PROVIDER_CREDENTIAL_ENV,
-  stripWorkspaceCredentialEnv,
-} from "./config.ts";
+import { mcpChildEnvironment } from "./mcp-env.ts";
 import { createLineSplitter } from "./mcp-bridge.ts";
 import { McpHttpError, RemoteMcpClient } from "./mcp-http.ts";
 import { isRemoteMcpServer, type StoredMcpServer, type StoredRemoteMcpServer, type StoredStdioMcpServer } from "./mcp-registry.ts";
@@ -22,10 +19,11 @@ const MAX_TOOLS = 100;
 const DEFAULT_TIMEOUT_MS = 8_000;
 
 function probeEnvironment(server: StoredStdioMcpServer): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env, PATH: augmentedPath() };
-  stripWorkspaceCredentialEnv(env);
-  for (const key of PROVIDER_CREDENTIAL_ENV) delete env[key];
-  Object.assign(env, server.env);
+  // One rule with the turn-path spawn (chat-mcp-tools.ts): strip the
+  // harness's credential env, keep a normal environment, let the server's
+  // own configured env block win (including a deliberate PATH override).
+  const env = mcpChildEnvironment(server.env);
+  env.PATH = augmentedPath();
   return env;
 }
 

@@ -494,15 +494,18 @@ class UpdatesSummaryTest {
     }
 
     @Test
-    fun `the heading is uppercased canonically, not for the reader's locale`() {
+    fun `the heading is the section's own name, unchanged in any locale`() {
         val reader = Locale.getDefault()
         Locale.setDefault(Locale.forLanguageTag("tr-TR"))
         try {
-            // Swift's `uppercased()` is the canonical transform; a localised one
-            // would put a dot on the capital I and read WORKİNG here.
-            assertEquals("NEEDS YOU", UpdatesSummary.sectionLabel(UpdateKind.NEEDS_YOU))
-            assertEquals("WORKING", UpdatesSummary.sectionLabel(UpdateKind.WORKING))
-            assertEquals("TO REVIEW", UpdatesSummary.sectionLabel(UpdateKind.TO_REVIEW))
+            // `sectionLabel` used to uppercase under Swift parity, and this test
+            // guarded the dotted-I hazard that came with it. There is no case
+            // mapping to guard now — the heading is the section's name as the app
+            // writes it, which is also why it is still set in `tr-TR` here: the
+            // assertion would catch a reintroduced `uppercase()`.
+            assertEquals("Needs you", UpdatesSummary.sectionLabel(UpdateKind.NEEDS_YOU))
+            assertEquals("Working", UpdatesSummary.sectionLabel(UpdateKind.WORKING))
+            assertEquals("To review", UpdatesSummary.sectionLabel(UpdateKind.TO_REVIEW))
         } finally {
             Locale.setDefault(reader)
         }

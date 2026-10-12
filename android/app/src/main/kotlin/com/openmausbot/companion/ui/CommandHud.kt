@@ -171,21 +171,41 @@ fun PredictiveChipsRow(
         modifier = modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 4.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
+            .padding(horizontal = AppSpacing.sm),
+        horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // Plain pills rather than Material's AssistChip: the chip's outline,
+        // default height and typography are three decisions this design system
+        // has already made, and a row of them above the composer read as the
+        // loudest thing on a quiet screen.
         chips.forEach { chip ->
-            AssistChip(
-                onClick = { onSelect(chip) },
-                label = { Text(chip.title, fontSize = 13.sp) },
-                leadingIcon = chip.icon?.let { icon ->
-                    { Text(quickReplyGlyph(icon), fontSize = 13.sp) }
-                },
-                border = AssistChipDefaults.assistChipBorder(enabled = true),
-            )
+            Row(
+                modifier = Modifier
+                    .height(MIN_TOUCH_TARGET)
+                    .clip(AppRadii.pill)
+                    .background(AppTheme.colors.surfaceRaised)
+                    .clickable(role = Role.Button) { onSelect(chip) }
+                    .padding(horizontal = AppSpacing.lg),
+                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                chip.icon?.let { icon ->
+                    Text(
+                        text = quickReplyGlyph(icon),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AppTheme.colors.textTertiary,
+                    )
+                }
+                Text(
+                    text = chip.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = AppTheme.colors.textSecondary,
+                    maxLines = 1,
+                )
+            }
         }
-        Spacer(Modifier.width(4.dp))
+        Spacer(Modifier.width(AppSpacing.sm))
     }
 }
 
@@ -223,4 +243,6 @@ private fun accent(id: SlashCommandId): Color = when (id) {
     SlashCommandId.DIFF -> Color(0xFF22C55E)
     SlashCommandId.RETRY -> Color(0xFFEAB308)
     SlashCommandId.STEER -> Color(0xFFF97316)
+    SlashCommandId.STOP -> Color(0xFFEF4444)
+    SlashCommandId.NEW_THREAD -> Color(0xFF14B8A6)
 }

@@ -5,7 +5,7 @@
 // discover that image through a filesystem tool (and an approval round trip),
 // so this module turns only app-owned tags from the CURRENT message into the
 // structured image input each native protocol understands.
-import { lstatSync, realpathSync, statSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { dirname, extname, resolve } from "node:path";
 
 import { fromMarkdown } from "mdast-util-from-markdown";
@@ -107,15 +107,20 @@ function ownedImage(path: string, attachmentsDir: string): TurnImageInput | null
   if (resolve(path) !== expected) return null;
 
   try {
-    const entry = lstatSync(expected);
-    if (!entry.isFile() || entry.isSymbolicLink() || entry.size <= 0 || entry.size > IMAGE_MAX_BYTES) return null;
+    // The attachment store publishes a committed upload as a name symlinked
+    // to a payload sidecar file (see attachments.ts), so the entry itself is
+    // often a symlink and the bytes live behind it. Canonicalize and validate
+    // THERE: realpath resolves the publication link, and the direct-child
+    // check is the security boundary — a symlink pointing anywhere outside
+    // the store (or a dangling one) dies here, exactly as a plain file
+    // outside would.
     const canonicalRoot = realpathSync(attachmentsDir);
     const canonicalFile = realpathSync(expected);
     if (dirname(canonicalFile) !== canonicalRoot) return null;
-    const finalEntry = statSync(canonicalFile);
-    if (!finalEntry.isFile() || finalEntry.size !== entry.size) return null;
+    const entry = statSync(canonicalFile);
+    if (!entry.isFile() || entry.size <= 0 || entry.size > IMAGE_MAX_BYTES) return null;
     const mime = MIME_BY_EXTENSION[extname(name)];
-    return mime ? { path: expected, mime, bytes: entry.size } : null;
+    return mime ? { path: canonicalFile, mime, bytes: entry.size } : null;
   } catch {
     return null;
   }

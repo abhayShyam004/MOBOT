@@ -4,6 +4,8 @@ import { Ajv, type ValidateFunction } from "ajv";
 import { Ajv2020 } from "ajv/dist/2020.js";
 import formats from "ajv-formats";
 import type { SendTurnInput } from "../contracts.ts";
+import { mcpChildEnvironment } from "../mcp-env.ts";
+import { RemoteMcpClient } from "../mcp-http.ts";
 import { killCliTree, spawnCli } from "../procs.ts";
 
 export interface ChatToolDefinition {
@@ -21,7 +23,9 @@ export interface ChatToolSession {
   close(): Promise<void>;
 }
 
-type Server = { command: string; args: string[]; env: Record<string, string> };
+type StdioServer = { command: string; args: string[]; env: Record<string, string> };
+type RemoteServer = { type: "http" | "sse"; url: string; headers: Record<string, string> };
+type Server = StdioServer | RemoteServer;
 const STARTUP_MS = 8_000;
 const CALL_MS = 10 * 60_000;
 const FRAME_BYTES = 2 * 1024 * 1024;
@@ -37,7 +41,39 @@ function object(value: unknown): value is Record<string, unknown> {
 }
 function aborted(): Error { return new Error("MCP operation cancelled"); }
 
-class ChatMcpClient {
+/** The one surface mountChatTools needs from either transport. */
+interface ChatClient {
+  tools(signal: AbortSignal): Promise<unknown[]>;
+  call(method: string, params: unknown, signal: AbortSignal, timeout: number): Promise<unknown>;
+  close(): Promise<void>;
+}
+
+/** The tools/list pagination rules (page cap, cursor validation, tool-count
+ * ceiling) shared by both transports; each client does its own handshake. */
+async function paginateTools(
+  call: ChatClient["call"], signal: AbortSignal, deadline: number,
+): Promise<unknown[]> {
+  const remaining = () => {
+    if (Date.now() >= deadline) throw new Error("MCP startup timed out");
+    return deadline - Date.now();
+  };
+  const tools: unknown[] = [];
+  const cursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_PAGES; page += 1) {
+    const result = await call("tools/list", cursor ? { cursor } : {}, signal, remaining());
+    if (!object(result) || !Array.isArray(result.tools)) throw new Error("MCP tools/list returned an invalid result");
+    tools.push(...result.tools);
+    if (tools.length > TOOL_COUNT) throw new Error("MCP tool count exceeds the 128-tool limit");
+    if (result.nextCursor === undefined) return tools;
+    if (typeof result.nextCursor !== "string" || !result.nextCursor || cursors.has(result.nextCursor)) throw new Error("MCP tools/list returned an invalid pagination cursor");
+    cursors.add(result.nextCursor);
+    cursor = result.nextCursor;
+  }
+  throw new Error("MCP tools/list exceeded the pagination limit");
+}
+
+class ChatMcpClient implements ChatClient {
   private child: ReturnType<typeof spawnCli>;
   private buffer = "";
   private nextId = 1;
@@ -47,9 +83,16 @@ class ChatMcpClient {
   private pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void }>();
 
   constructor(server: Server) {
+    // Only the stdio shape reaches this constructor; the remote one has its
+    // own class below. Narrowing keeps the strict union honest.
+    if (!("command" in server)) throw new Error("Remote MCP servers do not run as local commands");
+    const { command, args, env } = server;
     try {
-      this.child = spawnCli(server.command, server.args, {
-        stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...server.env },
+      // mcpChildEnvironment strips the harness's credential env (provider
+      // keys etc.) before the server's own env block is applied — a custom
+      // MCP server configures itself, it never inherits foreign secrets.
+      this.child = spawnCli(command, args, {
+        stdio: ["pipe", "pipe", "pipe"], env: mcpChildEnvironment(env),
       });
     } catch { throw new Error("MCP server could not start; check its command and installation"); }
     this.child.stdout.setEncoding("utf8");
@@ -153,30 +196,13 @@ class ChatMcpClient {
 
   async tools(signal: AbortSignal): Promise<unknown[]> {
     const deadline = Date.now() + STARTUP_MS;
-    const remaining = () => {
-      if (Date.now() >= deadline) throw new Error("MCP startup timed out");
-      return deadline - Date.now();
-    };
     const initialized = await this.call("initialize", {
       protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "openmausbot-chat", version: "1" },
-    }, signal, remaining());
+    }, signal, deadline - Date.now());
     if (!object(initialized)) throw new Error("MCP initialization returned an invalid result");
     if (signal.aborted) throw aborted();
     this.write({ jsonrpc: "2.0", method: "notifications/initialized" });
-    const tools: unknown[] = [];
-    const cursors = new Set<string>();
-    let cursor: string | undefined;
-    for (let page = 0; page < MAX_PAGES; page += 1) {
-      const result = await this.call("tools/list", cursor ? { cursor } : {}, signal, remaining());
-      if (!object(result) || !Array.isArray(result.tools)) throw new Error("MCP tools/list returned an invalid result");
-      tools.push(...result.tools);
-      if (tools.length > TOOL_COUNT) throw new Error("MCP tool count exceeds the 128-tool limit");
-      if (result.nextCursor === undefined) return tools;
-      if (typeof result.nextCursor !== "string" || !result.nextCursor || cursors.has(result.nextCursor)) throw new Error("MCP tools/list returned an invalid pagination cursor");
-      cursors.add(result.nextCursor);
-      cursor = result.nextCursor;
-    }
-    throw new Error("MCP tools/list exceeded the pagination limit");
+    return paginateTools((method, params, inner, timeout) => this.call(method, params, inner, timeout), signal, deadline);
   }
 }
 
@@ -215,17 +241,57 @@ function boundedText(value: string): string {
   return `${bytes.subarray(0, end).toString()}\n[MCP result truncated at 50KB; request less output.]`;
 }
 
+/** Per-turn client for a remote ({type,url,headers}) MCP server. Delegates
+ * the wire to the same RemoteMcpClient the connection probe and desktop CLI
+ * paths use (streamable HTTP with sessions, or legacy SSE), and follows the
+ * identical per-call timeout/abort rules as the stdio client above.
+ * Nothing here trusts the server: results face the same validation and
+ * bounded-text rules, so a remote server can return exactly as much into a
+ * conversation as a local one. */
+class RemoteChatMcpClient implements ChatClient {
+  private readonly inner: RemoteMcpClient;
+  private closed = false;
+
+  constructor(server: RemoteServer) {
+    this.inner = new RemoteMcpClient(server);
+  }
+
+  async tools(signal: AbortSignal): Promise<unknown[]> {
+    const budget = (ms: number) => AbortSignal.any([signal, AbortSignal.timeout(Math.max(ms, 1))]);
+    await this.inner.initialize("openmausbot-chat", budget(STARTUP_MS));
+    // paginateTools' deadline arithmetic is shared with the stdio client; the
+    // per-request timeout is applied here where the request is actually made.
+    const deadline = Date.now() + STARTUP_MS;
+    return paginateTools(
+      (method, params, _inner, timeout) => this.inner.request(method, params, budget(Math.min(timeout, deadline - Date.now() + STARTUP_MS))),
+      signal, deadline,
+    );
+  }
+
+  async call(method: string, params: unknown, signal: AbortSignal, timeout: number): Promise<unknown> {
+    if (this.closed || signal.aborted) { await this.close(); throw aborted(); }
+    return this.inner.request(method, params, AbortSignal.any([signal, AbortSignal.timeout(timeout)]));
+  }
+
+  async close(): Promise<void> {
+    if (this.closed) return;
+    this.closed = true;
+    await this.inner.close().catch(() => {});
+  }
+}
+
 export async function mountChatTools(integrations: SendTurnInput["integrations"], signal: AbortSignal): Promise<ChatToolSession> {
   const servers: Array<[string, Server]> = [];
   if (integrations?.agents) servers.push(["agents", integrations.agents]);
   if (integrations?.composio) servers.push(["composio", integrations.composio]);
-  // this client starts its servers and talks over stdio; a remote (url)
-  // entry is skipped here and reaches Claude and Codex bots
+  // Both transports mount here: a local command runs as a child of this
+  // process, a remote entry is reached over streamable HTTP or SSE — the
+  // phone talks to the endpoint directly, exactly like a desktop host would.
   for (const [name, server] of Object.entries(integrations?.custom ?? {})) {
-    if ("command" in server) servers.push([name, server]);
+    servers.push([name, server]);
   }
   if (servers.length > 32) throw new Error("MCP server count exceeds the 32-server limit");
-  const clients: ChatMcpClient[] = [];
+  const clients: ChatClient[] = [];
   let closed = false;
   let closing: Promise<void> | undefined;
   const close = (): Promise<void> => {
@@ -240,14 +306,17 @@ export async function mountChatTools(integrations: SendTurnInput["integrations"]
   const cancel = () => { void close().catch(() => {}); };
   signal.addEventListener("abort", cancel, { once: true });
   const definitions: ChatToolDefinition[] = [];
-  const registered = new Map<string, { client: ChatMcpClient; name: string; schema: ValidateFunction }>();
+  const registered = new Map<string, { client: ChatClient; name: string; schema: ValidateFunction }>();
   try {
     if (signal.aborted) throw aborted();
     // Start independent servers concurrently; consume results in config order
     // so names and collision suffixes remain stable across startup timings.
     const mounts = await Promise.allSettled(servers.map(async ([name, descriptor]) => {
       if (signal.aborted || closed) throw aborted();
-      const client = new ChatMcpClient(descriptor);
+      // "command" marks a local stdio server; a url-bearing entry is remote.
+      const client: ChatClient = "command" in descriptor
+        ? new ChatMcpClient(descriptor)
+        : new RemoteChatMcpClient(descriptor);
       clients.push(client);
       return { name, client, tools: await client.tools(signal) };
     }));

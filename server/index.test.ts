@@ -972,11 +972,17 @@ beforeAll(async () => {
       FAKE_CLAUDE_TEXT_DUMP: oneShotTextDump,
       // the real CLI runs Manual for these even when asked for auto
       FAKE_CLAUDE_AUTO_UNAVAILABLE_MODELS: "claude-haiku-4-5",
+      // The rate-limit test drives a real 429 through the real retry loop; the
+      // scale keeps the count (three attempts) while collapsing the wait.
+      FAKE_OPENAI_COMPAT_RETRY_SCALE: "0.002",
       OMB_TEST_INTERNAL_CAPABILITY_KEY: TEST_CAPABILITY_KEY,
     },
     stdio: ["ignore", "pipe", "pipe"],
   });
-  child.stderr!.on("data", (c) => (stderr += c));
+  // OMB_ECHO_SERVER_STDERR mirrors the harness's own log — where a provider's
+  // report is kept instead of in the transcript — onto this run's stderr, so a
+  // failure can be read against the `[turn.failure]` line it produced.
+  child.stderr!.on("data", (c) => { stderr += c; if (process.env.OMB_ECHO_SERVER_STDERR) process.stderr.write(String(c)); });
 
   const deadline = Date.now() + 20_000;
   for (;;) {
@@ -1360,7 +1366,7 @@ describe("harness HTTP API", () => {
     expect(created.status).toBe(201);
     const group = created.body.group;
     try {
-      expect(group).toMatchObject({ setupCompletedAt: null, setupSkippedAt: null, messages: [] });
+      expect(group).toMatchObject({ setupCompletedAt: null, setupSkippedAt: null, messages: [], setupPending: true });
       const blocked = await api("POST", `/api/groups/${group.id}/messages`, { text: "before setup" });
       expect(blocked.status).toBe(409);
       expect((await api("GET", "/api/bots")).body.groups.find((candidate: { id: string }) => candidate.id === group.id).messages).toHaveLength(0);
@@ -1380,13 +1386,146 @@ describe("harness HTTP API", () => {
         defaultResponder: { kind: "member", botId: bot.id },
       });
       expect(completed.status).toBe(200);
-      expect(completed.body.group).toMatchObject({ bulletin: "shared brief", setupCompletedAt: expect.any(Number) });
+      expect(completed.body.group).toMatchObject({ bulletin: "shared brief", setupCompletedAt: expect.any(Number), setupPending: false });
       expect((await api("GET", "/api/bots")).body.groups.find((candidate: { id: string }) => candidate.id === group.id)).toMatchObject({
         bulletin: "shared brief",
         setupSkippedAt: null,
+        setupPending: false,
       });
     } finally {
       await api("DELETE", `/api/groups/${group.id}`);
+    }
+  });
+
+  // After setup a room still has settings: its name, bulletin, members and
+  // who answers by default. The phone's room-settings sheet saves through
+  // the existing PATCH /api/groups/:id route (server/index.ts updateChannel),
+  // so that route is the contract the sheet depends on.
+  it("updates a room's own settings after setup and refuses impossible ones", async () => {
+    const bot = (await api("GET", "/api/bots")).body.bots[0];
+    const created = await api("POST", "/api/groups", { name: "Settings probe", memberIds: [bot.id] });
+    expect(created.status).toBe(201);
+    const group = created.body.group;
+    try {
+      expect((await api("PATCH", `/api/groups/${group.id}/setup`, { action: "skip" })).status).toBe(200);
+
+      const patched = await api("PATCH", `/api/groups/${group.id}`, {
+        name: "Renamed room",
+        bulletin: "new brief",
+        defaultResponder: { kind: "everyone" },
+      });
+      expect(patched.status).toBe(200);
+      expect(patched.body.group).toMatchObject({
+        name: "Renamed room",
+        bulletin: "new brief",
+        defaultResponder: { kind: "everyone" },
+      });
+
+      // Invariants the sheet also enforces: a real roster, a real member as
+      // the responder, and a body that names something to change.
+      expect((await api("PATCH", `/api/groups/${group.id}`, { memberIds: [] })).status).toBe(400);
+      expect((await api("PATCH", `/api/groups/${group.id}`, { memberIds: ["missing-bot"] })).status).toBe(400);
+      expect((await api("PATCH", `/api/groups/${group.id}`, { defaultResponder: { kind: "member", botId: "missing-bot" } })).status).toBe(400);
+      // An empty patch changes nothing and succeeds — there is no partial
+      // write to refuse.
+      expect((await api("PATCH", `/api/groups/${group.id}`, {})).status).toBe(200);
+
+      const restored = await api("PATCH", `/api/groups/${group.id}`, { defaultResponder: { kind: "member", botId: bot.id } });
+      expect(restored.status).toBe(200);
+      expect(restored.body.group.defaultResponder).toMatchObject({ kind: "member", botId: bot.id });
+    } finally {
+      await api("DELETE", `/api/groups/${group.id}`);
+    }
+  });
+
+  // A person's own OpenAI- or Anthropic-compatible endpoint is an ordinary
+  // fleet instance: they name it, it keeps that name wherever instances show
+  // one, and it is selectable like any built-in engine. Only hand-added rows
+  // may be renamed or removed from here.
+  it("adds, renames, uses and removes a named custom API provider", async () => {
+    // The fleet that already exists must survive every step: an add or a
+    // remove builds on the EFFECTIVE instance map (built-ins included), never
+    // on an empty or partial one, or the next boot loses the whole default
+    // fleet.
+    const beforeIds = ((await api("GET", "/api/instances")).body.instances as Array<{ instanceId: string }>)
+      .map((row) => row.instanceId);
+    expect(beforeIds).toContain("codex");
+    const created = await api("POST", "/api/instances", {
+      driver: "anthropic-compat",
+      name: "Work gateway",
+      url: "https://gateway.example",
+      key: "gw-secret",
+      model: "team-claude",
+    });
+    expect(created.status, JSON.stringify(created.body)).toBe(201);
+    const instanceId = created.body.instanceId as string;
+    expect(instanceId).toBe("api-work-gateway");
+    let bot: any;
+    try {
+      expect(created.body.instances.find((row: any) => row.instanceId === instanceId)).toMatchObject({
+        displayName: "Work gateway",
+        models: { default: "team-claude", options: [{ id: "team-claude" }] },
+        snapshot: { state: "available", authenticated: true },
+      });
+      // The stored credential is never echoed back to a paired client.
+      expect(JSON.stringify(created.body)).not.toContain("gw-secret");
+
+      // The name is what the picker, bot cards and every model line show, and
+      // the row is selectable exactly like a built-in engine.
+      bot = (await api("POST", "/api/bots", {
+        modelSelection: { instanceId, model: "team-claude" },
+        requireAvailableModel: true,
+      })).body.bot;
+      expect(bot.modelSelection).toEqual({ instanceId, model: "team-claude" });
+
+      const renamed = await api("PATCH", `/api/instances/${instanceId}`, {
+        name: "Home gateway",
+        url: "https://home.example",
+      });
+      expect(renamed.status, JSON.stringify(renamed.body)).toBe(200);
+      expect(renamed.body.instances.find((row: any) => row.instanceId === instanceId)).toMatchObject({
+        displayName: "Home gateway",
+      });
+
+      // A second provider may share the name; it gets its own id rather than
+      // clobbering the first.
+      const second = await api("POST", "/api/instances", {
+        driver: "openai-compat",
+        name: "Work gateway",
+        url: "https://second.example/v1",
+        key: "k2",
+      });
+      expect(second.status).toBe(201);
+      expect(second.body.instanceId).not.toBe(instanceId);
+      expect((await api("DELETE", `/api/instances/${second.body.instanceId}`)).status).toBe(200);
+
+      // Built-in engines and names nobody added stay out of reach.
+      expect((await api("PATCH", "/api/instances/openaiCompat", { name: "Hijack" })).status).toBe(400);
+      expect((await api("DELETE", "/api/instances/claude")).status).toBe(400);
+      // An unknown id falls through to the ordinary settings route, which
+      // owns its own vocabulary — not a custom-provider write.
+      expect((await api("PATCH", "/api/instances/ghost", { name: "Ghost" })).status).toBe(400);
+
+      // Malformed additions are refused with a readable message.
+      for (const bad of [
+        { driver: "anthropic-compat", name: "", url: "https://a.example", key: "k" },
+        { driver: "nope", name: "Fine", url: "https://a.example", key: "k" },
+        { driver: "anthropic-compat", name: "Fine", url: "ftp://a.example", key: "k" },
+        { driver: "anthropic-compat", name: "Fine", url: "https://user:pass@a.example", key: "k" },
+        { driver: "anthropic-compat", name: "Fine", url: "https://a.example", key: "k", model: "a\nb" },
+      ]) {
+        const refused = await api("POST", "/api/instances", bad);
+        expect(refused.status, JSON.stringify(bad)).toBe(400);
+        expect(typeof refused.body.error).toBe("string");
+      }
+    } finally {
+      if (bot) await api("DELETE", `/api/bots/${bot.id}`);
+      const removed = await api("DELETE", `/api/instances/${instanceId}`);
+      expect(removed.status).toBe(200);
+      expect(removed.body.instances.some((row: any) => row.instanceId === instanceId)).toBe(false);
+      for (const id of beforeIds) {
+        expect(removed.body.instances.some((row: any) => row.instanceId === id), `lost ${id}`).toBe(true);
+      }
     }
   });
 
@@ -1966,11 +2105,27 @@ describe("harness HTTP API", () => {
       }
       expect(await readRoom()).toMatchObject({ bulletin: "Updated brief ✓", memberIds: [chief.id, peer.id] });
     } finally {
+      // Stop answers as soon as the provider is interrupted; the room's
+      // turn record settles a beat later, and deleting inside that window
+      // 409s — which used to leak this test's Chief into every test after
+      // it (extra chief, busy bots, blocked provider writes).
       for (const id of roomIds) {
         await api("POST", `/api/groups/${id}/interrupt`, {});
-        await api("DELETE", `/api/groups/${id}`);
+        let deleted = await api("DELETE", `/api/groups/${id}`);
+        for (let attempt = 0; attempt < 100 && deleted.status !== 200; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          deleted = await api("DELETE", `/api/groups/${id}`);
+        }
+        expect(deleted.status, `room ${id} never settled after Stop`).toBe(200);
       }
-      for (const bot of bots) await api("DELETE", `/api/bots/${bot.id}`);
+      for (const bot of bots) {
+        let deleted = await api("DELETE", `/api/bots/${bot.id}`);
+        for (let attempt = 0; attempt < 100 && deleted.status !== 200; attempt += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          deleted = await api("DELETE", `/api/bots/${bot.id}`);
+        }
+        expect(deleted.status, `bot ${bot.id} never became deletable`).toBe(200);
+      }
     }
   });
 
@@ -3860,7 +4015,8 @@ describe("harness HTTP API", () => {
       expect(frame.bot).toMatchObject({ id: bot.id, avatarUrl, avatarCrop: "circle" });
 
       for (const invalid of [
-        { color: "red" },
+        // The ten bot colours are allowed; anything else still refuses.
+        { color: "chartreuse" },
         { avatarUrl: "https://tracker.example/avatar.png" },
         { avatarUrl: "/api/attachments/123e4567-e89b-12d3-a456-426614174000.png" },
         { avatarCrop: "hexagon" },
@@ -5782,11 +5938,16 @@ describe("harness HTTP API", () => {
       behavior: "allow",
     });
     expect(unavailable.status).toBe(200);
-    expect(unavailable.body).toEqual({ ok: true, outcome: "unavailable" });
+    // A success-shaped 200 must still say WHY nothing was delivered (here:
+    // this bot's provider instance is the fixture's unknown "ghost" driver).
+    // Regression: this used to be an opaque {outcome:"unavailable"} that cost
+    // a debugging session when a stale requestId was sent.
+    expect(unavailable.body).toMatchObject({ ok: true, outcome: "unavailable" });
+    expect(String(unavailable.body.reason)).toMatch(/unknown provider instance|no approval card/);
 
     const reread = (await api("GET", "/api/bots")).body.bots.find((candidate: { id: string }) => candidate.id === bot.id);
     expect(reread.messages.at(-1).tool).toMatchObject({ ok: false });
-    expect(reread.messages.at(-1).tool.name).toContain("request is no longer open");
+    expect(reread.messages.at(-1).tool.name).toContain(String(unavailable.body.reason));
   });
 
   it("answers a room approval whose turn is already over instead of stranding the room", async () => {
@@ -5798,7 +5959,10 @@ describe("harness HTTP API", () => {
       behavior: "allow",
     });
     expect(answered.status).toBe(200);
-    expect(answered.body).toEqual({ ok: true, outcome: "unavailable" });
+    // The room's owner bot has no resolvable provider instance here; the
+    // answer still fail-closes (never executes), now with the reason named.
+    expect(answered.body).toMatchObject({ ok: true, outcome: "unavailable" });
+    expect(typeof answered.body.reason).toBe("string");
 
     const room = (await api("GET", "/api/bots")).body.groups.find(
       (group: { id: string }) => group.id === "test-stranded-room",
@@ -10169,4 +10333,99 @@ describe("computer control API (who is driving)", () => {
     const res = await fetch(`${BASE}/api/internal/computer-control?botId=${botId}`);
     expect(res.status).toBe(401);
   });
+});
+
+// ── what a failed turn says to a person ────────────────────────────────
+// A provider's failed request answers with a status line and, very often, its
+// own JSON body. That body is diagnostics — the server log keeps it — and the
+// transcript carries the harness's classification of it instead. The test below
+// drives the worst of those reports, a gateway 429 carrying a payload, through
+// the real retry loop to the card the phone draws.
+describe("provider failures reach the transcript as cards", () => {
+  it("shows an exhausted 429 as a card, never as the provider's payload", async () => {
+    // One drop-in router whose every completion is a rate limit, carrying the
+    // body a real gateway sends. This is the exact report that used to end a
+    // turn as `error: upstream HTTP 429: {"error":…}` in the transcript.
+    const payload = { error: { message: "Provider returned error", type: "rate_limit_exceeded", code: 429 } };
+    const model = "inclusionai/ling-3.1-flash";
+    // The turn's own attempts, as opposed to everything else the server asks a
+    // provider (the catalog probe, and the one-shot that names a new thread —
+    // which is a non-streaming call, so the stream flag separates them).
+    const attempts: number[] = [];
+    const router = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        if (req.url?.endsWith("/models")) {
+          res.writeHead(200, { "content-type": "application/json" });
+          res.end(JSON.stringify({ data: [{ id: model, name: "Ling 3.1 Flash" }] }));
+          return;
+        }
+        if (Buffer.concat(chunks).toString("utf8").includes('"stream":true')) attempts.push(429);
+        res.writeHead(429, { "content-type": "application/json" });
+        res.end(JSON.stringify(payload));
+      });
+    });
+    await new Promise<void>((done) => router.listen(0, "127.0.0.1", done));
+    const routerPort = (router.address() as { port: number }).port;
+    // The built-in OpenAI-compatible instance, pointed at the router, with its
+    // tools off: this turn is the provider call and the retry loop, nothing
+    // else. Every tool-bearing turn also mounts the harness's own agents MCP
+    // server, which has its own startup budget — and a machine busy enough to
+    // outrun that budget fails the turn before the provider is ever asked,
+    // making the assertion below about the wrong failure.
+    const configured = await api("PATCH", "/api/config", {
+      openaiCompat: { key: "router-key", url: `http://127.0.0.1:${routerPort}/v1`, model },
+    });
+    expect(configured.status, JSON.stringify(configured.body)).toBe(200);
+    const patched = await api("PATCH", "/api/instances/openaiCompat", { tools: false });
+    expect(patched.status, JSON.stringify(patched.body)).toBe(200);
+    const instanceId = "openaiCompat";
+    const instance = patched.body.instances.find((row: { instanceId: string }) => row.instanceId === instanceId);
+    expect(instance.capabilities).toMatchObject({ agentsMcp: false, composioMcp: false });
+    const chatty = (await api("POST", "/api/bots", {
+      modelSelection: { instanceId, model },
+      requireAvailableModel: true,
+    })).body.bot;
+
+    try {
+      const sent = await api("POST", `/api/bots/${chatty.id}/messages`, { text: "summarize the logs" });
+      expect(sent.status, JSON.stringify(sent.body)).toBe(202);
+      interface Served {
+        messages: Array<{ tool?: { name?: string }; failure?: Record<string, unknown> }>;
+      }
+      let served: Served = { messages: [] };
+      await expect.poll(async () => {
+        const state = (await api("GET", "/api/bots?messages=20")).body;
+        served = state.bots.find((row: { id: string }) => row.id === chatty.id) as Served;
+        return served.messages.some((message) => message.failure);
+      }, { timeout: 30_000 }).toBe(true);
+      const card = served.messages.find((message) => message.failure)!;
+
+      // The card says what happened, where, and how many attempts it took.
+      expect(card.failure).toMatchObject({
+        kind: "rate_limit",
+        title: "Rate limit reached",
+        status: 429,
+        attempts: 3,
+        instanceId,
+        provider: instance.displayName,
+        model,
+      });
+      expect(card.tool?.name).toBe("error: Rate limit reached");
+      // The retry loop really ran: the turn asked the router three times and
+      // no more — the exhausted policy, on the wire.
+      expect(attempts).toEqual([429, 429, 429]);
+      // …and nothing in the transcript carries the gateway's body, in any
+      // field a client can draw: no message text, no chip, no card.
+      const transcript = JSON.stringify(served.messages);
+      for (const fragment of ["Provider returned error", "rate_limit_exceeded", "upstream HTTP 429", "{\"error\""]) {
+        expect(transcript).not.toContain(fragment);
+      }
+    } finally {
+      router.close();
+      await api("DELETE", `/api/bots/${chatty.id}`);
+      await api("PATCH", "/api/instances/openaiCompat", { tools: true });
+    }
+  }, 60_000);
 });

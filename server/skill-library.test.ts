@@ -3,7 +3,19 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { loadBundledSkills, loadUserSkills, mergeSkills, parseSkillManifest, selectBundledSkills, skillInstructionsFor, type BundledSkill } from "./skill-library.ts";
+import {
+  loadBundledSkills,
+  loadUserSkills,
+  mergeSkills,
+  parseSkillManifest,
+  selectBundledSkills,
+  skillInstructionsFor,
+  type BundledSkill,
+  SkillRegistry,
+  SkillLoader,
+  SkillResolver,
+  SkillActivation,
+} from "./skill-library.ts";
 
 const phone: BundledSkill = {
   directory: "/skills/phone-harness",
@@ -100,5 +112,91 @@ describe("bundled verification skill", () => {
     ]) {
       expect(selectBundledSkills(text, ["skillAuthoring"], skills)).toEqual([]);
     }
+  });
+});
+
+describe("Phase B — extensible skill architecture & built-in skills", () => {
+  const loader = new SkillLoader(join(process.cwd(), "skills"));
+  const bundled = loader.loadBundled();
+  const registry = new SkillRegistry(bundled);
+  const resolver = new SkillResolver(registry);
+
+  it("discovers both built-in skills with valid metadata and licenses", () => {
+    const ids = registry.list().map((s) => s.manifest.id);
+    expect(ids).toContain("ui-ux-pro-max");
+    expect(ids).toContain("taste");
+
+    const uipro = registry.get("ui-ux-pro-max");
+    expect(uipro?.manifest.name).toBe("UI/UX Pro Max");
+    expect(uipro?.manifest.license).toBe("MIT");
+    expect(uipro?.manifest.source).toContain("nextlevelbuilder/ui-ux-pro-max-skill");
+    expect(uipro?.manifest.revision).toBe("50d8a7de0900119855614541f15a1a616691eb33");
+    expect(uipro?.instructions).toContain("Accessibility");
+    expect(uipro?.instructions).toContain("Stanley Shen");
+
+    const taste = registry.get("taste");
+    expect(taste?.manifest.name).toBe("Taste Skill (v2 Frontend)");
+    expect(taste?.manifest.license).toBe("MIT");
+    expect(taste?.manifest.source).toContain("Leonxlnx/taste-skill");
+    expect(taste?.manifest.revision).toBe("b17742737e796305d829b3ad39eda3add0d79060");
+    expect(taste?.instructions).toContain("DESIGN_VARIANCE");
+    expect(taste?.instructions).toContain("Anti-Slop");
+  });
+
+  it("selects UI/UX Pro Max when UI design or accessibility is requested", () => {
+    const resolved = resolver.resolve({
+      text: "Design a responsive mobile layout with good typography and accessibility",
+    });
+    const ids = resolved.map((s) => s.manifest.id);
+    expect(ids).toContain("ui-ux-pro-max");
+    expect(ids).not.toContain("taste");
+  });
+
+  it("selects Taste when aesthetic, landing page, or visual originality is requested", () => {
+    const resolved = resolver.resolve({
+      text: "Build an anti-generic portfolio with high aesthetic appeal and creative motion design",
+    });
+    const ids = resolved.map((s) => s.manifest.id);
+    expect(ids).toContain("taste");
+    expect(ids).not.toContain("ui-ux-pro-max");
+  });
+
+  it("selects both skills when a task requires both UI design systems and high aesthetic taste", () => {
+    const resolved = resolver.resolve({
+      text: "Redesign the frontend UI landing page with unique aesthetic typography and clean responsive components",
+    });
+    const ids = resolved.map((s) => s.manifest.id);
+    expect(ids).toContain("ui-ux-pro-max");
+    expect(ids).toContain("taste");
+  });
+
+  it("does not inject skills into unrelated tasks (zero token bloat)", () => {
+    const resolved = resolver.resolve({
+      text: "What is 15 multiplied by 24?",
+    });
+    expect(resolved).toEqual([]);
+  });
+
+  it("honors explicit requestedSkills and excludedSkills in SkillContext", () => {
+    const forced = resolver.resolve({
+      text: "Unrelated question",
+      requestedSkills: ["taste"],
+    });
+    expect(forced.map((s) => s.manifest.id)).toEqual(["taste"]);
+
+    const excluded = resolver.resolve({
+      text: "Design a UI layout with CSS",
+      excludedSkills: ["ui-ux-pro-max"],
+    });
+    expect(excluded.map((s) => s.manifest.id)).not.toContain("ui-ux-pro-max");
+  });
+
+  it("renders activated skills via SkillActivation cleanly", () => {
+    const activation = SkillActivation.activate(resolver, {
+      text: "Design a responsive UI header",
+    });
+    expect(activation.activeSkills.map((s) => s.manifest.id)).toContain("ui-ux-pro-max");
+    expect(activation.instructions).toContain('<openmaus-skill id="ui-ux-pro-max" version="1.0.0">');
+    expect(activation.instructions).toContain("UI/UX Pro Max");
   });
 });

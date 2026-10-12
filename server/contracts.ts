@@ -195,6 +195,16 @@ export interface SendTurnInput {
    * config.toml and ignores this; the Claude driver drops
    * --strict-mcp-config for the turn. */
   mcpFromUserConfig?: boolean;
+  /** In-process tools the harness runs itself (bounded document page reads).
+   * Names, schemas and descriptions are already validated by the sender.
+   * Only the chat-completions runtime consumes these; CLI drivers get
+   * document access through their own tools. */
+  turnTools?: Array<{
+    name: string;
+    description: string;
+    inputSchema: Record<string, unknown>;
+    execute: (args: Record<string, unknown>) => Promise<string> | string;
+  }>;
 }
 
 /** An MCP server this machine starts and talks to over stdio. */
@@ -387,6 +397,13 @@ export interface ProviderAuthenticationStart {
   userCode?: string;
 }
 
+/** How a provider's account sign-in completes, as the registry reports it.
+ * "browser": open a page on this device, the provider redirects back to the
+ * host itself (loopback PKCE — no code to retype). "device-code": a code to
+ * enter at the provider's page (Codex headless). "paste-code": a link to
+ * open, then a code pasted back (Claude). */
+export type ProviderAuthenticationMethod = "browser" | "device-code" | "paste-code";
+
 export interface ProviderAuthenticationStatus extends Omit<ProviderAuthenticationStart, "phase"> {
   phase: "waiting" | "succeeded" | "failed" | "expired" | "cancelled";
   /** Safe, actionable copy; never unfiltered CLI output or credentials. */
@@ -439,9 +456,22 @@ export interface ProviderInstance {
   readonly getAuthentication?: (flowId: string) => Promise<ProviderAuthenticationStatus>;
   readonly completeAuthentication?: (flowId: string, callbackUrl: string) => Promise<void>;
   readonly cancelAuthentication?: () => Promise<void>;
+  /** The shape of this provider's sign-in, when the driver knows it better
+   * than the registry's structural inference ("browser" | "device-code" |
+   * "paste-code"). Declared so a device-code flow that also listens on a
+   * loopback redirect can present itself as a browser flow. */
+  readonly authMethod?: () => ProviderAuthenticationMethod | undefined;
   /** Remove the sign-in the provider CLI stores on this server, so a
    * different account can connect. Never touches another instance's home. */
   readonly signOut?: () => Promise<void>;
+  /** Whether account sign-in can run on this host WITHOUT the engine's
+   * runtime installed. A native flow (the Codex ChatGPT device-code login)
+   * is always available; a CLI-driven flow (Claude, Antigravity) is
+   * available exactly when the runtime is. The screen keeps this separate
+   * from the runtime snapshot — "sign-in is possible" and "turns can run"
+   * are different facts. Absent reads as available, preserving older
+   * drivers whose flows were only ever offered next to a working runtime. */
+  readonly authCapability?: () => Promise<{ available: boolean; reason?: string }>;
   readonly adapter: ProviderAdapter;
   snapshot(): Promise<ProviderSnapshot>;
   /** Cheap one-shot text call (upstream TextGeneration) — titles, summaries.

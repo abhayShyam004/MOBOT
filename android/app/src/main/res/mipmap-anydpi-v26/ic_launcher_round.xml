@@ -1,9 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Adaptive icon: the system masks the layers to whatever shape the launcher
-  uses, so there is one definition and no per-density bitmaps. The foreground is
-  the same silhouette the app draws in every roster row, generated from
-  MausSilhouette's path data.
+  Adaptive round icon: MOBOT mascot character over dark navy gradient.
+  Foreground layer provides the character artwork and ambient glow.
 -->
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <background android:drawable="@color/launcher_background" />

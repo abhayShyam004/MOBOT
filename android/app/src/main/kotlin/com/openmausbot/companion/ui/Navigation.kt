@@ -32,8 +32,20 @@ sealed interface Destination {
     /** Settings → Workspace → Tasks & Routines. */
     data object Routines : Destination
 
-    /** Settings → Workspace → Connected Apps. */
+    /** The Threads header's Connectors button opens Connected Apps directly. */
     data object ConnectedApps : Destination
+
+    /** Settings → Model providers: one place for every configured provider. */
+    data object ModelProviders : Destination
+
+    /** Settings → Specialized AI capabilities. */
+    data object SpecializedCapabilities : Destination
+
+    /** Generated applications built by MOBOT (Projects screen). */
+    data object Projects : Destination
+
+    /** Cloud deployment credential management (Vercel & Render). */
+    data object DeploymentAccounts : Destination
 
     /** A bot's computer, watch-only. Addressed by bot id for the same reason. */
     data class Computer(val botId: String) : Destination
@@ -45,6 +57,13 @@ sealed interface Destination {
      * fresh rather than carried in the destination.
      */
     data class Overview(val botId: String) : Destination
+
+    /**
+     * A bot's own memory — the page the bot settings open. Addressed by bot
+     * id like [Overview]: the files are re-read fresh from the computer, and
+     * one bot's memory is never another's.
+     */
+    data class Memory(val botId: String) : Destination
 
     /**
      * A conversation, in one of the two ways something can name one.
@@ -140,9 +159,14 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
         private const val SETTINGS = "settings"
         private const val ROUTINES = "routines"
         private const val CONNECTED_APPS = "connected-apps"
+        private const val MODEL_PROVIDERS = "model-providers"
+        private const val SPECIALIZED_CAPABILITIES = "specialized-capabilities"
+        private const val PROJECTS = "projects"
+        private const val DEPLOYMENT_ACCOUNTS = "deployment-accounts"
         private const val THREAD = "thread:"
         private const val COMPUTER = "computer:"
         private const val OVERVIEW = "overview:"
+        private const val MEMORY = "memory:"
         private const val BOT_CHAT = "botchat:"
         private const val ROOM_CHAT = "roomchat:"
 
@@ -152,9 +176,14 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
                 Destination.Settings -> SETTINGS
                 Destination.Routines -> ROUTINES
                 Destination.ConnectedApps -> CONNECTED_APPS
+                Destination.ModelProviders -> MODEL_PROVIDERS
+                Destination.SpecializedCapabilities -> SPECIALIZED_CAPABILITIES
+                Destination.Projects -> PROJECTS
+                Destination.DeploymentAccounts -> DEPLOYMENT_ACCOUNTS
                 is Destination.Thread -> THREAD + it.threadId
                 is Destination.Computer -> COMPUTER + it.botId
                 is Destination.Overview -> OVERVIEW + it.botId
+                is Destination.Memory -> MEMORY + it.botId
                 is Destination.Chat -> when (val target = it.target) {
                     is ChatTarget.Bot -> BOT_CHAT + join(target.botId, target.threadId)
                     is ChatTarget.Room -> ROOM_CHAT + join(target.roomId, target.threadId)
@@ -168,9 +197,14 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
                 it == SETTINGS -> Destination.Settings
                 it == ROUTINES -> Destination.Routines
                 it == CONNECTED_APPS -> Destination.ConnectedApps
+                it == MODEL_PROVIDERS -> Destination.ModelProviders
+                it == SPECIALIZED_CAPABILITIES -> Destination.SpecializedCapabilities
+                it == PROJECTS -> Destination.Projects
+                it == DEPLOYMENT_ACCOUNTS -> Destination.DeploymentAccounts
                 it.startsWith(THREAD) -> Destination.Thread(it.removePrefix(THREAD))
                 it.startsWith(COMPUTER) -> Destination.Computer(it.removePrefix(COMPUTER))
                 it.startsWith(OVERVIEW) -> Destination.Overview(it.removePrefix(OVERVIEW))
+                it.startsWith(MEMORY) -> Destination.Memory(it.removePrefix(MEMORY))
                 it.startsWith(BOT_CHAT) -> split(it.removePrefix(BOT_CHAT))
                     ?.let { (owner, thread) -> Destination.Chat(ChatTarget.Bot(owner, thread)) }
                 it.startsWith(ROOM_CHAT) -> split(it.removePrefix(ROOM_CHAT))

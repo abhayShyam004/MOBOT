@@ -80,7 +80,18 @@ class SessionLingerWiringTest {
         )
         assertFalse(
             source.contains("DefaultLifecycleObserver"),
-            "the process-lifecycle observer must be SessionLingerController, not an inline one",
+            "the process-lifecycle observer for the CONNECTION must be SessionLingerController, not an " +
+                "inline one",
+        )
+        // The app does install one other process-lifecycle observer —
+        // notifications need to know whether the app is in front of the person
+        // (ForegroundObserver). It is its own class in its own package, and it
+        // holds no session: that separation is the point of the ban above, and
+        // this pins it so the ban can never be satisfied by hiding a second
+        // connection observer somewhere less obvious.
+        assertTrue(
+            source.contains("ForegroundObserver("),
+            "the notification foreground observer is installed from its own class",
         )
     }
 

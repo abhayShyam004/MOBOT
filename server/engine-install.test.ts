@@ -1,6 +1,6 @@
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { enginesBinDir, enginesPrefix, installNpmEngine, npmPackageOf, serverInstallFor } from "./engine-install.ts";
 import { augmentedPath, findCliCandidates, registerPathDir, resetPathCacheForTests } from "./env-path.ts";
@@ -59,7 +59,12 @@ describe.skipIf(process.platform === "win32")("installing with npm", () => {
     writeFileSync(join(binDir, "npm"), FAKE_NPM, { mode: 0o755 });
     chmodSync(join(binDir, "npm"), 0o755);
     originalPath = process.env.PATH;
-    process.env.PATH = binDir;
+    // The fixture PATH is the ONLY path, but the stand-in npm is itself a
+    // `#!/usr/bin/env node` script: without node reachable, `/usr/bin/env`
+    // fails before the fixture runs (`env: 'node': No such file or directory`).
+    // Node's own directory goes AFTER the fixture's, so `npm` still resolves
+    // to the stand-in and a real npm is never reached.
+    process.env.PATH = `${binDir}${delimiter}${dirname(process.execPath)}`;
     process.env.FAKE_NPM_LOG = join(scratch, "calls.jsonl");
     delete process.env.FAKE_NPM_MODE;
     resetPathCacheForTests();

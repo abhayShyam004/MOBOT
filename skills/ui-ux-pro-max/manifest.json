@@ -1,0 +1,31 @@
+{
+  "id": "ui-ux-pro-max",
+  "name": "UI/UX Pro Max",
+  "version": "1.0.0",
+  "description": "UI/UX design intelligence for web, mobile, and desktop. Layout, typography, color, spacing, responsive behavior, accessibility, and framework UI implementation.",
+  "source": "https://github.com/nextlevelbuilder/ui-ux-pro-max-skill",
+  "license": "MIT",
+  "revision": "50d8a7de0900119855614541f15a1a616691eb33",
+  "defaultEnabled": true,
+  "triggerTerms": [
+    "ui",
+    "ux",
+    "ui design",
+    "ux design",
+    "interface design",
+    "layout",
+    "typography",
+    "css",
+    "styling",
+    "ui component",
+    "frontend component",
+    "responsive",
+    "color palette",
+    "design system",
+    "accessibility",
+    "tailwind",
+    "dark mode",
+    "visual hierarchy"
+  ],
+  "requiredCapabilities": []
+}

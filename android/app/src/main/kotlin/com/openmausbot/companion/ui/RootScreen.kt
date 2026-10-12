@@ -3,6 +3,7 @@ package com.openmausbot.companion.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
@@ -13,6 +14,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -25,6 +27,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.openmausbot.companion.core.Connection
@@ -35,7 +38,9 @@ import com.openmausbot.companion.core.OnboardingContext
 import com.openmausbot.companion.core.OnboardingPairingState
 import com.openmausbot.companion.core.OnboardingRoute
 import com.openmausbot.companion.core.OnboardingRouter
+import com.openmausbot.companion.core.ErrorClassifier
 import com.openmausbot.companion.core.Session
+import com.openmausbot.companion.terminal.TerminalSessions
 import kotlinx.coroutines.launch
 
 /**
@@ -192,12 +197,31 @@ fun CompanionRoot(
         tapCoordinator.onPending(session, target, onPendingTargetConsumed)
     }
 
-    CompanionTheme {
+    // The theme is the person's choice, read from the same store Settings writes
+    // to, so switching it in Appearance redraws the whole app on the next frame
+    // and survives the next launch.
+    val themeMode by environment.appearance.theme.collectAsState()
+    // The wallpaper is read here, at the root, so one change moves every screen
+    // on the next frame — and drawn here, outside the inset padding, so it runs
+    // edge to edge behind the bars instead of starting under them.
+    val backgroundId by environment.appearance.background.collectAsState()
+    CompanionTheme(mode = themeMode) {
         // One place for system insets: the app draws edge to edge, and every
         // screen wants the same answer — keep content clear of the status bar,
         // the gesture bar, and the keyboard.
         Box(modifier = Modifier.fillMaxSize()) {
-            Surface(modifier = Modifier.fillMaxSize().safeDrawingPadding()) {
+            AppWallpaper(
+                id = backgroundId,
+                dark = themeMode.resolve(isSystemInDarkTheme()),
+            )
+            // Transparent rather than the theme's surface: the wallpaper behind
+            // this is the page now. AppWallpaper paints the page colour either
+            // way, so with no wallpaper chosen there is no path where a screen
+            // ends up on the window's background instead of the app's.
+            Surface(
+                modifier = Modifier.fillMaxSize().safeDrawingPadding(),
+                color = Color.Transparent,
+            ) {
                 Box(modifier = Modifier.fillMaxSize()) {
                     when (route) {
                         OnboardingRoute.WELCOME -> WelcomeScreen(
@@ -295,8 +319,11 @@ fun CompanionRoot(
             }
             // Pairing failures are shown inline on the pairing form, where the
             // action was — a modal on top of it would say the same thing twice.
-            if (route != OnboardingRoute.PAIRING) {
-                ActionErrorDialog(session)
+            // The paired world raises its own dialog (with the navigation the
+            // "Configure model" remedy needs), so this plain one only covers
+            // the unpaired/onboarding routes.
+            if (route != OnboardingRoute.PAIRING && route != OnboardingRoute.CHATS) {
+                ActionErrorDialog(session, navigator = null)
             }
         }
     }
@@ -349,6 +376,24 @@ private fun PairedScreen(
     onCommit: (NotificationTapCoordinator.Resolution, CompanionNavigator) -> Unit,
 ) {
     val navigator = rememberCompanionNavigator(bondGeneration)
+    val environment = LocalCompanion.current
+
+    // Where the person is, told to the notification surface: the conversation on
+    // screen is silent and drops any banner it already had, everything else is
+    // announceable. Keyed on the destination rather than on the composition, so
+    // "which chat is open" survives a recreation as state the navigation stack
+    // already restores — and no `onDispose` clears it, because the screen that
+    // is going away is not the one that decides where the person went.
+    LaunchedEffect(navigator.current) {
+        when (val here = navigator.current) {
+            is Destination.Chat -> environment.notificationVisibility.showing(here.target.threadId)
+            is Destination.Thread -> environment.notificationVisibility.showing(here.threadId)
+            else -> environment.notificationVisibility.hidden()
+        }
+    }
+
+    // Paired: provider failures can offer the settings screen as their remedy.
+    ActionErrorDialog(environment.session, navigator)
 
     // Session already resolved the exact task; the coordinator records the
     // stack and consumes in one commit — keyed on generation so a superseded
@@ -358,58 +403,162 @@ private fun PairedScreen(
         onCommit(held, navigator)
     }
 
-    BackHandler(enabled = navigator.canGoBack) { navigator.pop() }
+    // Terminals live above every destination, not inside one: a bot can open
+    // one while the person is reading a room, and the surface must be able to
+    // appear and disappear without the program noticing.
+    val terminalSessions = TerminalSessions.instance
+    // `of` rather than a fresh instance: the app owns it so a rotated or
+    // recreated Activity comes back to the terminal it left, not to a roster
+    // with a running program hidden behind a chip.
+    val terminalPresentation = remember(terminalSessions) { terminalSessions?.let { TerminalPresentation.of(it) } }
+    if (terminalSessions != null && terminalPresentation != null) {
+        val openRequest by terminalSessions.openRequest.collectAsState()
+        val liveSessions by terminalSessions.sessions.collectAsState()
+        LaunchedEffect(openRequest) { terminalPresentation.consumeOpenRequest(openRequest) }
+        LaunchedEffect(liveSessions.map { it.id }) { terminalPresentation.reconcile() }
+    }
+    val terminalOpen = terminalPresentation?.visible == true
 
-    when (val destination = navigator.current) {
-        Destination.Roster -> RosterScreen(navigator)
-        Destination.Settings -> SettingsScreen(
-            onBack = navigator::pop,
-            onOpenRoutines = { navigator.push(Destination.Routines) },
-            onOpenConnectedApps = { navigator.push(Destination.ConnectedApps) },
+    // Leaving the terminal is what the back gesture does while it is on screen;
+    // the navigator only sees a back press once the terminal is not showing.
+    BackHandler(enabled = navigator.canGoBack && !terminalOpen) { navigator.pop() }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        when (val destination = navigator.current) {
+            Destination.Roster -> RosterScreen(navigator)
+            Destination.Settings -> SettingsScreen(
+                onBack = navigator::pop,
+                onOpenRoutines = { navigator.push(Destination.Routines) },
+                onOpenModelProviders = { navigator.push(Destination.ModelProviders) },
+                onOpenSpecializedCapabilities = { navigator.push(Destination.SpecializedCapabilities) },
+                onOpenConnectedApps = { navigator.push(Destination.ConnectedApps) },
+                onOpenProjects = { navigator.push(Destination.Projects) },
+            )
+            Destination.Routines -> TasksRoutinesScreen(
+                onBack = navigator::pop,
+                // A receipt's "Open task" pushes the chat above this screen, the
+                // way iOS appends it to the same navigation path.
+                onOpenChat = navigator::open,
+            )
+            Destination.ConnectedApps -> ConnectedAppsScreen(onBack = navigator::pop)
+            Destination.ModelProviders -> ModelProvidersScreen(onBack = navigator::pop)
+            Destination.SpecializedCapabilities -> SpecializedCapabilitiesScreen(onBack = navigator::pop)
+            Destination.Projects -> ProjectsScreen(
+                navigator = navigator,
+                onBack = navigator::pop,
+            )
+            Destination.DeploymentAccounts -> ConnectedAppsScreen(onBack = navigator::pop)
+            // One branch for both shapes of chat address, so a notification's
+            // thread becoming an addressed chat re-reads the same screen
+            // instead of rebuilding it.
+            is Destination.Conversation -> ChatScreen(
+                destination = destination,
+                onResolved = { target ->
+                    navigator.selectTask(destination, target)
+                },
+                onBack = navigator::pop,
+                onOpenComputer = { navigator.push(Destination.Computer(it)) },
+                onOpenOverview = { navigator.push(Destination.Overview(it)) },
+                onOpenMemory = { navigator.push(Destination.Memory(it)) },
+                onOpenModelProviders = { navigator.push(Destination.ModelProviders) },
+                // Push Computer keeps the chat under the top; pop to roster
+                // does not.
+                retainsDraft = navigator::retainsChatDraft,
+                onOpenChat = navigator::open,
+            )
+            is Destination.Computer -> ComputerScreen(
+                botId = destination.botId,
+                onBack = navigator::pop,
+            )
+            is Destination.Overview -> BotOverviewScreen(
+                botId = destination.botId,
+                onBack = navigator::pop,
+            )
+            is Destination.Memory -> MemoryScreen(
+                botId = destination.botId,
+                onBack = navigator::pop,
+            )
+        }
+
+        TerminalLayer(sessions = terminalSessions, presentation = terminalPresentation)
+    }
+}
+
+/**
+ * The terminal itself, drawn over whatever the navigator is showing.
+ *
+ * It sits at this level, not inside a screen, because a terminal is not part of
+ * any screen: a bot can open one while the person is reading a room, the person
+ * can leave it for the conversation and come back, and a Compose recomposition
+ * anywhere in the app must not be able to end the program. Closing is a
+ * deliberate act (the surface's own button, or the bot's terminal_close) and it
+ * is the only thing that does end it.
+ */
+@Composable
+private fun BoxScope.TerminalLayer(sessions: TerminalSessions?, presentation: TerminalPresentation?) {
+    if (sessions == null || presentation == null) return
+    val live by sessions.sessions.collectAsState()
+    val session = presentation.selected
+    if (presentation.visible && session != null) {
+        BackHandler { presentation.leave() }
+        TerminalSurface(
+            session = session,
+            onLeave = presentation::leave,
+            onClose = { sessions.close(session.id) },
         )
-        Destination.Routines -> TasksRoutinesScreen(
-            onBack = navigator::pop,
-            // A receipt's "Open task" pushes the chat above this screen, the way
-            // iOS appends it to the same navigation path.
-            onOpenChat = navigator::open,
-        )
-        Destination.ConnectedApps -> ConnectedAppsScreen(onBack = navigator::pop)
-        // One branch for both shapes of chat address, so a notification's thread
-        // becoming an addressed chat re-reads the same screen instead of
-        // rebuilding it.
-        is Destination.Conversation -> ChatScreen(
-            destination = destination,
-            onResolved = { target ->
-                navigator.selectTask(destination, target)
-            },
-            onBack = navigator::pop,
-            onOpenComputer = { navigator.push(Destination.Computer(it)) },
-            onOpenOverview = { navigator.push(Destination.Overview(it)) },
-            // Push Computer keeps the chat under the top; pop to roster does not.
-            retainsDraft = navigator::retainsChatDraft,
-            onOpenChat = navigator::open,
-        )
-        is Destination.Computer -> ComputerScreen(
-            botId = destination.botId,
-            onBack = navigator::pop,
-        )
-        is Destination.Overview -> BotOverviewScreen(
-            botId = destination.botId,
-            onBack = navigator::pop,
-        )
+    } else if (!presentation.visible && live.isNotEmpty()) {
+        // A visible way back to what is still running — one chip per terminal,
+        // so the second one a bot opened is as reachable as the first, and the
+        // one the person last looked at is marked.
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp),
+            horizontalAlignment = Alignment.End,
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            live.forEach { open ->
+                TerminalChip(
+                    label = open.label,
+                    active = open.id == presentation.selectedId,
+                    onOpen = { presentation.show(open.id) },
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun ActionErrorDialog(session: Session) {
+private fun ActionErrorDialog(session: Session, navigator: CompanionNavigator?) {
+    val structuredError by session.activeStructuredError.collectAsState()
+    val error = structuredError
+    if (error != null) {
+        ActionableErrorBottomSheet(
+            error = error,
+            onDismiss = { session.clearActiveError() },
+            onRetry = if (error.canRetry) {
+                { session.clearActiveError() }
+            } else null,
+            onFixAutomatically = {
+                session.clearActiveError()
+            },
+            onOpenSettings = {
+                session.clearActiveError()
+                navigator?.push(Destination.Settings)
+            },
+        )
+        return
+    }
+
     val message by session.actionErrorFlow.collectAsState()
     val text = message ?: return
-    AlertDialog(
-        onDismissRequest = { session.actionError = null },
-        title = { Text("Something went wrong") },
-        text = { Text(text) },
-        confirmButton = {
-            TextButton(onClick = { session.actionError = null }) { Text("OK") }
+    val fallbackError = remember(text) { ErrorClassifier.classify(rawMessage = text) }
+    ActionableErrorBottomSheet(
+        error = fallbackError,
+        onDismiss = { session.actionError = null },
+        onOpenSettings = {
+            session.actionError = null
+            navigator?.push(Destination.Settings)
         },
     )
 }

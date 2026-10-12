@@ -21,7 +21,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -38,6 +37,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.core.AskQuestion
 import com.openmausbot.companion.core.AskQuestionAnswer
+import com.openmausbot.companion.core.AskQuestionOption
+import com.openmausbot.companion.core.AskQuestionRules
 import com.openmausbot.companion.core.Chat
 import com.openmausbot.companion.core.Message
 import kotlinx.coroutines.launch
@@ -57,6 +58,12 @@ import kotlinx.coroutines.launch
  * think of, and one submit that sends every answer at once. The answer text is
  * built by [AskQuestionAnswer.format], so an answer given here is
  * byte-for-byte the one the Mac would have sent.
+ *
+ * Typed questions (the ask_user tool's v2) draw from [AskQuestionRules]: a
+ * single_choice is a radio group, a multiple_choice honors its min/max, a
+ * confirmation offers its yes/no pair, and a free_text question is just the
+ * field. Picks are tracked by option id — the stable answer — and rendered
+ * back as the labels the person actually saw.
  */
 @Composable
 internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
@@ -66,7 +73,7 @@ internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
 
     val session = LocalCompanion.current.session
     val scope = rememberCoroutineScope()
-    // Per question: the option labels ticked, the free-text reply, and whether
+    // Per question: the option ids ticked, the free-text reply, and whether
     // "Other" is open. An open field with nothing in it is not an answer.
     val picked = remember(message.id) { mutableStateMapOf<Int, Set<String>>() }
     val custom = remember(message.id) { mutableStateMapOf<Int, String>() }
@@ -77,52 +84,113 @@ internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
     // sent answer closes the window where the buttons are still live.
     var sent by remember(message.id) { mutableStateOf<String?>(null) }
 
-    fun answersFor(position: Int): List<String> {
-        val chosen = picked[position].orEmpty().sorted().toMutableList()
-        if (other[position] == true) {
-            custom[position]?.trim()?.takeIf { it.isNotEmpty() }?.let(chosen::add)
+    /** One tappable row: an option with its resolved id, or the Other row. */
+    data class Row(val option: AskQuestionOption?, val id: String, val isOther: Boolean = false)
+
+    fun rowsFor(question: AskQuestion): List<Row> {
+        val kind = AskQuestionRules.type(question)
+        if (kind == AskQuestionRules.TYPE_FREE) return emptyList()
+        val optionRows = if (kind == AskQuestionRules.TYPE_CONFIRM && question.options.isEmpty()) {
+            // A hand-built confirmation with no rows still IS a yes/no: the
+            // pair is the whole question, and the ids are the reserved ones.
+            listOf(
+                AskQuestionOption(label = "Confirm", id = AskQuestionRules.CONFIRMED_ID),
+                AskQuestionOption(label = "Cancel", id = AskQuestionRules.DECLINED_ID),
+            )
+        } else {
+            question.options
+        }
+        val ids = if (kind == AskQuestionRules.TYPE_CONFIRM && question.options.isEmpty()) {
+            optionRows.mapNotNull { it.id }
+        } else {
+            AskQuestionRules.resolvedOptionIds(question)
+        }
+        val rows = optionRows.mapIndexed { position, option -> Row(option, ids.getOrElse(position) { option.id ?: "" }) }
+        return if (AskQuestionRules.allowsOther(question)) rows + Row(null, AskQuestionRules.OTHER_ID, isOther = true) else rows
+    }
+
+    fun answerIdsFor(position: Int): List<String> {
+        val question = questions[position]
+        if (AskQuestionRules.type(question) == AskQuestionRules.TYPE_FREE) return emptyList()
+        val chosen = picked[position].orEmpty().toMutableList()
+        if (AskQuestionRules.allowsOther(question) && other[position] == true &&
+            custom[position]?.trim()?.isNotEmpty() == true
+        ) {
+            chosen.add(AskQuestionRules.OTHER_ID)
         }
         return chosen
     }
 
-    val index = active.coerceIn(0, questions.lastIndex)
-    val current = questions[index]
-    val answeredCount = questions.indices.count { answersFor(it).isNotEmpty() }
-    val complete = answeredCount == questions.size
-    val settled = card.answered != null || sent != null
+    /** The same rules the server applies; the card may not send past them. */
+    fun answerErrorFor(position: Int): String? =
+        AskQuestionRules.validate(questions[position], answerIdsFor(position), custom[position].orEmpty())
 
-    fun choose(label: String) {
-        if (settled) return
-        if (current.allowsMultiple) {
-            val chosen = picked[index].orEmpty()
-            picked[index] = if (label in chosen) chosen - label else chosen + label
-            return
+    /** What this question's answer says, in the labels (or words) chosen. */
+    fun answerTextFor(position: Int): List<String> {
+        val question = questions[position]
+        return when (AskQuestionRules.type(question)) {
+            AskQuestionRules.TYPE_FREE -> listOfNotNull(custom[position]?.trim()?.takeIf { it.isNotEmpty() })
+            AskQuestionRules.TYPE_CONFIRM -> answerIdsFor(position).mapNotNull { id ->
+                when (id) {
+                    AskQuestionRules.CONFIRMED_ID -> "The user confirmed."
+                    AskQuestionRules.DECLINED_ID -> "The user declined."
+                    else -> null
+                }
+            }
+            else -> {
+                val rows = rowsFor(question)
+                answerIdsFor(position).mapNotNull { id ->
+                    val row = rows.firstOrNull { it.id == id } ?: return@mapNotNull null
+                    if (row.isOther) custom[position]?.trim() else row.option?.label
+                }
+            }
         }
-        // Single-select is a radio group: picking replaces, and picking an
-        // option means the free-text answer was not the one they wanted.
-        picked[index] = setOf(label)
-        other[index] = false
-        // Move to the next question they still owe an answer to. The last one
-        // stays put so the submit button is under the thumb that just chose.
-        questions.indices
-            .firstOrNull { it != index && answersFor(it).isEmpty() }
-            ?.let { active = it }
     }
 
-    fun toggleOther() {
-        if (settled) return
-        if (other[index] == true) {
-            other[index] = false
+    val index = active.coerceIn(0, questions.lastIndex)
+    val current = questions[index]
+    val currentKind = AskQuestionRules.type(current)
+    val settled = card.answered != null || sent != null
+    val error = answerErrorFor(index)
+
+    fun choose(row: Row) {
+        if (settled || answering) return
+        if (row.isOther) {
+            val opening = other[index] != true
+            other[index] = opening
+            // Single-select: picking an option means the free-text answer was
+            // not the one they wanted, and the reverse.
+            if (!current.allowsMultiple && opening) picked[index] = emptySet()
             return
         }
-        other[index] = true
-        if (!current.allowsMultiple) picked[index] = emptySet()
+        val chosen = picked[index].orEmpty()
+        when {
+            row.id in chosen -> picked[index] = chosen - row.id
+            currentKind == AskQuestionRules.TYPE_MULTI -> {
+                // The bound is real: past the max a further tap does nothing,
+                // and the line under the list says why.
+                if (chosen.size >= AskQuestionRules.maxSelections(current)) return
+                picked[index] = chosen + row.id
+            }
+            else -> {
+                picked[index] = setOf(row.id)
+                other[index] = false
+                // Move to the next question they still owe an answer to. The
+                // last one stays put so the submit button is under the thumb
+                // that just chose.
+                questions.indices
+                    .firstOrNull { it != index && answerErrorFor(it) != null }
+                    ?.let { active = it }
+            }
+        }
     }
 
     fun send() {
         val requestId = card.requestId
-        if (settled || !complete || requestId == null) return
-        val answer = AskQuestionAnswer.format(questions, questions.indices.map(::answersFor))
+        if (settled || answering || requestId == null) return
+        // Every question must pass the same validation the server applies.
+        if (questions.indices.any { answerErrorFor(it) != null }) return
+        val answer = AskQuestionAnswer.format(questions, questions.indices.map(::answerTextFor))
         if (answer.isEmpty()) return
         sent = answer
         answering = true
@@ -161,7 +229,7 @@ internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
                 modifier = Modifier.weight(1f),
             )
             if (questions.size > 1 && !settled) {
-                Text("$answeredCount of ${questions.size}", fontSize = 12.sp, color = secondaryTint)
+                Text("${questions.indices.count { answerErrorFor(it) == null }} of ${questions.size}", fontSize = 12.sp, color = secondaryTint)
             }
         }
 
@@ -187,7 +255,7 @@ internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (answersFor(position).isNotEmpty()) {
+                        if (answerTextFor(position).isNotEmpty()) {
                             Icon(
                                 imageVector = Icons.Filled.Check,
                                 contentDescription = null,
@@ -233,8 +301,20 @@ internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
             return@Column
         }
 
-        if (current.allowsMultiple) {
-            Text("Choose all that apply", fontSize = 12.sp, color = secondaryTint)
+        val rows = rowsFor(current)
+        if (currentKind == AskQuestionRules.TYPE_MULTI) {
+            val min = AskQuestionRules.minSelections(current)
+            val max = AskQuestionRules.maxSelections(current)
+            Text(
+                when {
+                    min == max -> "Choose $min"
+                    max == 1 -> "Choose one"
+                    min > 1 -> "Choose $min to $max"
+                    else -> "Choose all that apply"
+                },
+                fontSize = 12.sp,
+                color = secondaryTint,
+            )
         }
 
         Column(
@@ -242,49 +322,54 @@ internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
                 .fillMaxWidth()
                 .background(secondaryTint.copy(alpha = 0.10f), RoundedCornerShape(14.dp)),
         ) {
-            current.options.forEachIndexed { position, option ->
+            rows.forEachIndexed { position, row ->
                 if (position > 0) HorizontalDivider()
                 ChoiceRow(
-                    label = option.label,
-                    detail = option.detail,
-                    checked = option.label in picked[index].orEmpty(),
-                    multi = current.allowsMultiple,
+                    label = row.option?.label ?: "Other",
+                    detail = row.option?.detail,
+                    checked = row.id in picked[index].orEmpty() || (row.isOther && other[index] == true),
+                    multi = currentKind == AskQuestionRules.TYPE_MULTI,
                     enabled = !answering,
                 ) {
                     haptics.play(TactileAction.CHOOSE_APPROVAL)
-                    choose(option.label)
+                    choose(row)
+                }
+                if (row.isOther && other[index] == true) {
+                    HorizontalDivider()
+                    AppTextField(
+                        value = custom[index].orEmpty(),
+                        onValueChange = { custom[index] = it },
+                        placeholder = "Type your own answer",
+                        singleLine = false,
+                        maxLines = 4,
+                        enabled = !answering,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(10.dp),
+                    )
                 }
             }
-            if (current.options.isNotEmpty()) HorizontalDivider()
-            ChoiceRow(
-                label = "Other",
-                detail = null,
-                checked = other[index] == true,
-                multi = current.allowsMultiple,
+        }
+
+        if (currentKind == AskQuestionRules.TYPE_FREE) {
+            AppTextField(
+                value = custom[index].orEmpty(),
+                onValueChange = { custom[index] = it },
+                placeholder = "Type your answer",
+                singleLine = false,
+                maxLines = 5,
                 enabled = !answering,
-            ) {
-                haptics.play(TactileAction.CHOOSE_APPROVAL)
-                toggleOther()
-            }
-            if (other[index] == true) {
-                HorizontalDivider()
-                OutlinedTextField(
-                    value = custom[index].orEmpty(),
-                    onValueChange = { custom[index] = it },
-                    placeholder = { Text("Type your own answer") },
-                    singleLine = false,
-                    maxLines = 4,
-                    enabled = !answering,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(10.dp),
-                )
-            }
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        if (error != null) {
+            Text(error, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
         }
 
         Button(
             onClick = ::send,
-            enabled = complete && !answering,
+            enabled = error == null && !answering,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(if (questions.size > 1) "Submit answers" else "Submit answer")

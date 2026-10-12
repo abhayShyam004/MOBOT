@@ -1,6 +1,5 @@
 package com.openmausbot.companion.ui
 
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.geometry.CornerRadius
@@ -8,7 +7,6 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Matrix
 import androidx.compose.ui.graphics.Outline
 import androidx.compose.ui.graphics.Path
@@ -193,19 +191,24 @@ private const val QUARTER = 90f
  * a see-through bubble shows the seam.
  */
 object BubbleColor {
-    /** What you said. The mascot palette's blue, not the system's. */
-    val mine: Color = Color(MausPalette.argb("blue"))
-    val mineText: Color = Color.White
+    /**
+     * What you said: the brand colour, held down to a whisper of it.
+     *
+     * It used to be the mascot palette's full blue — a saturated fill that made
+     * every screenful of transcript a two-colour argument, and the loudest thing
+     * in a conversation about something else. The person's own words still read
+     * as theirs, in the app's own colour, without the app shouting them.
+     */
+    val mine: Color
+        @Composable get() = AppTheme.colors.myBubble
 
-    private val theirsDark = Color(0xFF262629)
-    private val theirsLight = Color(0xFFE9E9EB)
+    val mineText: Color
+        @Composable get() = AppTheme.colors.onMyBubble
 
     /**
-     * What a bot said. Near-black on dark, a soft grey on light — chosen off the
-     * scheme in force rather than off the system setting, so a screen rendered in
-     * a forced theme still gets the bubble that belongs to it.
+     * What a bot said: one step off the page, in the design system's own surface
+     * token, so a bubble and a sheet are the same material at different sizes.
      */
     val theirs: Color
-        @Composable get() =
-            if (MaterialTheme.colorScheme.surface.luminance() < 0.5f) theirsDark else theirsLight
+        @Composable get() = AppTheme.colors.surface
 }

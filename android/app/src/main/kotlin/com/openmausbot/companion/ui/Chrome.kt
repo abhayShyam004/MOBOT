@@ -1,6 +1,7 @@
 package com.openmausbot.companion.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -16,7 +17,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
+
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.painter.Painter
@@ -40,33 +41,35 @@ import androidx.compose.ui.unit.dp
  * frame, over a roster of animated mascots — buys a look at the price of the
  * scroll, which is the wrong trade on a list.
  *
- * So the chrome is not translucent at all. It is what a Material app floats over
- * a list: an opaque `surfaceContainerHigh` tile with a real elevation shadow, in
- * the shape of the control. That reads as a native app rather than a transplanted
- * one, it is legible over any content by construction, it looks the same on API
- * 26 and on 37, and it costs nothing in the draw phase — `shadow` and `background`
- * both cache their outline against size, layout direction and shape.
+ * So the chrome is not translucent. What it is now is quieter than it used to be:
+ * one step up from the page's own background, separated by a hairline rather than
+ * lifted by a shadow. A shadow under every pill and bar is what makes a screen
+ * read as layers of floating objects; the hairline says "this sits on top" just as
+ * clearly and costs the composition nothing. It is still opaque — legible over any
+ * content by construction, identical on API 26 and 37 — and both `background` and
+ * `border` cache their outline against size, layout direction and shape.
  */
 
 /** Below this, a control is hard to hit; Android asks for 48 dp either way. */
 internal val MIN_TOUCH_TARGET: Dp = 48.dp
 
-private val CHROME_ELEVATION: Dp = 3.dp
-
 /** A capsule of chrome — pills and round buttons. */
 @Composable
-internal fun Modifier.chromeCapsule(elevation: Dp = CHROME_ELEVATION): Modifier =
-    chrome(CircleShape, elevation)
+internal fun Modifier.chromeCapsule(): Modifier = chrome(CircleShape)
 
 /** A rounded sheet of chrome. */
 @Composable
-internal fun Modifier.chromeSheet(cornerRadius: Dp = 28.dp, elevation: Dp = 6.dp): Modifier =
-    chrome(RoundedCornerShape(cornerRadius), elevation)
+internal fun Modifier.chromeSheet(cornerRadius: Dp = AppRadii.sheet): Modifier =
+    chrome(RoundedCornerShape(cornerRadius))
 
 @Composable
-internal fun Modifier.chrome(shape: Shape, elevation: Dp = CHROME_ELEVATION): Modifier = this
-    .shadow(elevation, shape, clip = false)
-    .background(MaterialTheme.colorScheme.surfaceContainerHigh, shape)
+internal fun Modifier.chrome(shape: Shape): Modifier = this
+    // White, not a grey well: the reference draws its controls as light tiles on a
+    // warm page, separated by a hairline rather than by being darker than what is
+    // behind them. On a page whose cards are also white that reads as a control
+    // sitting *on* the page, which is the point.
+    .background(AppTheme.colors.surface, shape)
+    .border(1.dp, AppTheme.colors.hairline, shape)
 
 /**
  * A round chrome button with one glyph — the shape of every action in the chrome
@@ -141,11 +144,40 @@ private fun ChromeButton(
 }
 
 /**
+ * A header's action: a bare glyph, no tile under it.
+ *
+ * The reference's own header is a mark on one side and two glyphs on the other,
+ * with nothing drawn around either of them. A filled or outlined circle per action
+ * is what makes a header read as a toolbar and eats the width a title would have
+ * had; the target is still [MIN_TOUCH_TARGET], so the drawing shrinks and the
+ * thing a thumb hits does not.
+ */
+@Composable
+internal fun HeaderGlyphButton(
+    icon: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    glyph: Dp = 22.dp,
+    enabled: Boolean = true,
+) {
+    TouchTarget(onClick = onClick, modifier = modifier, enabled = enabled) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = if (enabled) AppTheme.colors.textPrimary else AppTheme.colors.textTertiary,
+            modifier = Modifier.size(glyph),
+        )
+    }
+}
+
+/**
  * Leaving a flat header — Settings and the screens it opens.
  *
- * The glyph keeps the 32 dp tile the header is drawn with; the target around it
- * is [MIN_TOUCH_TARGET], because a 32 dp target is one Android considers too
- * small to hit.
+ * A bare glyph, not a filled circle: on a screen whose header already has a title
+ * and a right-hand action, a third grey disc is the kind of chrome that makes a
+ * simple screen look like a toolbar. The target is still [MIN_TOUCH_TARGET]; only
+ * the drawing is smaller.
  */
 @Composable
 internal fun HeaderBackButton(onBack: () -> Unit, modifier: Modifier = Modifier) {
@@ -153,10 +185,8 @@ internal fun HeaderBackButton(onBack: () -> Unit, modifier: Modifier = Modifier)
         Icon(
             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
             contentDescription = null,
-            modifier = Modifier
-                .size(32.dp)
-                .background(secondaryTint.copy(alpha = 0.16f), CircleShape)
-                .padding(6.dp),
+            tint = AppTheme.colors.textSecondary,
+            modifier = Modifier.size(22.dp),
         )
     }
 }

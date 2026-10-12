@@ -3,6 +3,7 @@ import { z } from "zod";
 import { BOT_AVATAR_CROPS, botAvatarCropSchema, botAvatarUrlSchema } from "../shared/bot-avatar.ts";
 import { BOT_PROFILE_LIMITS } from "../shared/bot-profile.ts";
 import { MASCOT_BODY_IDS, mascotBodySchema } from "../shared/mascot-bodies.ts";
+import { MAX_MCP_SERVERS, mcpServerNameError } from "./mcp-registry.ts";
 
 import type { BotRecord } from "./store.ts";
 
@@ -27,6 +28,7 @@ export const BOT_PROFILE_PATCH_FIELDS = [
   "description",
   "soul",
   "notifications",
+  "color",
   "avatarUrl",
   "avatarCrop",
   "mascotBody",
@@ -57,6 +59,13 @@ const profilePatchSchema = z.object({
     })
     .optional(),
   notifications: z.boolean({ error: "notifications must be true or false" }).optional(),
+  // The bot's own colour — the mascot tint and the name pill. The same ten
+  // names every bot has always been created with; a person may now pick one.
+  color: z
+    .enum(["green", "blue", "red", "orange", "purple", "cyan", "pink", "yellow", "teal", "coral"], {
+      error: "color must be one of the ten bot colours",
+    })
+    .optional(),
   avatarUrl: z
     .union([botAvatarUrlSchema, z.literal(""), z.null()], {
       error: "avatarUrl must be a stored PNG, JPEG, GIF, or WebP attachment",
@@ -69,6 +78,19 @@ const profilePatchSchema = z.object({
     .max(BOT_PROFILE_LIMITS.voice, { error: "voice must be at most 200 characters" })
     .optional(),
   speakReplies: z.boolean({ error: "speakReplies must be true or false" }).optional(),
+  /** Per-bot selection of app-wide MCP servers. Same shape and rules as the
+   * broad bot PATCH: null restores every enabled server, [] mounts none, a
+   * list is exactly those (deduped) names. */
+  mcpServers: z
+    .union([
+      z.null(),
+      z
+        .array(z.string().refine((name) => mcpServerNameError(name) === null, {
+          error: "mcpServers must be a list of server names, or null",
+        }))
+        .max(MAX_MCP_SERVERS, { error: `Select at most ${MAX_MCP_SERVERS} MCP servers.` }),
+    ])
+    .optional(),
 });
 
 export type BotProfilePatchInput = z.input<typeof profilePatchSchema>;
@@ -86,6 +108,7 @@ export type BotProfilePatch = Partial<
     | "mascotBody"
     | "voice"
     | "speakReplies"
+    | "mcpServers"
   >
 >;
 
@@ -121,8 +144,13 @@ export function parseBotProfilePatch(input: BotProfilePatchInput, strict = false
     return { ok: false, error: issue?.message ?? "invalid profile patch" };
   }
 
-  const { avatarUrl, ...fields } = parsed.data;
+  const { avatarUrl, mcpServers, ...fields } = parsed.data;
   const patch: BotProfilePatch = fields;
   if (avatarUrl !== undefined) patch.avatarUrl = avatarUrl || undefined;
+  // null (all enabled) normalizes to the record's undefined state; a list
+  // is deduped exactly as the broad bot PATCH normalizes it.
+  if (mcpServers !== undefined) {
+    patch.mcpServers = mcpServers === null ? undefined : [...new Set(mcpServers)];
+  }
   return { ok: true, patch };
 }

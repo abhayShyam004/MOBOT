@@ -265,6 +265,61 @@ describe("message-linked files", () => {
     await absolute.handle.close();
   });
 
+  it("presents an attachment store publication under the name the message granted", async () => {
+    // attachments.ts commits an upload as a real payload sidecar plus a
+    // name symlink in the same directory. The granted identity (and thus the
+    // download name and MIME type) is the granted name, not the sidecar's.
+    const payload = join(workspace, "462bc22e-4141-4c22-89ab-123456789abc.jpg.payload-10179-1a49uvhsdam");
+    writeFileSync(payload, "jpeg bytes here");
+    const published = join(workspace, "462bc22e-4141-4c22-89ab-123456789abc.jpg");
+    symlinkSync(payload, published);
+
+    const opened = await openMessageFile(published, [workspace]);
+    expect(opened.name).toBe("462bc22e-4141-4c22-89ab-123456789abc.jpg");
+    expect(opened.mime).toBe("image/jpeg");
+    expect(opened.bytes).toBe("jpeg bytes here".length);
+    expect(await opened.handle.readFile("utf8")).toBe("jpeg bytes here");
+    await opened.handle.close();
+  });
+
+  it("still serves a cross-directory symlink under its canonical identity", async () => {
+    // A symlink INTO this workspace from elsewhere keeps the canonical
+    // identity: the store-publication exception is same-directory only.
+    writeFileSync(join(workspace, "inside.md"), "# inside\n");
+    const link = join(outside, "pointing-in.md");
+    symlinkSync(join(workspace, "inside.md"), link);
+    const opened = await openMessageFile(link, [workspace]);
+    expect(opened.name).toBe("inside.md");
+    expect(opened.mime).toBe("text/markdown; charset=utf-8");
+    await opened.handle.close();
+  });
+
+  it("keeps the publication exception when the granted path is aliased by a directory symlink", async () => {
+    // Android mounts the app's data directory under per-user aliases
+    // (/data/user/0 and /data/data name the same files), so the granted
+    // path and its realpath can differ by directory prefix while naming
+    // one directory. The publication check canonicalises both directories,
+    // so a granted same-directory symlink still presents under the granted
+    // name instead of the sidecar's.
+    const payload = join(workspace, "462bc22e-4141-4c22-89ab-123456789abd.jpg.payload-10179-1a49uvhsdam");
+    writeFileSync(payload, "jpeg bytes here");
+    const published = join(workspace, "462bc22e-4141-4c22-89ab-123456789abd.jpg");
+    symlinkSync(payload, published);
+
+    const alias = join(suite, "workspace-alias");
+    rmSync(alias, { force: true });
+    symlinkSync(workspace, alias);
+    try {
+      const opened = await openMessageFile(join(alias, "462bc22e-4141-4c22-89ab-123456789abd.jpg"), [workspace]);
+      expect(opened.name).toBe("462bc22e-4141-4c22-89ab-123456789abd.jpg");
+      expect(opened.mime).toBe("image/jpeg");
+      expect(await opened.handle.readFile("utf8")).toBe("jpeg bytes here");
+      await opened.handle.close();
+    } finally {
+      rmSync(alias, { force: true });
+    }
+  });
+
   it("normalizes an encoded Windows path before opening it", async () => {
     const path = process.platform === "win32"
       ? join(workspace, "release notes.md")

@@ -10,6 +10,7 @@ import type {
   AnyProviderDriver,
   InstanceConfigMap,
   InstanceId,
+  ProviderAuthenticationMethod,
   ProviderAuthenticationStart,
   ProviderAuthenticationStatus,
   ProviderInstance,
@@ -239,6 +240,18 @@ export class ProviderRegistry {
         } catch (e) {
           snapshot = { state: "unavailable", reason: e instanceof Error ? e.message : String(e) };
         }
+        // Authentication capability is a fact of its own, next to — never
+        // inside — the runtime snapshot: the Codex device-code sign-in runs
+        // natively on a host with no Codex runtime, while Claude's flow signs
+        // in the CLI and exists exactly while that runtime does.
+        let auth: { available: boolean; reason?: string } = { available: true };
+        if (inst.authCapability) {
+          try {
+            auth = await inst.authCapability();
+          } catch (e) {
+            auth = { available: false, reason: e instanceof Error ? e.message : String(e) };
+          }
+        }
         return {
           instanceId: inst.instanceId,
           driverKind: inst.driverKind,
@@ -262,13 +275,12 @@ export class ProviderRegistry {
           install: withServerInstall(driver?.install, npmPresent),
           authentication: inst.startAuthentication
             ? {
-                method: inst.getAuthentication && inst.completeAuthentication
-                  ? "paste-code" as const // a link to open, then a code pasted back (Claude)
-                  : inst.getAuthentication
-                    ? "device-code" as const // a code to enter at the provider's page (Codex)
-                    : "browser" as const, // a link and a callback URL (managed engines)
+                method: authMethod(inst),
                 // the browser may remove the stored sign-in to switch accounts
                 signOut: inst.signOut !== undefined,
+                // Can the sign-in run on this host even without the runtime?
+                available: auth.available,
+                ...(auth.reason ? { reason: auth.reason } : {}),
               }
             : undefined,
           cli: this.cliByInstance.get(inst.instanceId),
@@ -294,4 +306,22 @@ export class ProviderRegistry {
     this.cliByInstance.delete(instanceId);
     await entry?.live?.dispose();
   }
+}
+
+/** How an instance's account sign-in completes. A driver that knows its own
+ * shape declares it (`authMethod`); the historical inference — which is a
+ * fact about how the driver wires its SPI, not what the person experiences —
+ * still covers drivers that have not opted in. */
+function authMethod(inst: {
+  authMethod?: () => ProviderAuthenticationMethod | undefined;
+  getAuthentication?: unknown;
+  completeAuthentication?: unknown;
+}): ProviderAuthenticationMethod {
+  const declared = inst.authMethod?.();
+  if (declared) return declared;
+  return inst.getAuthentication && inst.completeAuthentication
+    ? "paste-code" // a link to open, then a code pasted back (Claude)
+    : inst.getAuthentication
+      ? "device-code" // a code to enter at the provider's page
+      : "browser"; // a link and a callback URL (managed engines)
 }

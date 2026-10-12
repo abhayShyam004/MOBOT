@@ -423,4 +423,145 @@ class InlineMarkdownTest {
         val spans = InlineMarkdown.parse("**a** `b` ~~c~~ [d](https://e) _f_")
         assertTrue(spans.all { it.text.isNotEmpty() })
     }
+
+    @Test
+    fun `a bare url is a link span carrying the full scheme`() {
+        val spans = InlineMarkdown.parse("Read more: https://example.com/article")
+        val link = spans.last()
+        assertEquals("Read more: ", spans.first().text)
+        assertEquals("https://example.com/article", link.text)
+        assertEquals("https://example.com/article", link.link)
+        assertNull(spans.first().link)
+    }
+
+    @Test
+    fun `punctuation after a bare url does not join the destination`() {
+        val spans = InlineMarkdown.parse("See https://example.com/a, and enjoy!")
+        val link = spans.single { it.link != null }
+        assertEquals("https://example.com/a", link.link)
+        assertEquals("https://example.com/a", link.text)
+        assertEquals(
+            "See https://example.com/a, and enjoy!",
+            InlineMarkdown.plain(spans),
+            "punctuation must stay in the rendered text",
+        )
+    }
+
+    @Test
+    fun `sentence-ending period is not part of the url`() {
+        assertEquals("https://example.com/a", linkDestination("Visit https://example.com/a."))
+        assertEquals("https://example.com/a", linkDestination("Visit https://example.com/a. Next"))
+    }
+
+    @Test
+    fun `query strings and fragments stay in the destination`() {
+        assertEquals(
+            "https://example.com/search?q=phase+8&lang=en",
+            linkDestination("https://example.com/search?q=phase+8&lang=en"),
+        )
+        assertEquals(
+            "https://example.com/doc#section-2",
+            linkDestination("See https://example.com/doc#section-2 for details."),
+        )
+        assertEquals("https://example.com/p?a=1#top", linkDestination("https://example.com/p?a=1#top."))
+    }
+
+    @Test
+    fun `url path parentheses are kept when balanced`() {
+        assertEquals(
+            "https://en.wikipedia.org/wiki/Python_(programming_language)",
+            linkDestination("https://en.wikipedia.org/wiki/Python_(programming_language)"),
+        )
+        assertEquals("https://e/f(g)", linkDestination("at https://e/f(g) inside prose"))
+    }
+
+    @Test
+    fun `prose closing parenthesis does not join the destination`() {
+        assertEquals("https://e/a", linkDestination("(see https://e/a)"))
+    }
+
+    @Test
+    fun `an unclosed parenthesis inside the url ends the link`() {
+        assertEquals("https://e/a", linkDestination("https://e/a(b c"))
+    }
+
+    @Test
+    fun `http is autolinked like https`() {
+        assertEquals("http://example.net/x", linkDestination("http://example.net/x"))
+    }
+
+    @Test
+    fun `the scheme is matched without case sensitivity`() {
+        assertEquals("HTTPS://EXAMPLE.COM/A", linkDestination("HTTPS://EXAMPLE.COM/A"))
+    }
+
+    @Test
+    fun `a url welded to a word does not link`() {
+        assertNull(linkDestinationOrNull("wordhttps://example.com/a"))
+    }
+
+    @Test
+    fun `a colon with no slashes is not a url`() {
+        assertNull(linkDestinationOrNull("meet at 10:30"))
+        assertNull(linkDestinationOrNull("ratio 2:1"))
+    }
+
+    @Test
+    fun `a url inside a code span is not autolinked`() {
+        val spans = InlineMarkdown.parse("run `curl https://e/x` now")
+        val code = spans.single { InlineStyle.CODE in it.styles }
+        assertNull(code.link)
+        assertTrue(spans.all { it.link == null })
+    }
+
+    @Test
+    fun `a bare url inside a markdown label is not re-linked`() {
+        val spans = InlineMarkdown.parse("[label text](https://e/a)")
+        assertEquals("https://e/a", spans.single().link)
+        assertEquals("label text", spans.single().text)
+    }
+
+    @Test
+    fun `a bare url neighbours emphasis and code spans`() {
+        val spans = InlineMarkdown.parse("**bold** https://e/a `code`")
+        assertEquals("https://e/a", spans.first { it.link != null }.link)
+        assertEquals(
+            "**bold** https://e/a `code".replace("*", "").replace("`", ""),
+            InlineMarkdown.plain(spans).replace("*", "").replace("`", ""),
+        )
+    }
+
+    @Test
+    fun `multiple bare urls in one line each link`() {
+        val spans = InlineMarkdown.parse("https://e/1 and https://e/2")
+        assertEquals(listOf("https://e/1", "https://e/2"), spans.filter { it.link != null }.map { it.link })
+    }
+
+    @Test
+    fun `a bare url keeps rendering every prefix while streaming`() {
+        val full = "see https://example.com/a. done"
+        for (length in 1..full.length) {
+            val rendered = InlineMarkdown.plain(InlineMarkdown.parse(full.take(length)))
+            assertEquals(full.take(length), rendered, "prefix of $length characters")
+        }
+    }
+
+    @Test
+    fun `a bare url is styled like any other link`() {
+        val spans = InlineMarkdown.parse("go https://e/a now")
+        val link = spans.single { it.link != null }
+        assertTrue(link.styles.isEmpty(), "autolink label carries no emphasis of its own")
+    }
+
+    /** The destination of the one link in [source], for compact assertions. */
+    private fun linkDestination(source: String): String =
+        linkDestinationOrNull(source) ?: error("expected a link in <$source>")
+
+    /** The destination of the one link in [source], or null when none rendered. */
+    private fun linkDestinationOrNull(source: String): String? {
+        val links = InlineMarkdown.parse(source).filter { it.link != null }
+        if (links.isEmpty()) return null
+        assertEquals(1, links.size, "expected exactly one link in <$source>")
+        return links.single().link
+    }
 }

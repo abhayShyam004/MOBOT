@@ -1,0 +1,456 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "auditMetadata": {
+    "title": "MOBOT Current State Audit Inventory",
+    "timestamp": "2026-10-09T19:20:00+05:30",
+    "device": {
+      "model": "Samsung SM-A075F (a07xx)",
+      "serial": "R8YY90VT4EM",
+      "abi": "arm64-v8a",
+      "androidVersion": "16",
+      "apiLevel": 36,
+      "screenResolution": "720x1600",
+      "screenDensityDpi": 300,
+      "availableStorage": "68GB"
+    },
+    "apkIdentity": {
+      "packageName": "com.openmausbot.companion",
+      "versionName": "1.0.0",
+      "versionCode": 10000,
+      "installedApkSha256": "56dd54171ebddb7d4cb757e5468c790640075957e1f19350cd83dc1f96b59094",
+      "serverBundleSha256": "5d0301ba408f7490721f35c4f3441a50fd78c3e74ef65c561084667b1fdd9b1d",
+      "sourceHead": "8d8182ea",
+      "gitBranch": "android-host"
+    },
+    "runtime": {
+      "appPid": 5391,
+      "nodePid": 5460,
+      "nodeBinary": "libnode_host.so",
+      "port": 18799,
+      "forwardedPort": 28799,
+      "serviceType": "Foreground Service (HarnessService)"
+    },
+    "backup": {
+      "archivePath": "backups/mobot_backup_pre_audit.tar",
+      "sha256": "70760e1ef3fc8caebaa7a20f15a34c8accbc48f6a47de3e924f7922b6e1b85d5",
+      "sizeBytes": 26446336,
+      "verifiedContents": [
+        "files/host/data/config.json",
+        "files/host/data/bots.json",
+        "files/host/data/messages.db",
+        "shared_prefs/com.openmausbot.companion_preferences.xml",
+        "files/datastore/companion_connection.preferences_pb"
+      ]
+    }
+  },
+  "screens": [
+    {
+      "id": "roster_main",
+      "name": "Main Bot Roster",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/RosterScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/01_roster_navigation/01_initial_landing.png",
+        "docs/audit/screenshots/01_roster_navigation/02_roster_scrolled.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "App title / Greeting",
+        "Bot summary (8 bots \u00b7 all quiet)",
+        "Settings icon button",
+        "Search button",
+        "New bot button",
+        "More roster actions overflow menu",
+        "Section headers and group cards",
+        "Bot cards with avatars, timestamps, last message snippets, thread counts"
+      ]
+    },
+    {
+      "id": "roster_overflow_menu",
+      "name": "Roster Overflow Menu",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/RosterScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/01_roster_navigation/03_roster_overflow_menu.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "New section"
+      ]
+    },
+    {
+      "id": "new_section_sheet",
+      "name": "New Section Bottom Sheet",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/NewSectionSheet.kt",
+      "screenshots": [
+        "docs/audit/screenshots/01_roster_navigation/08_new_section_sheet.png"
+      ],
+      "status": "UI verified on physical device (Section creation untested)",
+      "elements": [
+        "Cancel",
+        "Save",
+        "Section name input (0/60)",
+        "Bots selection checklist"
+      ]
+    },
+    {
+      "id": "new_group_sheet",
+      "name": "New Group Bottom Sheet",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/NewGroupSheet.kt",
+      "screenshots": [
+        "docs/audit/screenshots/01_roster_navigation/09_new_group_sheet.png"
+      ],
+      "status": "UI verified on physical device (Group creation untested)",
+      "elements": [
+        "Cancel",
+        "Create",
+        "Group name input (optional)",
+        "Bots member checklist"
+      ]
+    },
+    {
+      "id": "new_bot_sheet",
+      "name": "New Bot Bottom Sheet",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/NewBotSheet.kt",
+      "screenshots": [
+        "docs/audit/screenshots/01_roster_navigation/04_new_bot_sheet.png",
+        "docs/audit/screenshots/03_settings_providers/12_model_selector_new_bot.png",
+        "docs/audit/screenshots/03_settings_providers/13_codex_models_selector.png"
+      ],
+      "status": "UI verified on physical device (Bot creation untested)",
+      "elements": [
+        "Cancel",
+        "Create",
+        "Name input",
+        "Role input",
+        "Context input",
+        "Provider & model selector list (Grok, Kimi, Droid, Claude, Codex)"
+      ]
+    },
+    {
+      "id": "search_ui",
+      "name": "Roster Search Mode",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/RosterScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/01_roster_navigation/05_search_ui.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "Cancel button",
+        "Filtered bot roster results"
+      ]
+    },
+    {
+      "id": "bot_thread_tree",
+      "name": "In-Roster Thread Tree",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/BotThreadTree.kt",
+      "screenshots": [
+        "docs/audit/screenshots/01_roster_navigation/07_roster_threads_expanded.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "Thread expand/collapse toggle",
+        "Main thread item",
+        "Cross-bot conversation threads (@Hazel, @Ziggy)"
+      ]
+    },
+    {
+      "id": "chat_screen",
+      "name": "Bot Chat Screen",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/ChatScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/02_chat_conversations/01_chat_olive.png",
+        "docs/audit/screenshots/02_chat_conversations/06_chat_vega_real.png",
+        "docs/audit/screenshots/02_chat_conversations/08_chat_ziggy_error_card.png",
+        "docs/audit/screenshots/02_chat_conversations/09_chat_fix_panel_test.png",
+        "docs/audit/screenshots/02_chat_conversations/10_chat_quill.png"
+      ],
+      "status": "UI & transcript verified on physical device (Message send & streaming untested)",
+      "elements": [
+        "Back button",
+        "Bot header avatar and name",
+        "Watch computer button",
+        "Message transcript list",
+        "Message bubble with Markdown and code rendering",
+        "Inline step fold (\"Ran X steps, Show\")",
+        "Inline error card",
+        "Quick action buttons (\u00b1 Show diff, \u2713 Run tests, ? Explain steps, /)",
+        "Composer input box",
+        "More (+) action button",
+        "Slash command button",
+        "Dictation button",
+        "Send button"
+      ]
+    },
+    {
+      "id": "tool_steps_expanded",
+      "name": "Expanded Tool Steps",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/TranscriptCardViews.kt",
+      "screenshots": [
+        "docs/audit/screenshots/02_chat_conversations/02_chat_expanded_steps.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "Tool execution chips",
+        "Step summary and parameters",
+        "Execution timestamps"
+      ]
+    },
+    {
+      "id": "slash_command_picker",
+      "name": "Slash Command Picker",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/ChatScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/02_chat_conversations/03_chat_slash_commands.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "Command suggestions (/diff, /test, /explain, etc.)"
+      ]
+    },
+    {
+      "id": "composer_more_menu",
+      "name": "Composer More Actions Sheet",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/ComposerAttachments.kt",
+      "screenshots": [
+        "docs/audit/screenshots/02_chat_conversations/04_chat_composer_more.png"
+      ],
+      "status": "UI verified on physical device (Attachment action untested)",
+      "elements": [
+        "Add a photo to this message",
+        "Choose File (document from Files)",
+        "New thread",
+        "Threads",
+        "Bot settings",
+        "Watch computer",
+        "Share transcript (Markdown)",
+        "Share as JSON"
+      ]
+    },
+    {
+      "id": "threads_sheet",
+      "name": "Bot Threads Management Sheet",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/ChatScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/02_chat_conversations/07_threads_sheet.png"
+      ],
+      "status": "UI verified on physical device (Thread archiving/deletion untested)",
+      "elements": [
+        "Thread list",
+        "Archive button per thread",
+        "Done button"
+      ]
+    },
+    {
+      "id": "group_chat_room",
+      "name": "Multi-Bot Group Chat Room",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/ChatScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/02_chat_conversations/11_group_chat_room.png"
+      ],
+      "status": "UI & transcript verified on physical device (Group turn dispatch untested)",
+      "elements": [
+        "Multi-bot speakers",
+        "Cross-bot mention routing",
+        "Image analysis OCR attachment"
+      ]
+    },
+    {
+      "id": "bot_overview_screen",
+      "name": "Bot Overview Screen",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/BotOverviewScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/05_bot_details_memory/04_bot_overview_screen.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "Who",
+        "Does",
+        "Can reach (computer, workspace, other bots)",
+        "Won't",
+        "Recent changes"
+      ]
+    },
+    {
+      "id": "bot_profile_sheet",
+      "name": "Bot Settings & Profile Sheet",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/AgentProfileSheet.kt",
+      "screenshots": [
+        "docs/audit/screenshots/05_bot_details_memory/01_bot_profile_sheet.png",
+        "docs/audit/screenshots/05_bot_details_memory/02_bot_profile_scrolled.png",
+        "docs/audit/screenshots/05_bot_details_memory/03_bot_memory_tab.png"
+      ],
+      "status": "UI verified on physical device (Profile mutation untested)",
+      "elements": [
+        "Done",
+        "What this bot does",
+        "Memory tab",
+        "Model selector (Codex, GPT-5.6 Luna)",
+        "Reasoning effort selector",
+        "Apply model",
+        "Avatar customizer (Circle, Rounded, Square, Mascot, Colour, Upload, Generate)"
+      ]
+    },
+    {
+      "id": "computer_screen",
+      "name": "Computer Screen / Frame View",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/ComputerScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/04_tools_integrations/01_computer_screen_empty.png"
+      ],
+      "status": "Honest idle fallback verified on physical device (Live video streaming untested)",
+      "elements": [
+        "Back",
+        "Bot name and status (Idle)",
+        "Empty state fallback (\"Nothing to show yet - This bot's computer is only captured while it is working\")"
+      ]
+    },
+    {
+      "id": "settings_main",
+      "name": "Main App Settings",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/SettingsScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/03_settings_providers/01_settings_main.png",
+        "docs/audit/screenshots/03_settings_providers/02_settings_this_phone_scrolled.png",
+        "docs/audit/screenshots/03_settings_providers/03_settings_this_phone_bottom.png",
+        "docs/audit/screenshots/03_settings_providers/04_settings_dev_section.png",
+        "docs/audit/screenshots/03_settings_providers/11_settings_dark_theme.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "Connection status (Connected, Reconnect, Unpair)",
+        "Appearance (Theme: Light/System/Dark, Backgrounds: None/Spring/Waves/Garden)",
+        "Notifications (Permission: Allowed, Always-on connection toggle)",
+        "AI (Model providers entry)",
+        "Apps (Connected apps entry)",
+        "Threads & Routines entry",
+        "Approvals (Tool calls: Never ask / Ask again)",
+        "Conversations (Activity detail: Reduced / Quick replies)",
+        "Developer (MCP servers list, Test/Edit/Remove buttons, Add MCP server)"
+      ]
+    },
+    {
+      "id": "model_providers_screen",
+      "name": "Model Providers Configuration",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/ModelProvidersScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/03_settings_providers/05_model_providers_screen.png",
+        "docs/audit/screenshots/03_settings_providers/06_providers_scrolled.png",
+        "docs/audit/screenshots/03_settings_providers/07_providers_bottom.png",
+        "docs/audit/screenshots/03_settings_providers/08_providers_codex_section.png",
+        "docs/audit/screenshots/03_settings_providers/09_providers_codex_tested.png"
+      ],
+      "status": "Catalog enumeration & diagnostics verified on physical device (Live prompt completion untested)",
+      "elements": [
+        "OpenAI-compatible card (469 models available, Test, Default, Edit)",
+        "Test gateway card (3 models available, Test, Default, Edit)",
+        "Add custom provider entry",
+        "Account sign-in engines (Grok, Kimi, Droid, Cursor, Claude, Codex, Antigravity, OpenCode)",
+        "Honest CLI and runtime availability diagnostics",
+        "Codex account signed in status and runtime probe"
+      ]
+    },
+    {
+      "id": "connected_apps_screen",
+      "name": "Connected Apps / Composio",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/ConnectedAppsScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/03_settings_providers/10_connected_apps_screen.png"
+      ],
+      "status": "UI verified on physical device (OAuth connection untested)",
+      "elements": [
+        "Setup prompt for Composio project key",
+        "App catalog (Slack, GitHub, Gmail)",
+        "Connect action buttons"
+      ]
+    },
+    {
+      "id": "threads_routines_screen",
+      "name": "Threads & Routines Screen",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/TasksRoutinesScreen.kt",
+      "screenshots": [
+        "docs/audit/screenshots/04_tools_integrations/04_threads_routines_screen.png"
+      ],
+      "status": "UI & run receipts verified on physical device (Background execution untested)",
+      "elements": [
+        "New routine button",
+        "Routines list (empty)",
+        "Run receipts (Clock check completed receipt)",
+        "Webhooks computer-only notice"
+      ]
+    },
+    {
+      "id": "routine_editor_sheet",
+      "name": "Routine Editor Sheet",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/RoutineEditorSheet.kt",
+      "screenshots": [
+        "docs/audit/screenshots/04_tools_integrations/05_routine_editor_sheet.png"
+      ],
+      "status": "UI verified on physical device (Routine creation untested)",
+      "elements": [
+        "Cancel",
+        "Save",
+        "Routine name",
+        "Agent picker (Olive)",
+        "Instructions prompt",
+        "Execution location (This computer / Cloud VM)",
+        "Schedule picker (One time)"
+      ]
+    },
+    {
+      "id": "mcp_servers_section",
+      "name": "Developer MCP Servers Section",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/ui/McpSection.kt",
+      "screenshots": [
+        "docs/audit/screenshots/03_settings_providers/04_settings_dev_section.png",
+        "docs/audit/screenshots/04_tools_integrations/02_mcp_test_computer.png",
+        "docs/audit/screenshots/04_tools_integrations/03_mcp_test_browser.png"
+      ],
+      "status": "Server reachability & tool enumeration verified on physical device (Individual tool execution untested)",
+      "elements": [
+        "android_computer card (tested: reachable, 29 tool(s))",
+        "android_browser card (tested: reachable, 15 tool(s))",
+        "Test button with live tool count results",
+        "Edit and Remove buttons",
+        "Add MCP server",
+        "Paste config block"
+      ]
+    },
+    {
+      "id": "notification_shade",
+      "name": "Android Notification Shade",
+      "file": "android/app/src/main/kotlin/com/openmausbot/companion/host/HarnessService.kt",
+      "screenshots": [
+        "docs/audit/screenshots/04_tools_integrations/06_notification_shade.png"
+      ],
+      "status": "Verified working on device",
+      "elements": [
+        "Ongoing foreground service notification",
+        "Title: MOBOT local host",
+        "Body: MOBOT local host running (port 18799)",
+        "Flags: ONGOING_EVENT | NO_CLEAR | FOREGROUND_SERVICE | SILENT"
+      ]
+    }
+  ],
+  "miscapturedOrMiscellaneousEvidence": [
+    {
+      "filePath": "docs/audit/screenshots/01_roster_navigation/06_new_group_sheet.png",
+      "category": "Miscaptured UI state",
+      "intendedScreen": "New Group Bottom Sheet (NewGroupSheet.kt)",
+      "actualContent": "Olive Chat transcript showing Freebuff failure history",
+      "disposition": "Excluded from active screen inventory; genuine New Group sheet captured in 09_new_group_sheet.png"
+    },
+    {
+      "filePath": "docs/audit/screenshots/02_chat_conversations/05_chat_vega.png",
+      "category": "Duplicate capture & Misclassified screen",
+      "intendedScreen": "Vega Chat Conversation (ChatScreen.kt)",
+      "actualContent": "What Vega does (BotOverviewScreen.kt)",
+      "disposition": "Excluded from active chat screen inventory (byte-for-byte identical to 05_bot_details_memory/04_bot_overview_screen.png); genuine Vega chat conversation captured in 06_chat_vega_real.png"
+    },
+    {
+      "filePath": "docs/audit/screenshots/04_tools_integrations/01_computer_screen.png",
+      "category": "Near-duplicate capture",
+      "intendedScreen": "Computer Screen Idle Fallback (ComputerScreen.kt)",
+      "actualContent": "Computer screen idle fallback with sub-minute clock variation in notification bar",
+      "disposition": "Excluded from active computer screen inventory to avoid duplicate counting; primary capture is 04_tools_integrations/01_computer_screen_empty.png"
+    }
+  ]
+}

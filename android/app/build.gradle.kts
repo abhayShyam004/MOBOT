@@ -102,6 +102,21 @@ android {
         versionName = appVersionName
     }
 
+    // The embedded host runtime (~90 MB per ABI of native binaries) makes the
+    // universal APK enormous, and the phones this build targets are often
+    // sideloaded over USB. Per-ABI splits keep each install to exactly the
+    // runtime its device can execute; universalApk keeps a one-file artifact
+    // for CI. The Phase 2 ABI matrix (armeabi-v7a REQUIRED — the target device
+    // runs 32-bit userspace) is covered by both artifact kinds.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("armeabi-v7a", "arm64-v8a", "x86_64")
+            isUniversalApk = true
+        }
+    }
+
     signingConfigs {
         // Created only when the material above resolved. Absent otherwise, which
         // is what leaves `release` unsigned.
@@ -182,6 +197,16 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+        // The embedded host runtime (libnode_host.so + its patched Termux
+        // libraries) must exist as real files in nativeLibraryDir: node is
+        // exec'd as a child process, not dlopen'd by this app. AGP's modern
+        // default is extractNativeLibs=false (libs stay mmap'd inside the
+        // APK, nativeLibraryDir ends up without them), which leaves the host
+        // with no runtime to launch. Legacy packaging restores the extracted
+        // layout the host depends on.
+        jniLibs {
+            useLegacyPackaging = true
+        }
     }
 
     testOptions {
@@ -226,6 +251,19 @@ dependencies {
     implementation("androidx.core:core-ktx:1.17.0")
     // Share inbound: apply EXIF orientation while downsampling shared photos.
     implementation("androidx.exifinterface:exifinterface:1.3.7")
+
+    // Phase 7 (Browser): per-profile WebView isolation. ProfileStore gives
+    // each bot session its own CookieManager, localStorage and IndexedDB —
+    // the mechanism the whole per-bot isolation story rests on. ~60 KB,
+    // no transitive weight beyond androidx.core/annotation.
+    implementation("androidx.webkit:webkit:1.14.0")
+
+    // NanoHTTPD: the browser driver's loopback HTTP server (token-checked,
+    // ephemeral port). 2.3.1 is the final upstream release; ~70 KB, zero
+    // transitive dependencies. Chosen over hand-rolling a ServerSocket loop
+    // because URL routing, chunked bodies and connection lifecycle are
+    // exactly where a hand-rolled server leaks.
+    implementation("org.nanohttpd:nanohttpd:2.3.1")
 
     // Chrome Custom Tabs, for the cloud desktop's noVNC viewer — the Android
     // counterpart of the SFSafariViewController iOS uses. A hardened browser

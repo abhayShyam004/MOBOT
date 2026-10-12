@@ -270,9 +270,21 @@ describe("workspace", () => {
     }
     expect(updateMemory(BOT, { action: "append", text: " " })).toMatchObject({ ok: false, code: "invalid" });
     expect(updateMemory(BOT, { action: "replace", oldText: "", text: "replacement" })).toMatchObject({ ok: false, code: "invalid" });
-    expect(updateMemory(BOT, { action: "remove", oldText: "repeated", text: "unexpected" })).toMatchObject({ ok: false, code: "invalid" });
     expect(updateMemory(BOT, { action: "append", text: "é".repeat(MEMORY_MAX_BYTES) })).toMatchObject({ ok: false, code: "over-budget" });
     expect(readMemoryFile(BOT).text).toBe("repeated repeated");
+  });
+
+  it("ignores a field the action does not use instead of losing the fact", () => {
+    const now = new Date(2026, 8, 10, 12);
+    // The real failure: an agent CLI fills in every property of the tool
+    // schema, so an append arrives with a junk old_text. The action decides
+    // the operation and the write must still land.
+    expect(updateMemory(BOT, { action: "append", text: "The user is called bro.", oldText: "x" }, { source: 'chat "Setup"', now })).toMatchObject({
+      ok: true, entry: '- 2026-09-10 · from chat "Setup" · The user is called bro.',
+    });
+    // and the same noise in the other direction: a remove carrying text still removes
+    expect(updateMemory(BOT, { action: "remove", oldText: "called bro", text: "unexpected" })).toMatchObject({ ok: true });
+    expect(readMemoryFile(BOT).text).not.toContain("called bro");
   });
 
   it("refuses a write that would leave the file over the load budget, with the counts and the newest entries", () => {
@@ -489,6 +501,8 @@ describe("workspace", () => {
   it("routes facts, procedures and short-lived notes to the right place, in both write modes", () => {
     for (const prompt of [memorySystemPrompt(BOT), memorySystemPrompt(BOT, { managedWrites: true })]) {
       expect(prompt).toContain("MEMORY.md is for facts that hold in every session");
+      expect(prompt).toContain("Save a durable fact in the same turn you learn it, without being asked");
+      expect(prompt).toContain("most turns hold nothing worth keeping, and a short, curated file beats a complete one");
       expect(prompt).toContain("Write each one as a plain statement of fact, never as an instruction to yourself — an imperative is read back as a directive next session.");
       expect(prompt).toContain("A procedure for one kind of task belongs in a memory/<topic>.md file or a skill, not here.");
       expect(prompt).toContain("Anything that will be stale within a week belongs in the conversation, not in memory.");

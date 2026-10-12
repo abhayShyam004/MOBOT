@@ -45,7 +45,7 @@ class PairingDiscoveryTimingTest {
     val compose = createComposeRule()
 
     private val otherWays = "Other ways to connect"
-    private val discoveryHeader = "On this network".uppercase()
+    private val discoveryHeader = "On this network"
 
     /** API 37 in the permission model, so the local-network grant is in scope. */
     private fun scene(

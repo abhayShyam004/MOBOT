@@ -103,7 +103,7 @@ describe("turn image admission", () => {
     );
   });
 
-  it("does not admit a symlink carrying an attachment-shaped name", () => {
+  it("does not admit a symlink carrying an attachment-shaped name that points outside the store", () => {
     const root = store();
     const outside = store("-target");
     const target = image(outside, 0);
@@ -112,5 +112,22 @@ describe("turn image admission", () => {
     const source = `<attached-image path="${link}" />`;
 
     expect(extractTurnImages(source, { attachmentsDir: root })).toEqual({ text: source, images: [] });
+  });
+
+  it("admits the store's payload publication: a name symlink to a payload sidecar inside the store", () => {
+    // attachments.ts commits an upload as a real payload file plus a name
+    // symlink pointing at it; the admission boundary is the store directory,
+    // not the kind of directory entry the bytes hide behind.
+    const root = store();
+    const payload = `${IDS[2]}.jpg.payload-28429-ff0nk0c775`;
+    writeFileSync(join(root, payload), Buffer.alloc(64, 7));
+    symlinkSync(payload, join(root, `${IDS[2]}.jpg`));
+    const source = `<attached-image path="${join(root, `${IDS[2]}.jpg`)}" name="Photo.jpg" />`;
+
+    const out = extractTurnImages(source, { attachmentsDir: root });
+    expect(out.images).toHaveLength(1);
+    expect(out.images[0]).toMatchObject({ mime: "image/jpeg", bytes: 64 });
+    expect(out.images[0]!.path.endsWith(payload)).toBe(true);
+    expect(out.text).not.toContain("<attached-image");
   });
 });
