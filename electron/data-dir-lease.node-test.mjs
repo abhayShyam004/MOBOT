@@ -571,9 +571,9 @@ test("boot identity does not weaken exclusion: only one of many live racers wins
   assert.equal(after.release(), true);
 });
 
-test("a live but unrelated Windows pid reused within the same boot is treated as stale", async (t) => {
-  if (process.platform !== "win32") return t.skip("Windows-only: wmic process-identity check");
-  if (!wmicAvailable()) return t.skip("wmic is not available; the Windows process-identity check cannot be exercised");
+test("a live but unrelated pid reused within the same boot is treated as stale", async (t) => {
+  if (process.platform !== "win32" && process.platform !== "linux") return t.skip("platform without same-boot PID reuse check");
+  if (process.platform === "win32" && !wmicAvailable()) return t.skip("wmic is not available; the Windows process-identity check cannot be exercised");
   const { dataDir } = temporaryDirectory();
   const sibling = spawn(process.execPath, ["--eval", "setInterval(()=>{}, 1_000);"], { stdio: "ignore" });
   const siblingPid = sibling.pid;

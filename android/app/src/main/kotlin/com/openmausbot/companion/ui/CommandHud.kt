@@ -1,8 +1,10 @@
 package com.openmausbot.companion.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -182,12 +184,13 @@ fun PredictiveChipsRow(
         chips.forEach { chip ->
             Row(
                 modifier = Modifier
-                    .height(MIN_TOUCH_TARGET)
-                    .clip(AppRadii.pill)
+                    .height(34.dp)
+                    .clip(CircleShape)
                     .background(AppTheme.colors.surfaceRaised)
+                    .border(1.dp, AppTheme.colors.subtleBorder, CircleShape)
                     .clickable(role = Role.Button) { onSelect(chip) }
-                    .padding(horizontal = AppSpacing.lg),
-                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                    .padding(horizontal = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 chip.icon?.let { icon ->

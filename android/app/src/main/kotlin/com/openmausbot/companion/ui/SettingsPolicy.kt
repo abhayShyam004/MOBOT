@@ -35,6 +35,7 @@ object SettingsPolicy {
 
     fun statusText(status: Session.Status): String = when (status) {
         Session.Status.Live -> "Connected"
+        is Session.Status.Starting -> status.message
         Session.Status.Connecting -> "Connecting…"
         Session.Status.Unpaired -> "Not paired"
         Session.Status.Unauthorized -> "Unpaired on the computer"

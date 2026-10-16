@@ -148,6 +148,7 @@ import {
 import { ComputerControl } from "./computer-control.ts";
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { CapabilitiesManager } from "./capabilities/capabilities-manager.ts";
+import { defaultTaskEngine } from "./computer-agent/durable-task-engine.ts";
 import { DeviceFileManager } from "./capabilities/device-files.ts";
 import { SmartRecapService, DailyBriefingService, CompletionCardGenerator } from "./capabilities/delight-services.ts";
 import { UniversalSearchService, QuickCaptureService, SmartLinkService, SystemServicesBridge } from "./capabilities/system-services.ts";
@@ -356,11 +357,25 @@ import {
   ANDROID_RESOURCES_PROMPT,
   APP_BUILDER_SYSTEM_PROMPT,
   MOBOT_IDENTITY_PROMPT,
+  GENERAL_AGENT_RELIABILITY_PROMPT,
   type ComputerPromptKind,
 } from "./system-prompt.ts";
 import { getProjectManager, getRepairLoop, getDeploymentManager } from "./app-builder/app-builder-tools.ts";
 import { defaultCapabilityRegistry } from "./capabilities/capability-registry.ts";
+import { artifactsFromToolOutput, defaultArtifactManager, isUserFacingArtifact } from "./computer-agent/artifact-manager.ts";
 import { readCuaConnection, gatedLocalComputer } from "./local-computer.ts";
+
+export function cleanUserFacingText(text: string): string {
+  if (!text) return text;
+  let cleaned = text;
+  cleaned = cleaned.replace(/\[(?:image|file)\s+attached\]/gi, "");
+  cleaned = cleaned.replace(/\[image:\s*[^\]]+\]/gi, "");
+  cleaned = cleaned.replace(/\[(?:download\s+the\s+[^\]]+|download\s+[^\]]+)\]\((?:attachment:[^\)]+|\/api\/attachments\/[^\)]+)\)/gi, "");
+  cleaned = cleaned.replace(/!\[[^\]]*\]\(attachment:[a-f0-9-]+\.[a-z0-9]+\)/gi, "");
+  cleaned = cleaned.replace(/\s*\*\([^\)]*peeking at the filename[^\)]*\)\*\s*/gi, "\n");    cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+  return cleaned;
+}
+
 import {
   discoverExistingPerBotLocalVms,
   localVmInventoryEntry,
@@ -1143,10 +1158,77 @@ function generatedImageTurnKey(threadId: string, turnId?: string): string {
   return `${threadId}:${turnId ?? "active"}`;
 }
 
+/** Registered artifacts a turn has produced but not yet spoken around. Held so
+ *  a turn that ends with no epilogue still delivers them; released by the
+ *  turn that binds them. */
+const registeredArtifactsByTurn = new Map<
+  string,
+  Array<NonNullable<Message["attachments"]>[number]>
+>();
+
+/**
+ * Bind artifacts to the words they were produced around. An artifact belongs
+ * on the bot's most recent message of its own turn — the one the person was
+ * watching when it appeared — and is held for the turn's last words only while
+ * the bot has not spoken yet. Deferring every artifact to the end of the turn
+ * is what turned TEXT → IMAGE → TEXT into TEXT → TEXT → IMAGE.
+ */
+function attachArtifactsToTurn(
+  threadId: string,
+  turnId: string | undefined,
+  attachments: Array<NonNullable<Message["attachments"]>[number]>,
+): void {
+  if (!attachments.length) return;
+  const key = generatedImageTurnKey(threadId, turnId);
+  const target = [...store.messagesFor(threadId)].reverse().find(
+    (message) =>
+      message.role === "bot" &&
+      message.kind === "text" &&
+      (turnId ? message.turnId === turnId : true),
+  );
+  if (!target) {
+    const held = registeredArtifactsByTurn.get(key) ?? [];
+    for (const attachment of attachments) {
+      if (!held.some((existing) => existing.path === attachment.path)) held.push(attachment);
+    }
+    registeredArtifactsByTurn.set(key, held);
+    return;
+  }
+  const existing = target.attachments ?? [];
+  const merged = [...existing];
+  for (const attachment of attachments) {
+    if (merged.some((entry) => entry.path === attachment.path || entry.name === attachment.name)) continue;
+    merged.push(attachment);
+  }
+  if (merged.length !== existing.length) store.patchMessage(threadId, target.id, { attachments: merged });
+}
+
+/** Attachments already carried anywhere in one turn, so the same file can
+ *  never be published twice by two different routes of the same turn. */
+function turnAttachmentKeys(threadId: string, turnId: string | undefined): { paths: Set<string>; names: Set<string> } {
+  const paths = new Set<string>();
+  const names = new Set<string>();
+  for (const message of store.messagesFor(threadId)) {
+    if (turnId && message.turnId !== turnId) continue;
+    for (const attachment of message.attachments ?? []) {
+      paths.add(attachment.path);
+      if (attachment.name) names.add(attachment.name.toLowerCase());
+    }
+  }
+  return { paths, names };
+}
+
 function purgeGeneratedImagesForThread(threadId: string): void {
   for (const [key, attachments] of generatedImagesByTurn) {
     if (!key.startsWith(`${threadId}:`)) continue;
     generatedImagesByTurn.delete(key);
+    for (const attachment of attachments) {
+      deleteAttachment(attachment.path);
+    }
+  }
+  for (const [key, attachments] of registeredArtifactsByTurn) {
+    if (!key.startsWith(`${threadId}:`)) continue;
+    registeredArtifactsByTurn.delete(key);
     for (const attachment of attachments) {
       deleteAttachment(attachment.path);
     }
@@ -1169,6 +1251,13 @@ function retireProviderTurn(turnId: string): void {
   for (const [key, attachments] of generatedImagesByTurn) {
     if (!key.endsWith(`:${turnId}`)) continue;
     generatedImagesByTurn.delete(key);
+    for (const attachment of attachments) {
+      deleteAttachment(attachment.path);
+    }
+  }
+  for (const [key, attachments] of registeredArtifactsByTurn) {
+    if (!key.endsWith(`:${turnId}`)) continue;
+    registeredArtifactsByTurn.delete(key);
     for (const attachment of attachments) {
       deleteAttachment(attachment.path);
     }
@@ -1766,6 +1855,7 @@ function previewSystemPrompt(bot: BotRecord) {
   });
   const privateWorkspace = instance && supportsWorkspaceFiles(instance.driverKind);
   const built = buildSystemPrompt(persona, bot.soul ?? "", [
+    { id: "reliability", label: "Reliability & Verification", text: GENERAL_AGENT_RELIABILITY_PROMPT },
     {
       id: "setup",
       label: "Setup",
@@ -3683,24 +3773,78 @@ bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
   if (event.type !== "turn.completed" || !event.turnId) return;
   try {
-    // A room turn has no bot thread behind it; the speaker recorded for the
-    // room is the member that just worked. Only the shared-workspace root
-    // depends on knowing the bot — the sandbox root below does not.
     const speakerBotId = groupSpeakers.get(event.threadId)?.botId;
     const bot = store.botByThread(event.threadId) ?? (speakerBotId ? store.bot(speakerBotId) : undefined);
-    // Two places a download can land. The Android harness spawns
-    // android_computer with ONE sandbox root (AC_WORKSPACE), so every bot's
-    // resource_download writes <root>/downloads — a directory this publisher
-    // never read, which is why no fetched picture ever reached the chat on
-    // the phone. Desktop bots download into their own shared workspace.
-    // Publish from both; the set below keeps a file to one attachment.
+
+    const published: Array<{ kind: string; path: string; mime?: string; name?: string }> = [];
+    const seenPaths = new Set<string>();
+    const seenNames = new Set<string>();
+
+    const response = [...store.messagesFor(event.threadId)].reverse().find(
+      (message) => message.role === "bot" && message.kind === "text" && message.turnId === event.turnId,
+    );
+
+    // Everything this turn already delivered — wherever it was bound — so a
+    // file another route published first is never published a second time.
+    const turnAttached = turnAttachmentKeys(event.threadId, event.turnId);
+    for (const path of turnAttached.paths) seenPaths.add(path);
+    for (const name of turnAttached.names) seenNames.add(name);
+    if (response?.attachments) {
+      for (const existing of response.attachments) {
+        if (existing.path) seenPaths.add(existing.path);
+        if (existing.name) seenNames.add(existing.name.toLowerCase());
+      }
+    }
+
+    // 1. Gather explicitly registered artifacts for this turn that are user-facing
+    const turnArtifacts = defaultArtifactManager.getArtifactsForTurn(event.turnId);
+    for (const art of turnArtifacts) {
+      if (!isUserFacingArtifact(art)) continue;
+      const lowerName = art.name.toLowerCase();
+      if (!seenPaths.has(art.urlPath) && !seenNames.has(lowerName)) {
+        seenPaths.add(art.urlPath);
+        seenNames.add(lowerName);
+        published.push({
+          kind: art.kind,
+          path: art.urlPath,
+          mime: art.mime,
+          name: art.name,
+        });
+      }
+    }
+
+    // 2. Scan workspace folders for newly created artifacts during this turn
+    const workspaceRoots = [
+      ...(process.env.AC_WORKSPACE ? [process.env.AC_WORKSPACE] : []),
+      ...(bot ? [workspaceDir(bot.id)] : []),
+    ];
+    if (workspaceRoots.length > 0) {
+      const scanned = defaultArtifactManager.scanAndRegisterWorkspaceArtifacts(workspaceRoots, {
+        turnId: event.turnId,
+        threadId: event.threadId,
+      });
+      for (const art of scanned) {
+        if (!isUserFacingArtifact(art)) continue;
+        const lowerName = art.name.toLowerCase();
+        if (!seenPaths.has(art.urlPath) && !seenNames.has(lowerName)) {
+          seenPaths.add(art.urlPath);
+          seenNames.add(lowerName);
+          published.push({
+            kind: art.kind,
+            path: art.urlPath,
+            mime: art.mime,
+            name: art.name,
+          });
+        }
+      }
+    }
+
+    // 3. Fallback: downloads directory legacy scan for images
     const roots = [
       ...(process.env.AC_WORKSPACE ? [join(process.env.AC_WORKSPACE, "downloads")] : []),
       ...(bot ? [join(workspaceDir(bot.id), "downloads")] : []),
     ];
-    if (!roots.length) return;
     const cutoff = Date.now() - WORKSPACE_MEDIA_WINDOW_MS;
-    const published: Array<{ kind: "image"; path: string; mime: string }> = [];
     for (const dir of roots) {
       let names: string[];
       try {
@@ -3710,6 +3854,9 @@ bus.subscribe((event: RuntimeEvent) => {
       }
       for (const name of names) {
         if (published.length >= WORKSPACE_MEDIA_MAX) break;
+        const lowerName = name.toLowerCase();
+        if (seenNames.has(lowerName)) continue;
+
         const mime = WORKSPACE_IMAGE_MIME[extname(name).toLowerCase()];
         if (!mime) continue;
         const absolute = join(dir, name);
@@ -3724,22 +3871,32 @@ bus.subscribe((event: RuntimeEvent) => {
         if (!info.isFile() || info.mtimeMs < cutoff || info.size > IMAGE_MAX_BYTES) continue;
         try {
           const saved = saveImage(readFileSync(absolute), mime);
-          published.push({ kind: "image", path: `/api/attachments/${basename(saved.path)}`, mime: saved.mime });
+          const path = `/api/attachments/${basename(saved.path)}`;
+          if (!seenPaths.has(path) && !seenNames.has(lowerName)) {
+            seenPaths.add(path);
+            seenNames.add(lowerName);
+            published.push({ kind: "image", path, mime: saved.mime, name });
+          }
         } catch {
           // one unreadable image never fails a turn
         }
       }
       if (published.length >= WORKSPACE_MEDIA_MAX) break;
     }
-    if (!published.length) return;
-    const response = [...store.messagesFor(event.threadId)].reverse().find(
-      (message) => message.role === "bot" && message.kind === "text" && message.turnId === event.turnId,
-    );
+
     if (response) {
+      const cleaned = cleanUserFacingText(response.text ?? "");
+      const merged = [...(response.attachments ?? [])];
+      for (const p of published) {
+        if (!merged.some((m) => m.path === p.path || (m.name && p.name && m.name.toLowerCase() === p.name.toLowerCase()))) {
+          merged.push(p);
+        }
+      }
       store.patchMessage(event.threadId, response.id, {
-        attachments: [...(response.attachments ?? []), ...published],
+        ...(cleaned !== (response.text ?? "") ? { text: cleaned } : {}),
+        attachments: merged,
       });
-    } else {
+    } else if (published.length) {
       store.appendMessage(event.threadId, {
         role: "bot",
         kind: "text",
@@ -4491,7 +4648,7 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     case "item.completed":
       if (event.itemType === "assistant_text") {
-        const text = event.text;
+        const text = cleanUserFacingText(event.text);
         // A provider's own client reporting an API error as a reply is a
         // failure notice, not the model's words: it becomes the same card a
         // failed turn gets, and the report itself stays in the log. Left as
@@ -4521,8 +4678,12 @@ bus.subscribe((event: RuntimeEvent) => {
           const saved = saveImage(decoded.bytes, decoded.mime);
           const key = generatedImageTurnKey(event.threadId, event.turnId);
           const current = generatedImagesByTurn.get(key) ?? [];
-          current.push({ kind: "image", path: saved.path, mime: saved.mime });
+          const attachment = { kind: "image", path: saved.path, mime: saved.mime };
+          current.push(attachment);
           generatedImagesByTurn.set(key, current);
+          // Same contract as a registered artifact: an image the provider drew
+          // mid-sentence belongs where it was drawn, not after a later reply.
+          attachArtifactsToTurn(event.threadId, event.turnId, [attachment]);
         } catch (error) {
           pushMessage({
             role: "bot",
@@ -4547,6 +4708,11 @@ bus.subscribe((event: RuntimeEvent) => {
           });
           toolMessageByItem.delete(itemKey);
         }
+        // A tool that registered user-facing files just produced the artifact
+        // the person is waiting for: publish it here, around the bot's words,
+        // instead of at the end of a turn it may not even reach.
+        const registered = artifactsFromToolOutput(event.output);
+        if (registered.length) attachArtifactsToTurn(event.threadId, event.turnId, registered);
         // the bot just acted ON ITS SCREEN — refresh the preview now. Only
         // computer tools can change the screen, and each capture competes
         // with the agent for the box's command endpoint, so a bot grinding
@@ -4850,8 +5016,12 @@ bus.subscribe((event: RuntimeEvent) => {
         });
       }
       const generatedKey = generatedImageTurnKey(event.threadId, event.turnId);
-      const generated = generatedImagesByTurn.get(generatedKey) ?? [];
+      const generated = [
+        ...(generatedImagesByTurn.get(generatedKey) ?? []),
+        ...(registeredArtifactsByTurn.get(generatedKey) ?? []),
+      ];
       generatedImagesByTurn.delete(generatedKey);
+      registeredArtifactsByTurn.delete(generatedKey);
       if (generated.length) {
         const response = [...store.messagesFor(event.threadId)].reverse().find(
           (message) =>
@@ -4859,18 +5029,31 @@ bus.subscribe((event: RuntimeEvent) => {
             message.kind === "text" &&
             message.turnId === completedTurnId,
         );
+        // An artifact already bound to an earlier message of this same turn
+        // (bound where it was produced) is delivered; never add it twice.
+        const attached = turnAttachmentKeys(event.threadId, completedTurnId ?? event.turnId);
+        const toAdd = generated.filter(
+          (g) =>
+            !attached.paths.has(g.path) &&
+            !(g.name && attached.names.has(g.name.toLowerCase())),
+        );
         if (response) {
-          store.patchMessage(event.threadId, response.id, {
-            attachments: [...(response.attachments ?? []), ...generated],
-          });
-        } else {
-          // Some image turns have no textual epilogue. Keep the image as the
-          // terminal assistant response instead of inventing model words.
+          const cleaned = cleanUserFacingText(response.text ?? "");
+          const existing = response.attachments ?? [];
+          if (toAdd.length || cleaned !== (response.text ?? "")) {
+            store.patchMessage(event.threadId, response.id, {
+              ...(cleaned !== (response.text ?? "") ? { text: cleaned } : {}),
+              attachments: [...existing, ...toAdd],
+            });
+          }
+        } else if (toAdd.length) {
+          // Some artifact turns have no textual epilogue. Keep the artifact as
+          // the terminal assistant response instead of inventing model words.
           pushMessage({
             role: "bot",
             kind: "text",
             text: "",
-            attachments: generated,
+            attachments: toAdd,
             turnId: completedTurnId,
           });
         }
@@ -7008,6 +7191,7 @@ async function startTurn(
         throw new DirectTurnSetupCancelled("Coordination access changed before dispatch");
       }
       const prompt = buildSystemPrompt(persona, liveBot?.soul ?? bot.soul ?? "", [
+        { id: "reliability", label: "Reliability & Verification", text: GENERAL_AGENT_RELIABILITY_PROMPT },
         // first after the soul: the block names agent tools, so it only goes
         // to a turn whose engine actually mounted them (setupMode is already
         // false when they are not — see agentsMounted above)
@@ -8710,6 +8894,7 @@ async function runGroupMemberTurn(
     }
   }
   const roomSystem = buildSystemPrompt(system, store.bot(bot.id)?.soul ?? bot.soul ?? "", [
+    { id: "reliability", label: "Reliability & Verification", text: GENERAL_AGENT_RELIABILITY_PROMPT },
     { id: "files", label: "File locations", text: workspace ? workspaceLocationsPrompt(bot.id, cwd, readyBot.cwd) : "" },
     { id: "mcp", label: "MCP servers", text: customMcpPrompt(Object.keys(integrations.custom ?? {})) },
     { id: "computer", label: "Computer", text: computerPrompt(roomTeamComputer ? instance.driverKind === "boxAgent" ? "box-agent" : "box" : roomVmTarget ? localVmMode(cfg) === "per-bot" ? "vm-private" : "vm-shared" : null) },
@@ -13998,6 +14183,59 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 200, cardResult);
     }
 
+    // ── Phase 3: Long-Running Autonomous Tasks REST API ────
+    if (method === "GET" && path === "/api/tasks") {
+      const tasks = defaultTaskEngine.listTasks();
+      return json(res, 200, { ok: true, tasks });
+    }
+
+    m = path.match(/^\/api\/tasks\/([\w-]+)$/);
+    if (m && method === "GET") {
+      const taskId = m[1];
+      const task = defaultTaskEngine.getTask(taskId);
+      if (!task) return json(res, 404, { error: `Task '${taskId}' not found` });
+      return json(res, 200, { ok: true, task });
+    }
+
+    m = path.match(/^\/api\/tasks\/([\w-]+)\/cancel$/);
+    if (m && method === "POST") {
+      const taskId = m[1];
+      const body = (await readBody(req)) || {};
+      const reason = typeof body.reason === "string" ? body.reason : "Cancelled via API";
+      try {
+        const task = await defaultTaskEngine.cancelTask(taskId, reason);
+        return json(res, 200, { ok: true, task });
+      } catch (err: any) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+
+    m = path.match(/^\/api\/tasks\/([\w-]+)\/approve$/);
+    if (m && method === "POST") {
+      const taskId = m[1];
+      const body = (await readBody(req)) || {};
+      const approvalId = String(body.approvalId || "");
+      const approved = Boolean(body.approved);
+      const reason = typeof body.reason === "string" ? body.reason : undefined;
+      try {
+        const task = defaultTaskEngine.decideApproval(taskId, approvalId, approved, reason);
+        return json(res, 200, { ok: true, task });
+      } catch (err: any) {
+        return json(res, 400, { error: err.message });
+      }
+    }
+
+    m = path.match(/^\/api\/tasks\/([\w-]+)\/resume$/);
+    if (m && method === "POST") {
+      const taskId = m[1];
+      try {
+        const task = defaultTaskEngine.resumeTask(taskId);
+        return json(res, 200, { ok: true, task });
+      } catch (err: any) {
+        return json(res, 404, { error: err.message });
+      }
+    }
+
     // ── Phase VI: System Services & Integrations (Universal Search, Quick Capture, Smart Links, Bridge) ────
     if (method === "GET" && path === "/api/system/search") {
       const q = url.searchParams.get("q") || "";
@@ -14204,14 +14442,21 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (streamsMessageImage && (!rawReference || !/^\d+$/.test(rawReference))) {
         return json(res, 400, { error: "ref must identify a rendered image" });
       }
-      const href = method === "POST"
+      let href = method === "POST"
         ? (typeof body.path === "string" ? body.path : "")
         : messageImageTargetAt(message.text, Number(rawReference));
       if (!href) return json(res, 400, { error: "path is required" });
 
       let roots: string[];
       let downloadName: string | undefined;
-      if (message.role === "user") {
+      const matchingAttachment = message.attachments?.find((a) => a.path === href || a.name === href);
+      if (matchingAttachment) {
+        downloadName = matchingAttachment.name;
+        roots = [ATTACHMENTS_DIR];
+        if (href.startsWith("/api/attachments/")) {
+          href = href.slice("/api/attachments/".length);
+        }
+      } else if (message.role === "user") {
         downloadName = messageAttachmentName(message.text, href) ?? undefined;
         if (!downloadName) {
           return json(res, 403, { error: "that message does not share this file" });
@@ -19031,6 +19276,21 @@ server.listen(PORT, "127.0.0.1", () => {
   // leftovers, and a sweep ahead of it would wake delegators of stopped
   // routine runs whose handoffs the loop above discards instead.
   setInterval(expireDelegationsNow, DELEGATION_SWEEP_MS).unref();
+
+  // Phase 3: Durable Task Engine startup reconciliation & supervisor
+  defaultTaskEngine.setNotificationSink((n) => {
+    const bot = store.bot(n.botId);
+    notify({
+      kind: n.kind,
+      botId: n.botId,
+      botName: bot?.name || "MOBOT",
+      threadId: n.threadId,
+      title: n.title,
+      body: n.body,
+    });
+  });
+  defaultTaskEngine.reconcileTasksOnStartup().catch(() => {});
+  defaultTaskEngine.startSupervisor(2000);
 });
 
 // A second listener for `openmausbot serve --tunnel` (server/tunnel.ts): the

@@ -26,17 +26,6 @@ import com.openmausbot.companion.core.AvatarCrop
 import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.Chat
 
-/**
- * An agent's identity image, or its mascot — the port of
- * `ios/App/BotAvatarView.swift`.
- *
- * The image is an app-owned attachment on the paired computer, fetched with this
- * phone's bearer token, so it never goes through a URL-loading composable that
- * could not attach one. Every way that can fail — no URL, the mascot crop, a
- * fetch that did not answer, bytes that would not decode — lands on the same
- * deterministic mascot, because an agent's identity must never become an empty
- * placeholder.
- */
 @Composable
 internal fun BotAvatar(
     bot: Bot,

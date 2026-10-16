@@ -75,9 +75,11 @@ class Session(
     },
     /** Test seam for the handoff between a completed transfer and its caller. */
     private val afterAttachmentDownload: suspend () -> Unit = {},
+    private val localHostReadyProvider: (suspend () -> Boolean)? = null,
 ) {
     sealed interface Status {
         data object Unpaired : Status
+        data class Starting(val message: String = "Starting MOBOT…") : Status
         data object Connecting : Status
         data object Live : Status
         data object Unauthorized : Status
@@ -768,7 +770,11 @@ class Session(
         val first = rotation.currentEndpoint?.let(saved::dialing) ?: saved
         client = clientFactory(first, storedToken)
         _restoreState.value = RestoreState.Ready
-        _status.value = Status.Connecting
+        _status.value = if (isLocalHostConnection(saved) && localHostReadyProvider != null) {
+            Status.Starting()
+        } else {
+            Status.Connecting
+        }
     }
 
     /** Update only the active record; never overwrite the other saved computers. */
@@ -878,8 +884,30 @@ class Session(
         endpointRefreshJob = null
     }
 
+    private fun isLocalHostConnection(conn: Connection?): Boolean {
+        if (conn == null) return false
+        val host = conn.baseUrl?.host ?: conn.host
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
+    }
+
+    private suspend fun readyClient(): CompanionClient? {
+        if (isLocalHostConnection(_connection.value) && localHostReadyProvider != null) {
+            val ready = localHostReadyProvider.invoke()
+            if (!ready) return null
+        }
+        return client
+    }
+
     private suspend fun runStream() {
         while (currentCoroutineContext().isActive) {
+            if (isLocalHostConnection(_connection.value) && localHostReadyProvider != null) {
+                _status.value = Status.Starting()
+                val ready = localHostReadyProvider.invoke()
+                if (!ready) {
+                    _status.value = Status.Offline("Local engine failed to start.")
+                    return
+                }
+            }
             val activeClient = client ?: return
             _status.value = Status.Connecting
             try {
@@ -1207,7 +1235,7 @@ class Session(
      * screen still waiting — which is what is actually true.
      */
     suspend fun cancelQueued(send: QueuedSend, chat: Chat) {
-        val activeClient = client ?: return
+        val activeClient = readyClient() ?: return
         val destination = when (chat) {
             is Chat.BotChat -> MessageDestination.Bot(chat.bot.id, chat.threadId)
             is Chat.RoomChat -> MessageDestination.Room(chat.room.id, chat.threadId)
@@ -1244,7 +1272,7 @@ class Session(
      * this returns true.
      */
     suspend fun send(text: String, attachments: List<PendingMessageAttachment>, to: Chat): Boolean {
-        val activeClient = client ?: run {
+        val activeClient = readyClient() ?: run {
             _actionError.value = "This computer is offline."
             return false
         }
@@ -2921,7 +2949,7 @@ class Session(
     }
 
     private suspend fun perform(quietly: Boolean = false, body: suspend (CompanionClient) -> Unit) {
-        val activeClient = client ?: return
+        val activeClient = readyClient() ?: return
         val connectionId = _connection.value?.id
         try {
             body(activeClient)

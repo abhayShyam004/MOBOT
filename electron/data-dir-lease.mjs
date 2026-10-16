@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { hostname, uptime } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -51,7 +51,7 @@ let cachedBootSession;
 
 function readBootSession() {
   try {
-    if (process.platform === "linux") {
+    if (process.platform === "linux" || process.platform === "android") {
       return normalizeBootId(readFileSync("/proc/sys/kernel/random/boot_id", "utf8"));
     }
     if (process.platform === "darwin") {
@@ -169,8 +169,9 @@ function processIsAlive(pid) {
     return true;
   } catch (error) {
     if (error?.code === "ESRCH") return false;
-    // EPERM means the pid exists but this account cannot signal it.
-    if (error?.code === "EPERM") return true;
+    // EPERM or EACCES means the pid exists but this account cannot signal it
+    // (e.g. process belonging to root, another user, or another Android app under SELinux).
+    if (error?.code === "EPERM" || error?.code === "EACCES") return true;
     throw leaseError("OpenMausBot could not verify the data-directory lease owner; refusing to start.", error);
   }
 }
@@ -218,18 +219,70 @@ function processCreationTimeMs(pid) {
   return null;
 }
 
+function isServerProcessCmdline(cmdline) {
+  if (typeof cmdline !== "string" || cmdline.length === 0) return false;
+  return cmdline.includes("libnode_host.so")
+    || cmdline.includes("index-android.js")
+    || cmdline.includes("openmausbot")
+    || cmdline.includes("node");
+}
+
+function linuxOwnerIdentityMatches(owner) {
+  try {
+    const stat = statSync(`/proc/${owner.pid}`);
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      // The pid belongs to a different user/app. OpenMausBot processes
+      // always run under the same user identity, so a different UID proves
+      // the pid was recycled by an unrelated process.
+      return false;
+    }
+    // Inspect cmdline if readable. If the process is not an OpenMausBot server/node process
+    // (e.g. recycled by com.openmausbot.companion Android app or unrelated utility), it is not the owner.
+    try {
+      const cmdline = readFileSync(`/proc/${owner.pid}/cmdline`, "utf8");
+      if (cmdline && !isServerProcessCmdline(cmdline)) {
+        return false;
+      }
+    } catch {
+      // Unreadable cmdline: proceed with stat check.
+    }
+    // Compare process start time against the lease creation time.
+    // stat.mtimeMs on /proc/<pid> reflects the process start time.
+    if (typeof stat.mtimeMs === "number" && stat.mtimeMs > owner.createdAt + 1000) {
+      return false;
+    }
+    return true;
+  } catch (error) {
+    if (error?.code === "EACCES" || error?.code === "EPERM") {
+      // On Linux/Android, permission denied when stating or accessing /proc/<pid>
+      // means the process belongs to another user or an isolated SELinux domain
+      // (e.g. another Android app). Since our process cannot run under a different
+      // user or domain, this pid cannot be our lease owner.
+      return false;
+    }
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    return true;
+  }
+}
+
 /**
- * A Windows pid can be reused within the same boot by a totally different
+ * A pid can be reused within the same boot by a totally different
  * process. process.kill(pid, 0) only asks whether *a* process holds the pid.
- * Compare the process creation time to the lease's createdAt: the original
- * process was created before it wrote the lease, so a process created after
- * the lease cannot be the original owner.
+ * Compare the process creation time and identity to the lease: the original
+ * process was created before it wrote the lease, and under the same account.
  */
 function ownerIdentityMatches(owner) {
-  if (process.platform !== "win32") return true;
-  const created = processCreationTimeMs(owner.pid);
-  if (created === null) return true;
-  return created < owner.createdAt;
+  if (process.platform === "win32") {
+    const created = processCreationTimeMs(owner.pid);
+    if (created === null) return true;
+    return created < owner.createdAt;
+  }
+  if (process.platform === "linux" || process.platform === "android") {
+    return linuxOwnerIdentityMatches(owner);
+  }
+  return true;
 }
 
 function unlinkExact(path, message) {

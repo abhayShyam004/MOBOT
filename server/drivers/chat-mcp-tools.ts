@@ -26,11 +26,11 @@ export interface ChatToolSession {
 type StdioServer = { command: string; args: string[]; env: Record<string, string> };
 type RemoteServer = { type: "http" | "sse"; url: string; headers: Record<string, string> };
 type Server = StdioServer | RemoteServer;
-const STARTUP_MS = 8_000;
+const STARTUP_MS = 30_000;
 const CALL_MS = 10 * 60_000;
 const FRAME_BYTES = 2 * 1024 * 1024;
 const OUTPUT_BYTES = 50 * 1024;
-const TOOL_COUNT = 128;
+const TOOL_COUNT = 256;
 const MAX_PAGES = 100;
 const SCHEMA_BYTES = 64 * 1024;
 const CATALOG_BYTES = 1024 * 1024;

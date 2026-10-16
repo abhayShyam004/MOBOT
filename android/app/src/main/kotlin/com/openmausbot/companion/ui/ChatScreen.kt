@@ -21,6 +21,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -42,15 +43,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
@@ -154,6 +160,8 @@ fun ChatScreen(
     retainsDraft: (chatId: String) -> Boolean = { false },
     /** An "Opened thread" chip pointing at another bot pushes that chat. */
     onOpenChat: (Chat) -> Unit = {},
+    /** Opens the native in-app browser with controls. */
+    onOpenBrowser: (url: String, title: String?) -> Unit = { _, _ -> },
 ) {
     val session = LocalCompanion.current.session
     val state by session.state.collectAsState()
@@ -173,7 +181,19 @@ fun ChatScreen(
             // Resolve the owner without changing the task named by the destination.
             val resolved = (destination as? Destination.Thread)?.let { resolution.chat.target }
             LaunchedEffect(resolved) { if (resolved != null) onResolved(resolved) }
-            LoadedChat(resolution.chat, state, onBack, onOpenComputer, onOpenOverview, onOpenMemory, onOpenModelProviders, retainsDraft, onResolved, onOpenChat)
+            LoadedChat(
+                resolution.chat,
+                state,
+                onBack,
+                onOpenComputer,
+                onOpenOverview,
+                onOpenMemory,
+                onOpenModelProviders,
+                retainsDraft,
+                onResolved,
+                onOpenChat,
+                onOpenBrowser,
+            )
         }
     }
 }
@@ -181,14 +201,18 @@ fun ChatScreen(
 /** The transcript is on its way. Leaving is still possible while it is. */
 @Composable
 private fun OpeningThread(onBack: () -> Unit) {
-    Column(modifier = Modifier.fillMaxSize()) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(if (AppTheme.isDark) Color(0xFF121214) else Color(0xFFFFFFFF)),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            BackChevron(unreadElsewhere = 0, onBack = onBack)
+            BackChevron(onBack = onBack)
         }
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             CircularProgressIndicator(modifier = Modifier.size(22.dp), strokeWidth = 2.dp)
@@ -212,6 +236,7 @@ private fun LoadedChat(
     retainsDraft: (chatId: String) -> Boolean,
     onSelectTask: (ChatTarget) -> Unit,
     onOpenChat: (Chat) -> Unit,
+    onOpenBrowser: (url: String, title: String?) -> Unit,
 ) {
     // This screen's selected task, independent of the desktop's selection.
     val threadId = chat.threadId
@@ -400,12 +425,12 @@ private fun LoadedChat(
         }
     }
 
-    // A tapped link in a bot reply: the web goes to the system, a desktop path
-    // comes back through the computer, anything else is refused out loud.
+    // A tapped link in a bot reply: web links open in the native in-app browser
+    // surface with navigation controls, a desktop path comes back through the
+    // computer, anything else is refused out loud.
     fun openLink(url: String, message: Message) {
         when (val target = LocalMessageLink.resolve(url)) {
-            is LocalMessageLink.Web -> runCatching { uriHandler.openUri(target.url) }
-                .onFailure { fileOpenError = "This link can't be opened on this phone." }
+            is LocalMessageLink.Web -> onOpenBrowser(target.url, null)
             is LocalMessageLink.DesktopFile -> openFile(target.path, message)
             null -> fileOpenError = "This link can't be opened securely."
         }
@@ -615,12 +640,22 @@ private fun LoadedChat(
         session.loadThreadIfNeeded(threadId)
     }
 
+    // Filter out tool activity chips and failure dashboards from normal conversation
+    val visibleConversationRows = remember(transcript) {
+        transcript.filter { row ->
+            when (row) {
+                is TranscriptRow.Single -> row.message.kind != Message.Kind.ACTIVITY
+                is TranscriptRow.ActivityRun -> false
+            }
+        }
+    }
+
     val headerCount = if (hasMore) 1 else 0
     // One slot at the bottom, whichever of the three is in it — iOS gives all of
     // them the same `.id(Self.liveBubbleId)` for the same reason: they replace
     // one another, they do not stack.
     val liveCount = if (tail == TranscriptTail.NONE) 0 else 1
-    val itemCount = headerCount + transcript.size + liveCount
+    val itemCount = headerCount + visibleConversationRows.size + liveCount
 
     // A conversation grows from the bottom: opening a chat starts on the newest
     // message rather than the oldest.
@@ -630,7 +665,7 @@ private fun LoadedChat(
         listState.scrollToItem(itemCount - 1)
         settled = true
     }
-    LaunchedEffect(threadId, transcript.lastOrNull()?.id) {
+    LaunchedEffect(threadId, visibleConversationRows.lastOrNull()?.id) {
         if (!settled || itemCount == 0) return@LaunchedEffect
         listState.animateScrollToItem(itemCount - 1)
     }
@@ -645,12 +680,9 @@ private fun LoadedChat(
         listState.scrollToItem(itemCount - 1)
     }
     // A search hit lands on its message.
-    LaunchedEffect(focusedMessageId, transcript.size) {
+    LaunchedEffect(focusedMessageId, visibleConversationRows.size) {
         val target = focusedMessageId ?: return@LaunchedEffect
-        val index = transcript.indexOfFirst { row ->
-            row.id == target ||
-                (row as? TranscriptRow.ActivityRun)?.items?.any { it.id == target } == true
-        }
+        val index = visibleConversationRows.indexOfFirst { row -> row.id == target }
         if (index < 0) return@LaunchedEffect
         listState.scrollToItem(headerCount + index)
         session.consumeFocus(target)
@@ -878,12 +910,11 @@ private fun LoadedChat(
     BackHandler(enabled = !showingPlus && hudOpen) { closeHud() }
     BackHandler(enabled = !showingPlus && !hudOpen) { leaveToRoster() }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // Two rings and nothing else, in the band the floating header occupies.
-        // A conversation is the one screen that may not have shapes further down:
-        // a bubble has to be read through whatever is behind it, so the treatment
-        // stops where the transcript starts.
-        DecorativeBackdrop(motif = BackdropMotif.CHAT, height = 150.dp)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(if (AppTheme.isDark) Color(0xFF121214) else Color(0xFFFFFFFF)),
+    ) {
         Column(modifier = Modifier.fillMaxSize()) {
             Box(
                 modifier = Modifier
@@ -911,7 +942,7 @@ private fun LoadedChat(
                         top = HEADER_CLEARANCE,
                         bottom = 12.dp,
                     ),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     if (hasMore) {
                         item(key = LOAD_EARLIER_KEY) {
@@ -920,7 +951,7 @@ private fun LoadedChat(
                                     // Keep the reader where they were: after older
                                     // messages are prepended, sit back on the one
                                     // that used to be at the top.
-                                    val anchor = transcript.firstOrNull()?.id
+                                    val anchor = visibleConversationRows.firstOrNull()?.id
                                     scope.launch {
                                         session.loadOlder(threadId)
                                         if (anchor == null) return@launch
@@ -928,13 +959,13 @@ private fun LoadedChat(
                                         val freshRows = transcriptRows(
                                             fresh.visibleTranscript(threadId),
                                             activityDetail,
-                                        )
-                                        val index = freshRows.indexOfFirst { row ->
-                                            row.id == anchor ||
-                                                (row as? TranscriptRow.ActivityRun)
-                                                    ?.items
-                                                    ?.any { it.id == anchor } == true
+                                        ).filter { row ->
+                                            when (row) {
+                                                is TranscriptRow.Single -> row.message.kind != Message.Kind.ACTIVITY
+                                                is TranscriptRow.ActivityRun -> false
+                                            }
                                         }
+                                        val index = freshRows.indexOfFirst { row -> row.id == anchor }
                                         if (index < 0) return@launch
                                         // The "load earlier" row is item 0 for as
                                         // long as there is still more to fetch.
@@ -949,56 +980,37 @@ private fun LoadedChat(
                         }
                     }
 
-                    itemsIndexedKeyed(transcript) { index, message ->
-                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                            // A gap in time is worth marking; a timestamp on every
-                            // message is just noise.
-                            if (TranscriptLayout.startsNewRowStretch(transcript, index)) {
-                                Text(
-                                    text = RelativeStamp.separator(
-                                        message.at,
-                                        System.currentTimeMillis(),
-                                        locale = Locale.getDefault(),
-                                    ),
-                                    fontSize = 13.sp,
-                                    color = secondaryTint,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(top = 6.dp),
-                                    textAlign = TextAlign.Center,
-                                )
-                            }
-                            when (message) {
-                                is TranscriptRow.Single -> MessageRow(
-                                    chat = chat,
-                                    message = message.message,
-                                    // One tail per run of bubbles from the same author,
-                                    // not one per bubble.
-                                    endsRun = TranscriptLayout.endsRowRun(transcript, index),
-                                    openLink = ::openLink,
-                                    openAttachment = ::openAttachment,
-                                    openThread = ::openThread,
-                                    // A failed turn's own actions. Retry appears only
-                                    // when there is a request to run again; Change
-                                    // model only for a bot, and Provider settings
-                                    // always, because the card decides per kind which
-                                    // of them is worth offering.
-                                    turnRetry = retrySources[message.message.id]?.let { source ->
-                                        { scope.launch { session.retryTurn(chat, source) } }
-                                    },
-                                    changeModel = if (bot != null) {
-                                        {
-                                            showingModelPicker = true
-                                            showingProfile = true
-                                        }
-                                    } else {
-                                        null
-                                    },
-                                    openProviders = onOpenModelProviders,
-                                    onPromptAction = ::submit,
-                                )
-                                is TranscriptRow.ActivityRun -> ActivityRunChip(message.items, ::openThread)
-                            }
+                    itemsIndexedKeyed(visibleConversationRows) { index, message ->
+                        when (message) {
+                            is TranscriptRow.Single -> MessageRow(
+                                chat = chat,
+                                message = message.message,
+                                // One tail per run of bubbles from the same author,
+                                // not one per bubble.
+                                endsRun = TranscriptLayout.endsRowRun(visibleConversationRows, index),
+                                openLink = ::openLink,
+                                openAttachment = ::openAttachment,
+                                openThread = ::openThread,
+                                // A failed turn's own actions. Retry appears only
+                                // when there is a request to run again; Change
+                                // model only for a bot, and Provider settings
+                                // always, because the card decides per kind which
+                                // of them is worth offering.
+                                turnRetry = retrySources[message.message.id]?.let { source ->
+                                    { scope.launch { session.retryTurn(chat, source) } }
+                                },
+                                changeModel = if (bot != null) {
+                                    {
+                                        showingModelPicker = true
+                                        showingProfile = true
+                                    }
+                                } else {
+                                    null
+                                },
+                                openProviders = onOpenModelProviders,
+                                onPromptAction = ::submit,
+                            )
+                            is TranscriptRow.ActivityRun -> Unit
                         }
                     }
 
@@ -1013,6 +1025,22 @@ private fun LoadedChat(
                     }
                 }
 
+                if (visibleConversationRows.isEmpty() && liveCount == 0) {
+                    ChatEmptyState(
+                        chat = chat,
+                        face = remember(chat, rawTranscript) {
+                            MausState.forChat(chat, rawTranscript.lastOrNull())
+                        },
+                        onStarterPrompt = { prompt ->
+                            composer.onTypedChange(prompt)
+                            publishFrom(composer)
+                        },
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .padding(top = HEADER_CLEARANCE),
+                    )
+                }
+
                 val currentMood = remember(chat.busy, pendingApproval, reasoning, rawTranscript) {
                     BotMoodRules.resolve(
                         busy = chat.busy,
@@ -1024,6 +1052,7 @@ private fun LoadedChat(
 
                 ChatHeader(
                     chat = chat,
+                    lastActivityAt = rawTranscript.lastOrNull()?.at ?: 0.0,
                     face = remember(chat, rawTranscript) {
                         MausState.forChat(chat, rawTranscript.lastOrNull())
                     },
@@ -1031,6 +1060,13 @@ private fun LoadedChat(
                     unreadElsewhere = remember(state, chat) {
                         (state.unreadCount - if (chat.unread) 1 else 0).coerceAtLeast(0)
                     },
+                    onRetryTurn = if (retrySources.isNotEmpty()) {
+                        {
+                            retrySources.values.lastOrNull()?.let { source ->
+                                scope.launch { session.retryTurn(chat, source) }
+                            }
+                        }
+                    } else null,
                     onBack = { leaveToRoster() },
                     onOpenThreads = {
                         dictation.stop()
@@ -1118,7 +1154,7 @@ private fun LoadedChat(
                     draft = draft,
                     busy = chat.busy,
                     pendingApproval = pendingApproval,
-                    hasQuickReplies = predictiveChips.isNotEmpty(),
+                    hasQuickReplies = false,
                     hasAttachments = attachments.isNotEmpty(),
                 ),
                 commands = commands,
@@ -1131,6 +1167,7 @@ private fun LoadedChat(
                 sending = sendingMessage,
                 preparing = preparingAttachments,
                 busy = chat.busy,
+                onInterrupt = if (chat.busy) { { if (bot != null) scope.launch { session.interrupt(bot) } } } else null,
                 engineCanSteer = engineCanSteer,
                 queuedSends = queuedSends,
                 steering = steering,
@@ -1248,6 +1285,7 @@ private fun LoadedChat(
             },
             onShare = { filePreviews.share(item) },
             onOpen = { filePreviews.openWithSystem(item) },
+            onOpenBrowser = { onOpenBrowser(it, null) },
         )
     }
 }
@@ -1286,23 +1324,111 @@ private fun androidx.compose.foundation.lazy.LazyListScope.itemsIndexedKeyed(
 // The strip the top controls sit on, and the air the transcript needs below the
 // name pill before its first row.
 private val HEADER_BAR = 56.dp
-private val HEADER_SCRIM_FADE = 24.dp
-private val HEADER_CLEARANCE = 128.dp
+private val HEADER_CLEARANCE = 72.dp
 
 /**
  * Back on the left with the rest-of-app unread count, the bot's computer on the
  * right, and the bot itself between them over its name.
  *
- * The strip behind the two buttons is opaque and then fades out, so the
- * transcript slides under the chrome and disappears rather than stopping at a
- * line. The face and the name pill float below it on their own tiles.
+ * Modern solid header bar with a subtle hairline bottom border so transcripts
+ * scroll cleanly under it without blurry gradient scrims.
  */
+@Composable
+private fun ChatEmptyState(
+    chat: Chat,
+    face: MausState,
+    onStarterPrompt: (String) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 24.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(72.dp)
+                .clip(RoundedCornerShape(20.dp))
+                .background(AppTheme.colors.surfaceRaised)
+                .border(1.dp, AppTheme.colors.subtleBorder, RoundedCornerShape(20.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            ChatAvatar(
+                chat = chat,
+                size = 54.dp,
+                state = face,
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = chat.name,
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold,
+            color = AppTheme.colors.textPrimary,
+        )
+        val tagline = if (chat.subtitle.isNotBlank()) {
+            chat.subtitle
+        } else {
+            "Ready to assist with code, tasks, and system automation"
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = tagline,
+            style = MaterialTheme.typography.bodyMedium,
+            color = AppTheme.colors.textSecondary,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(horizontal = 16.dp),
+        )
+        Spacer(Modifier.height(28.dp))
+        val starters = listOf(
+            "What can you do?",
+            "Explain how this project works",
+            "Show recent changes",
+        )
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            starters.forEach { prompt ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(AppTheme.colors.surfaceRaised)
+                        .border(1.dp, AppTheme.colors.subtleBorder, RoundedCornerShape(14.dp))
+                        .clickable { onStarterPrompt(prompt) }
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = prompt,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = AppTheme.colors.textPrimary,
+                    )
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = AppTheme.colors.textTertiary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ChatHeader(
     chat: Chat,
     face: MausState,
     mood: BotMood = BotMood.READY,
     unreadElsewhere: Int,
+    lastActivityAt: Double = 0.0,
+    onRetryTurn: (() -> Unit)? = null,
     onBack: () -> Unit,
     onWatchComputer: () -> Unit,
     onOpenProfile: () -> Unit,
@@ -1310,138 +1436,209 @@ private fun ChatHeader(
     onOpenRoomSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val surface = AppTheme.colors.background
-    Box(modifier = modifier.fillMaxWidth()) {
-        Spacer(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(HEADER_BAR + HEADER_SCRIM_FADE)
-                .drawWithCache {
-                    val solid = HEADER_BAR.toPx() / size.height
-                    val brush = Brush.verticalGradient(
-                        0f to surface,
-                        solid to surface,
-                        1f to Color.Transparent,
-                    )
-                    onDrawBehind { drawRect(brush) }
-                },
-        )
+    val surface = if (AppTheme.isDark) Color(0xFF121214) else Color(0xFFFFFFFF)
+    var menuExpanded by remember { mutableStateOf(false) }
 
-        // One row, in reading order: where you came from, who you are talking to,
-        // and what else that bot has. It used to be a stack of three floating
-        // pills — a back pill, a 60 dp avatar and a name pill — which spent the
-        // top quarter of the screen on chrome and put the name where the eye
-        // arrives last.
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(surface)
+            .padding(bottom = 2.dp),
+    ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(start = AppSpacing.sm, end = AppSpacing.md, top = AppSpacing.xs),
+                .padding(start = 10.dp, end = 14.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            BackChevron(unreadElsewhere = unreadElsewhere, onBack = onBack)
+            BackChevron(onBack = onBack)
             ChatIdentity(
                 chat = chat,
                 face = face,
                 mood = mood,
+                lastActivityAt = lastActivityAt,
                 onOpenProfile = onOpenProfile,
                 onOpenThreads = onOpenThreads,
                 onOpenRoomSettings = onOpenRoomSettings,
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = AppSpacing.sm),
+                    .padding(horizontal = 8.dp),
             )
-            // The computer is a bot idea; a room has none (§12).
-            if (chat is Chat.BotChat) {
-                ChromeButton(
-                    painter = painterResource(R.drawable.ic_display),
-                    contentDescription = "Watch ${chat.name}'s computer",
-                    onClick = onWatchComputer,
-                    size = 40.dp,
-                )
-            } else {
-                Spacer(Modifier.size(40.dp))
+            Box {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(if (AppTheme.isDark) Color(0xFF222226) else Color(0xFFF4F4F6))
+                        .clickable(
+                            role = Role.Button,
+                            onClickLabel = "More options",
+                            onClick = { menuExpanded = true },
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_more_horiz),
+                        contentDescription = "More options",
+                        tint = if (AppTheme.isDark) Color(0xFFE0E0E6) else Color(0xFF1A1A1A),
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                DropdownMenu(
+                    expanded = menuExpanded,
+                    onDismissRequest = { menuExpanded = false },
+                    modifier = Modifier
+                        .background(AppTheme.colors.surfaceRaised)
+                        .border(1.dp, AppTheme.colors.subtleBorder, RoundedCornerShape(12.dp)),
+                ) {
+                    if (onRetryTurn != null) {
+                        DropdownMenuItem(
+                            text = { Text("Retry turn", color = AppTheme.colors.textPrimary) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.Filled.Refresh,
+                                    contentDescription = null,
+                                    tint = AppTheme.colors.textSecondary,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onRetryTurn()
+                            },
+                        )
+                    }
+                    if (chat is Chat.BotChat) {
+                        DropdownMenuItem(
+                            text = { Text("Watch computer", color = AppTheme.colors.textPrimary) },
+                            leadingIcon = {
+                                Icon(
+                                    painter = painterResource(R.drawable.ic_display),
+                                    contentDescription = null,
+                                    tint = AppTheme.colors.textSecondary,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onWatchComputer()
+                            },
+                        )
+                    }
+                    if (chat.supportsTasks) {
+                        DropdownMenuItem(
+                            text = { Text("Threads", color = AppTheme.colors.textPrimary) },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.List,
+                                    contentDescription = null,
+                                    tint = AppTheme.colors.textSecondary,
+                                    modifier = Modifier.size(18.dp),
+                                )
+                            },
+                            onClick = {
+                                menuExpanded = false
+                                onOpenThreads()
+                            },
+                        )
+                    }
+                    DropdownMenuItem(
+                        text = {
+                            Text(
+                                if (chat is Chat.BotChat) "Bot settings" else "Room settings",
+                                color = AppTheme.colors.textPrimary,
+                            )
+                        },
+                        leadingIcon = {
+                            Icon(
+                                imageVector = Icons.Filled.Settings,
+                                contentDescription = null,
+                                tint = AppTheme.colors.textSecondary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                        },
+                        onClick = {
+                            menuExpanded = false
+                            if (chat is Chat.BotChat) onOpenProfile() else onOpenRoomSettings()
+                        },
+                    )
+                }
             }
         }
     }
 }
 
 /**
- * Leaving, with what is unread everywhere else — the badge Messages puts there.
- *
- * A bare chevron: the filled capsule it used to be was the first of three
- * floating controls across the top of the conversation, and the badge alone is
- * enough to say there is somewhere else to be.
+ * Clean back chevron button matching Grok.
  */
 @Composable
-private fun BackChevron(unreadElsewhere: Int, onBack: () -> Unit) {
-    Row(
+private fun BackChevron(onBack: () -> Unit) {
+    Box(
         modifier = Modifier
-            .heightIn(min = MIN_TOUCH_TARGET)
+            .size(38.dp)
             .clip(CircleShape)
-            .clickable(role = Role.Button, onClick = onBack)
-            .padding(horizontal = AppSpacing.sm),
-        horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
+            .clickable(role = Role.Button, onClick = onBack),
+        contentAlignment = Alignment.Center,
     ) {
         Icon(
-            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowLeft,
             contentDescription = "Back",
-            tint = AppTheme.colors.textSecondary,
-            modifier = Modifier.size(22.dp),
+            tint = if (AppTheme.isDark) Color(0xFFE0E0E6) else Color(0xFF1A1A1A),
+            modifier = Modifier.size(24.dp),
         )
-        if (unreadElsewhere > 0) {
-            Text(
-                text = "$unreadElsewhere",
-                style = MaterialTheme.typography.labelSmall,
-                color = AppTheme.colors.textSecondary,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .background(AppTheme.colors.surfaceRaised, CircleShape)
-                    .defaultMinSize(minWidth = 22.dp, minHeight = 22.dp)
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            )
-        }
     }
 }
 
 /**
- * Who this conversation is with, as the top line of the screen: the face, the
- * name, and the thread or job underneath.
- *
- * The name opens thread navigation (or the room's settings); the face opens the
- * bot's own settings. Same two doors as before, without the pills they used to
- * be carried in.
+ * Who this conversation is with: mascot face, bot name, and timestamp underneath matching Grok.
  */
 @Composable
 private fun ChatIdentity(
     chat: Chat,
     face: MausState,
     mood: BotMood = BotMood.READY,
+    lastActivityAt: Double = 0.0,
     onOpenProfile: () -> Unit,
     onOpenThreads: () -> Unit,
     onOpenRoomSettings: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val hasThreads = chat.supportsTasks
-    val threadOrJob = if (hasThreads) chat.threadTitle else chat.subtitle
-    val subtitleColor = when (mood) {
-        BotMood.FAILED -> AppTheme.colors.danger
-        BotMood.THINKING, BotMood.RESEARCHING, BotMood.WORKING -> AppTheme.colors.caution
-        BotMood.WAITING_FOR_USER -> AppTheme.colors.accent
-        BotMood.COMPLETED -> AppTheme.colors.positive
-        else -> AppTheme.colors.textTertiary
+    val timeStamp = remember(lastActivityAt) {
+        if (lastActivityAt > 0) {
+            RelativeStamp.separator(lastActivityAt, System.currentTimeMillis())
+        } else {
+            RelativeStamp.separator(System.currentTimeMillis().toDouble(), System.currentTimeMillis())
+        }
     }
+    val subtitleText = when {
+        chat.busy -> "Thinking…"
+        hasThreads && (chat as? Chat.BotChat)?.bot?.tasks?.isNotEmpty() == true -> chat.threadTitle
+        timeStamp.isNotEmpty() -> timeStamp
+        else -> "Active"
+    }
+    val subtitleColor = Color(0xFF8E8E93)
+
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(AppSpacing.md),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        TouchTarget(
-            onClick = if (chat is Chat.BotChat) onOpenProfile else onOpenRoomSettings,
-            size = 40.dp,
-            contentDescription = "Open ${chat.name} settings",
+        Box(
+            modifier = Modifier
+                .size(36.dp)
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = if (chat is Chat.BotChat) "Open ${chat.name} settings" else "Open room settings",
+                    onClick = if (chat is Chat.BotChat) onOpenProfile else onOpenRoomSettings,
+                ),
+            contentAlignment = Alignment.Center,
         ) {
-            ChatAvatar(chat = chat, size = AppSizes.headerAvatar, state = face)
+            ChatAvatar(
+                chat = chat,
+                size = 36.dp,
+                state = face,
+            )
         }
         Column(
             modifier = Modifier
@@ -1457,40 +1654,23 @@ private fun ChatIdentity(
                 ),
             verticalArrangement = Arrangement.spacedBy(1.dp),
         ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text(
-                    text = chat.name,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = AppTheme.colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                if (mood != BotMood.READY) {
-                    Box(
-                        modifier = Modifier
-                            .size(7.dp)
-                            .background(subtitleColor, CircleShape),
-                    )
-                    Text(
-                        text = mood.label,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = subtitleColor,
-                        maxLines = 1,
-                    )
-                }
-            }
-            if (threadOrJob.isNotEmpty()) {
-                Text(
-                    text = threadOrJob,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = AppTheme.colors.textTertiary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+            Text(
+                text = chat.name,
+                style = MaterialTheme.typography.titleMedium,
+                fontSize = 17.5.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = if (AppTheme.isDark) Color(0xFFF5F5F7) else Color(0xFF111111),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = subtitleText,
+                style = MaterialTheme.typography.bodySmall,
+                fontSize = 12.sp,
+                color = subtitleColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -1539,7 +1719,8 @@ private fun BoxScope.PlusSheet(
     ) {
         Column(
             modifier = Modifier
-                .chromeSheet()
+                .background(AppTheme.colors.surface, RoundedCornerShape(PLUS_SHEET_RADIUS))
+                .border(1.dp, AppTheme.colors.subtleBorder, RoundedCornerShape(PLUS_SHEET_RADIUS))
                 .clip(RoundedCornerShape(PLUS_SHEET_RADIUS))
                 .padding(vertical = 10.dp),
         ) {
@@ -1594,7 +1775,7 @@ private fun BoxScope.PlusSheet(
 }
 
 private const val PLUS_MILLIS = 280
-private val PLUS_SHEET_RADIUS = 28.dp
+private val PLUS_SHEET_RADIUS = 24.dp
 
 /** The + becomes an ×. */
 private const val PLUS_TURN_DEGREES = 45f
@@ -1667,6 +1848,7 @@ private fun Composer(
     sending: Boolean,
     preparing: Boolean,
     busy: Boolean,
+    onInterrupt: (() -> Unit)? = null,
     engineCanSteer: Boolean,
     queuedSends: List<QueuedSend>,
     steering: Boolean,
@@ -1768,167 +1950,161 @@ private fun Composer(
             ComposerAccessory.NONE -> Unit
         }
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.Bottom,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(CircleShape)
+                .background(if (AppTheme.isDark) Color(0xFF1E1E22) else Color(0xFFFFFFFF))
+                .border(1.dp, if (AppTheme.isDark) Color(0xFF2C2C30) else Color(0xFFE5E5EA), CircleShape)
+                .padding(horizontal = 6.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // The plus is the only control outside the composer that is not part
-            // of the composer: a bare glyph keeps the field the one object in
-            // the row, instead of one capsule beside another.
-            TouchTarget(
-                onClick = onTogglePlus,
-                contentDescription = if (plusOpen) "Close" else "More",
+            // Standalone circular + button integrated in capsule
+            Box(
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(CircleShape)
+                    .background(if (AppTheme.isDark) Color(0xFF28282C) else Color(0xFFF2F2F5))
+                    .clickable(
+                        role = Role.Button,
+                        onClickLabel = if (plusOpen) "Close" else "More",
+                        onClick = onTogglePlus,
+                    ),
+                contentAlignment = Alignment.Center,
             ) {
+                Icon(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = null,
+                    tint = if (plusOpen) {
+                        if (AppTheme.isDark) Color.White else Color(0xFF111111)
+                    } else {
+                        if (AppTheme.isDark) Color(0xFFE0E0E6) else Color(0xFF1A1A1A)
+                    },
+                    modifier = Modifier
+                        .size(20.dp)
+                        .graphicsLayer { rotationZ = turn.value },
+                )
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+            ) {
+                if (draft.isEmpty()) {
+                    Text(
+                        text = "Ask $name",
+                        fontSize = 15.5.sp,
+                        color = if (AppTheme.isDark) Color(0xFF8E8E93) else Color(0xFF9A9AA2),
+                    )
+                }
+                BasicTextField(
+                    value = draft,
+                    onValueChange = onDraftChange,
+                    readOnly = dictationLocked,
+                    maxLines = 5,
+                    textStyle = LocalTextStyle.current.copy(
+                        fontSize = 15.5.sp,
+                        color = if (AppTheme.isDark) Color.White else Color(0xFF1A1A1A),
+                    ),
+                    cursorBrush = SolidColor(if (AppTheme.isDark) Color.White else Color(0xFF1A1A1A)),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .onPreviewKeyEvent { event ->
+                            val sends = ComposerReturn.sends(
+                                isReturnKey = event.key == Key.Enter || event.key == Key.NumPadEnter,
+                                keyDown = event.type == KeyEventType.KeyDown,
+                                shift = event.isShiftPressed,
+                                fromSoftwareKeyboard =
+                                    event.nativeKeyEvent.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD,
+                            )
+                            if (sends) onSend()
+                            sends
+                        },
+                )
+            }
+
+            val isStopAvailable = busy && draft.isEmpty() && onInterrupt != null
+            val showSend = canSend
+            val showMic = (!showSend && !isStopAvailable && !inFlight) || dictationListening
+
+            if (showMic) {
                 Box(
                     modifier = Modifier
-                        .size(40.dp)
-                        .then(
-                            if (plusOpen) {
-                                Modifier.background(AppTheme.colors.surfaceRaised, CircleShape)
-                            } else {
-                                Modifier
-                            },
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (dictationListening) Color(0xFFEF4444)
+                            else if (AppTheme.isDark) Color(0xFF28282C)
+                            else Color(0xFFF2F2F5)
+                        )
+                        .clickable(
+                            role = Role.Button,
+                            onClickLabel = if (dictationListening) "Stop dictation" else "Start dictation",
+                            onClick = onToggleDictation,
                         ),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = Icons.Filled.Add,
-                        contentDescription = null,
-                        tint = if (plusOpen) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
-                        modifier = Modifier
-                            .size(22.dp)
-                            .graphicsLayer { rotationZ = turn.value },
-                    )
-                }
-            }
-
-            Row(
-                modifier = Modifier
-                    .weight(1f)
-                    // A capsule at one line (48dp tall, 24dp corners) that keeps
-                    // those corners as the draft grows, the way Messages does.
-                    // CircleShape rounds to half the height, and a five-line
-                    // draft became a giant pill.
-                    .chromeSheet(cornerRadius = MIN_TOUCH_TARGET / 2)
-                    .heightIn(min = MIN_TOUCH_TARGET),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalAlignment = Alignment.Bottom,
-            ) {
-                // The way into the HUD that does not start with typing. iOS draws
-                // the `command` glyph here; Android's core icon set has no
-                // counterpart, and the character the feature is named after says
-                // it better than a borrowed symbol would.
-                TouchTarget(
-                    onClick = onToggleHud,
-                    contentDescription = "Slash commands",
-                    modifier = Modifier.semantics {
-                        stateDescription = if (accessory == ComposerAccessory.HUD) {
-                            "Expanded"
-                        } else {
-                            "Collapsed"
-                        }
-                    },
-                ) {
-                    Text(
-                        text = "/",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        fontFamily = FontFamily.Monospace,
-                        color = if (accessory == ComposerAccessory.HUD) {
-                            MaterialTheme.colorScheme.onSurface
-                        } else {
-                            secondaryTint
-                        },
-                    )
-                }
-
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .padding(top = 13.dp, bottom = 13.dp),
-                ) {
-                    if (draft.isEmpty()) {
-                        Text(
-                            text = ComposerPromise.placeholder(
-                                name = name,
-                                busy = busy,
-                                engineCanSteer = engineCanSteer,
-                                sending = sending,
-                                listening = dictationListening,
-                            ),
-                            fontSize = 17.sp,
-                            color = secondaryTint,
-                        )
-                    }
-                    BasicTextField(
-                        value = draft,
-                        onValueChange = onDraftChange,
-                        // Partials rebuild from a frozen base; prevent competing
-                        // edits without dimming the text.
-                        readOnly = dictationLocked,
-                        maxLines = 5,
-                        textStyle = LocalTextStyle.current.copy(
-                            fontSize = 17.sp,
-                            color = MaterialTheme.colorScheme.onSurface,
-                        ),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
-                        // The software keyboard's Return breaks the line, like
-                        // Messages; the arrow button on the bar is the one send.
-                        // A hardware Return still sends and Shift+Return breaks
-                        // the line. Some soft keyboards deliver their Return as a
-                        // key event too, so the rule also asks where it came from.
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .onPreviewKeyEvent { event ->
-                                val sends = ComposerReturn.sends(
-                                    isReturnKey = event.key == Key.Enter || event.key == Key.NumPadEnter,
-                                    keyDown = event.type == KeyEventType.KeyDown,
-                                    shift = event.isShiftPressed,
-                                    fromSoftwareKeyboard =
-                                        event.nativeKeyEvent.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD,
-                                )
-                                if (sends) onSend()
-                                sends
-                            },
-                    )
-                }
-
-                // Bare glyphs until they are doing something. A listening mic is
-                // the one that earns a mark, because at that point it is
-                // broadcasting.
-                TouchTarget(
-                    onClick = onToggleDictation,
-                    contentDescription = if (dictationListening) {
-                        "Stop dictation"
-                    } else {
-                        "Start dictation"
-                    },
-                ) {
-                    Icon(
                         painter = painterResource(R.drawable.ic_mic),
                         contentDescription = null,
-                        tint = if (dictationListening) AppTheme.colors.danger else AppTheme.colors.textSecondary,
-                        modifier = Modifier.size(18.dp),
+                        tint = if (dictationListening) Color.White
+                               else if (AppTheme.isDark) Color(0xFFE0E0E6)
+                               else Color(0xFF1A1A1A),
+                        modifier = Modifier.size(20.dp),
                     )
                 }
-
-                TouchTarget(onClick = onSend, enabled = canSend) {
+            } else if (isStopAvailable) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFFEF4444))
+                        .clickable(
+                            role = Role.Button,
+                            onClickLabel = "Stop generation",
+                            onClick = { onInterrupt() },
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
-                            .background(
-                                if (canSend) AppTheme.colors.accent else AppTheme.colors.surfaceRaised,
-                                CircleShape,
-                            ),
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.Send,
-                            contentDescription = "Send",
-                            tint = if (canSend) AppTheme.colors.onAccent else AppTheme.colors.textTertiary,
-                            modifier = Modifier.size(16.dp),
-                        )
-                    }
+                            .size(12.dp)
+                            .background(Color.White, RoundedCornerShape(2.dp)),
+                    )
+                }
+            } else if (inFlight) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(if (AppTheme.isDark) Color(0xFF28282C) else Color(0xFFF2F2F5)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = if (AppTheme.isDark) Color(0xFFE0E0E6) else Color(0xFF1A1A1A),
+                    )
+                }
+            } else if (showSend) {
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(if (AppTheme.isDark) Color(0xFFE0E0E6) else Color(0xFF1A1A1A))
+                        .clickable(
+                            role = Role.Button,
+                            onClickLabel = "Send",
+                            onClick = onSend,
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Send",
+                        tint = if (AppTheme.isDark) Color(0xFF121214) else Color.White,
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
             }
         }

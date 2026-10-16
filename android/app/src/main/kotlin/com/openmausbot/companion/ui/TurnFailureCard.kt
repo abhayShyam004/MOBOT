@@ -2,6 +2,7 @@ package com.openmausbot.companion.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -12,12 +13,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.BasicAlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -32,6 +36,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import kotlinx.coroutines.launch
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.contentDescription
@@ -133,6 +139,24 @@ internal fun TurnFailureCard(
     var keyError by remember { mutableStateOf<String?>(null) }
     var showDiagnostics by remember { mutableStateOf(false) }
 
+    val severity = remember(card.kind, card.status) {
+        ErrorSeverityClassifier.classify(card.kind, card.status)
+    }
+
+    val severityTint = when (severity) {
+        ErrorSeverity.BLOCKING -> colors.danger
+        ErrorSeverity.RECOVERABLE -> colors.caution
+        ErrorSeverity.WARNING -> colors.caution
+        ErrorSeverity.INFO -> colors.accent
+    }
+
+    val cardBorder = when (severity) {
+        ErrorSeverity.BLOCKING -> colors.danger.copy(alpha = 0.35f)
+        ErrorSeverity.RECOVERABLE -> colors.caution.copy(alpha = 0.35f)
+        ErrorSeverity.WARNING -> colors.subtleBorder
+        ErrorSeverity.INFO -> colors.subtleBorder
+    }
+
     val where = listOfNotNull(
         card.provider?.takeIf { it.isNotBlank() },
         card.model?.takeIf { it.isNotBlank() },
@@ -140,123 +164,115 @@ internal fun TurnFailureCard(
     Column(
         modifier = Modifier
             .widthIn(max = CHAT_CONTENT_MAX_WIDTH)
-            .background(colors.surface, AppRadii.cardShape)
-            .border(1.dp, colors.danger.copy(alpha = 0.34f), AppRadii.cardShape)
-            .padding(AppSpacing.lg)
-            // One sentence to a screen reader: a failure read out of order is a
-            // failure heard wrong.
-            .semantics(mergeDescendants = true) {
-                contentDescription = failureAnnouncement(card)
-            },
-        verticalArrangement = Arrangement.spacedBy(AppSpacing.md),
+            .background(colors.surface, RoundedCornerShape(14.dp))
+            .border(1.dp, cardBorder, RoundedCornerShape(14.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { showDiagnostics = !showDiagnostics },
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(AppSpacing.md),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Box(
                 modifier = Modifier
-                    .size(30.dp)
-                    .background(colors.danger.copy(alpha = 0.14f), CircleShape),
+                    .size(24.dp)
+                    .background(severityTint.copy(alpha = 0.14f), CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     imageVector = Icons.Filled.Warning,
                     contentDescription = null,
-                    tint = colors.danger,
-                    modifier = Modifier.size(17.dp),
+                    tint = severityTint,
+                    modifier = Modifier.size(15.dp),
                 )
             }
             Text(
                 text = card.title,
-                style = MaterialTheme.typography.titleLarge,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.Medium,
                 color = colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f),
             )
             card.status?.let { StatusTag(it) }
-        }
-        if (where.isNotEmpty()) {
-            Text(
-                text = where,
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.textTertiary,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
-        Text(
-            text = card.detail,
-            style = MaterialTheme.typography.bodySmall,
-            color = colors.textSecondary,
-        )
-        // What to do, on its own ground. The advice is the one part of this card
-        // a person is meant to leave with, so it is not a third grey paragraph —
-        // it is a well with a label.
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(colors.surfaceRaised, AppRadii.smallShape)
-                .padding(AppSpacing.md),
-            verticalArrangement = Arrangement.spacedBy(AppSpacing.xs),
-        ) {
-            Text(
-                text = WHAT_TO_DO,
-                style = MaterialTheme.typography.labelLarge,
-                color = colors.textTertiary,
-            )
-            Text(
-                text = card.advice,
-                style = MaterialTheme.typography.bodyMedium,
-                color = colors.textPrimary,
-            )
-        }
-        val attempts = card.attempts
-        if (attempts != null && attempts > 1) {
-            Text(
-                text = "Tried $attempts times automatically",
-                style = MaterialTheme.typography.labelSmall,
-                color = colors.textTertiary,
-            )
-        }
-        val actions = buildList {
             if (onRetry != null && FailureActions.retry(card.kind)) {
-                add(FailureAction("Retry", PillTone.Accent, onRetry))
+                AppPill(text = "Retry", onClick = onRetry, tone = PillTone.Accent)
             }
-            if (FailureActions.editKey(card.kind)) {
-                add(FailureAction("Edit API key", PillTone.Raised) {
-                    editingKey = ""
-                    keyError = null
-                    showEditKeyDialog = true
-                })
-            }
-            if (onChangeModel != null && FailureActions.changeModel(chat, card.kind)) {
-                add(FailureAction("Change model", PillTone.Raised, onChangeModel))
-            }
-            if (onOpenProviders != null && FailureActions.providerSettings(card.kind)) {
-                add(FailureAction("Provider settings", PillTone.Raised, onOpenProviders))
-            }
-        }
-        if (actions.isNotEmpty()) {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-                verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-            ) {
-                actions.forEach { action ->
-                    AppPill(text = action.label, onClick = action.run, tone = action.tone)
-                }
-            }
-        }
-        TextButton(
-            onClick = { showDiagnostics = !showDiagnostics },
-            contentPadding = PaddingValues(0.dp),
-        ) {
             Text(
-                text = if (showDiagnostics) "Hide diagnostic details" else "View diagnostic details",
+                text = if (showDiagnostics) "Hide" else "Details",
                 style = MaterialTheme.typography.labelSmall,
                 color = colors.textTertiary,
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
             )
         }
         if (showDiagnostics) {
+            if (where.isNotEmpty()) {
+                Text(
+                    text = where,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = colors.textTertiary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (card.detail.isNotBlank()) {
+                Text(
+                    text = card.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colors.textSecondary,
+                )
+            }
+            if (card.advice.isNotBlank()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(colors.surfaceRaised, AppRadii.smallShape)
+                        .padding(AppSpacing.sm),
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = WHAT_TO_DO,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colors.textTertiary,
+                    )
+                    Text(
+                        text = card.advice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.textPrimary,
+                    )
+                }
+            }
+            val actions = buildList {
+                if (FailureActions.editKey(card.kind)) {
+                    add(FailureAction("Edit API key", PillTone.Raised) {
+                        editingKey = ""
+                        keyError = null
+                        showEditKeyDialog = true
+                    })
+                }
+                if (onChangeModel != null && FailureActions.changeModel(chat, card.kind)) {
+                    add(FailureAction("Change model", PillTone.Raised, onChangeModel))
+                }
+                if (onOpenProviders != null && FailureActions.providerSettings(card.kind)) {
+                    add(FailureAction("Provider settings", PillTone.Raised, onOpenProviders))
+                }
+            }
+            if (actions.isNotEmpty()) {
+                FlowRow(
+                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                    verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                ) {
+                    actions.forEach { action ->
+                        AppPill(text = action.label, onClick = action.run, tone = action.tone)
+                    }
+                }
+            }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -416,5 +432,136 @@ object RetryPlan {
         return messages.take(index + 1)
             .asReversed()
             .firstOrNull { MessageActions.editableText(it) != null }
+    }
+}
+
+/** Error severity levels adhering to MOBOT's visual hierarchy. */
+enum class ErrorSeverity {
+    INFO,
+    WARNING,
+    RECOVERABLE,
+    BLOCKING,
+}
+
+object ErrorSeverityClassifier {
+    fun classify(kind: String, status: Int?): ErrorSeverity = when {
+        kind in setOf("auth", "access", "quota", "setup") || (status != null && status in 401..403) ->
+            ErrorSeverity.BLOCKING
+        kind in setOf("rate_limit", "network", "transient", "timeout") || (status != null && (status == 429 || status in 502..504)) ->
+            ErrorSeverity.RECOVERABLE
+        kind in setOf("model_unavailable", "invalid_request") ->
+            ErrorSeverity.WARNING
+        else ->
+            ErrorSeverity.WARNING
+    }
+}
+
+/**
+ * A dedicated recovery card reflecting MOBOT's real orchestration recovery behavior:
+ * - Recovering: "Recovering · MOBOT is retrying the failed step."
+ * - Recovered: "Recovered · The task resumed."
+ * - Recovery failed: "Recovery failed · The task could not continue automatically."
+ */
+enum class RecoveryStatus {
+    RECOVERING,
+    RECOVERED,
+    FAILED,
+}
+
+private data class RecoveryConfig(
+    val title: String,
+    val detail: String,
+    val tint: androidx.compose.ui.graphics.Color,
+    val border: androidx.compose.ui.graphics.Color,
+)
+
+@Composable
+fun RecoveryCard(
+    status: RecoveryStatus,
+    modifier: Modifier = Modifier,
+    stepDescription: String? = null,
+    onRetry: (() -> Unit)? = null,
+) {
+    val colors = AppTheme.colors
+    val config = when (status) {
+        RecoveryStatus.RECOVERING -> RecoveryConfig(
+            title = "Recovering",
+            detail = stepDescription ?: "MOBOT is retrying the failed step.",
+            tint = colors.accent,
+            border = colors.accent.copy(alpha = 0.35f),
+        )
+        RecoveryStatus.RECOVERED -> RecoveryConfig(
+            title = "Recovered",
+            detail = stepDescription ?: "The task resumed.",
+            tint = colors.complete,
+            border = colors.complete.copy(alpha = 0.35f),
+        )
+        RecoveryStatus.FAILED -> RecoveryConfig(
+            title = "Recovery failed",
+            detail = stepDescription ?: "The task could not continue automatically.",
+            tint = colors.danger,
+            border = colors.danger.copy(alpha = 0.35f),
+        )
+    }
+
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(AppRadii.compactCardShape)
+            .background(colors.elevatedSurface)
+            .border(1.dp, config.border, AppRadii.compactCardShape)
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            when (status) {
+                RecoveryStatus.RECOVERING -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(16.dp),
+                        strokeWidth = 2.dp,
+                        color = config.tint,
+                    )
+                }
+                RecoveryStatus.RECOVERED -> {
+                    Icon(
+                        imageVector = Icons.Filled.Check,
+                        contentDescription = null,
+                        tint = config.tint,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+                RecoveryStatus.FAILED -> {
+                    Icon(
+                        imageVector = Icons.Filled.Warning,
+                        contentDescription = null,
+                        tint = config.tint,
+                        modifier = Modifier.size(16.dp),
+                    )
+                }
+            }
+            Text(
+                text = config.title,
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = colors.textPrimary,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        Text(
+            text = config.detail,
+            style = MaterialTheme.typography.bodySmall,
+            color = colors.textSecondary,
+        )
+        if (status == RecoveryStatus.FAILED && onRetry != null) {
+            AppPill(
+                text = "Retry step",
+                tone = PillTone.Accent,
+                onClick = onRetry,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+        }
     }
 }

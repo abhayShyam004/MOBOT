@@ -47,6 +47,9 @@ sealed interface Destination {
     /** Cloud deployment credential management (Vercel & Render). */
     data object DeploymentAccounts : Destination
 
+    /** Mascot Studio / interactive mascot character showcase. */
+    data object MascotShowcase : Destination
+
     /** A bot's computer, watch-only. Addressed by bot id for the same reason. */
     data class Computer(val botId: String) : Destination
 
@@ -64,6 +67,11 @@ sealed interface Destination {
      * one bot's memory is never another's.
      */
     data class Memory(val botId: String) : Destination
+
+    /**
+     * In-app browser surface with native navigation and exit controls.
+     */
+    data class Browser(val url: String, val title: String? = null, val botId: String? = null) : Destination
 
     /**
      * A conversation, in one of the two ways something can name one.
@@ -163,10 +171,12 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
         private const val SPECIALIZED_CAPABILITIES = "specialized-capabilities"
         private const val PROJECTS = "projects"
         private const val DEPLOYMENT_ACCOUNTS = "deployment-accounts"
+        private const val MASCOT_SHOWCASE = "mascot-showcase"
         private const val THREAD = "thread:"
         private const val COMPUTER = "computer:"
         private const val OVERVIEW = "overview:"
         private const val MEMORY = "memory:"
+        private const val BROWSER = "browser:"
         private const val BOT_CHAT = "botchat:"
         private const val ROOM_CHAT = "roomchat:"
 
@@ -180,10 +190,12 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
                 Destination.SpecializedCapabilities -> SPECIALIZED_CAPABILITIES
                 Destination.Projects -> PROJECTS
                 Destination.DeploymentAccounts -> DEPLOYMENT_ACCOUNTS
+                Destination.MascotShowcase -> MASCOT_SHOWCASE
                 is Destination.Thread -> THREAD + it.threadId
                 is Destination.Computer -> COMPUTER + it.botId
                 is Destination.Overview -> OVERVIEW + it.botId
                 is Destination.Memory -> MEMORY + it.botId
+                is Destination.Browser -> BROWSER + joinBrowser(it.url, it.title, it.botId)
                 is Destination.Chat -> when (val target = it.target) {
                     is ChatTarget.Bot -> BOT_CHAT + join(target.botId, target.threadId)
                     is ChatTarget.Room -> ROOM_CHAT + join(target.roomId, target.threadId)
@@ -201,16 +213,45 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
                 it == SPECIALIZED_CAPABILITIES -> Destination.SpecializedCapabilities
                 it == PROJECTS -> Destination.Projects
                 it == DEPLOYMENT_ACCOUNTS -> Destination.DeploymentAccounts
+                it == MASCOT_SHOWCASE -> Destination.MascotShowcase
                 it.startsWith(THREAD) -> Destination.Thread(it.removePrefix(THREAD))
                 it.startsWith(COMPUTER) -> Destination.Computer(it.removePrefix(COMPUTER))
                 it.startsWith(OVERVIEW) -> Destination.Overview(it.removePrefix(OVERVIEW))
                 it.startsWith(MEMORY) -> Destination.Memory(it.removePrefix(MEMORY))
+                it.startsWith(BROWSER) -> splitBrowser(it.removePrefix(BROWSER))
+                    ?.let { (url, title, botId) -> Destination.Browser(url, title, botId) }
                 it.startsWith(BOT_CHAT) -> split(it.removePrefix(BOT_CHAT))
                     ?.let { (owner, thread) -> Destination.Chat(ChatTarget.Bot(owner, thread)) }
                 it.startsWith(ROOM_CHAT) -> split(it.removePrefix(ROOM_CHAT))
                     ?.let { (owner, thread) -> Destination.Chat(ChatTarget.Room(owner, thread)) }
                 else -> null
             }
+        }
+
+        private fun joinBrowser(url: String, title: String?, botId: String?): String {
+            val t = title.orEmpty()
+            val b = botId.orEmpty()
+            return "${url.length}:$url${t.length}:$t$b"
+        }
+
+        private fun splitBrowser(raw: String): Triple<String, String?, String?>? {
+            val firstMark = raw.indexOf(':')
+            if (firstMark <= 0) return null
+            val urlLen = raw.substring(0, firstMark).toIntOrNull() ?: return null
+            val urlStart = firstMark + 1
+            if (urlLen < 0 || urlStart + urlLen > raw.length) return null
+            val url = raw.substring(urlStart, urlStart + urlLen)
+
+            val rest = raw.substring(urlStart + urlLen)
+            val secondMark = rest.indexOf(':')
+            if (secondMark <= 0) return null
+            val titleLen = rest.substring(0, secondMark).toIntOrNull() ?: return null
+            val titleStart = secondMark + 1
+            if (titleLen < 0 || titleStart + titleLen > rest.length) return null
+            val title = rest.substring(titleStart, titleStart + titleLen).ifEmpty { null }
+            val botId = rest.substring(titleStart + titleLen).ifEmpty { null }
+
+            return Triple(url, title, botId)
         }
 
         /**

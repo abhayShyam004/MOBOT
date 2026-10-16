@@ -16,6 +16,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.webkit.ProfileStore
 import androidx.webkit.WebViewCompat
+import com.openmausbot.companion.browser.BrowserSecurity
 import fi.iki.elonen.NanoHTTPD
 import org.json.JSONArray
 import org.json.JSONObject
@@ -207,7 +208,10 @@ class BrowserDriverServer private constructor(
         val decor = hostWindow?.decorView as? ViewGroup ?: return false
         if (view.parent === decor) return true
         view.parent?.let { (it as ViewGroup).removeView(view) }
-        decor.addView(view, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+        decor.addView(view, 0, ViewGroup.LayoutParams(1080, 1920))
+        view.translationX = -10000f
+        view.isFocusable = false
+        view.isClickable = false
         return true
     }
     private fun destroy(name: String) {
@@ -344,7 +348,10 @@ class BrowserDriverServer private constructor(
                 val w = view.width.takeIf { it > 0 } ?: 720
                 val h = view.height.takeIf { it > 0 } ?: 1280
                 val b = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                val oldTranslation = view.translationX
+                view.translationX = 0f
                 view.draw(Canvas(b))
+                view.translationX = oldTranslation
                 val stream = ByteArrayOutputStream()
                 b.compress(Bitmap.CompressFormat.JPEG, 70, stream)
                 b.recycle()
@@ -456,24 +463,10 @@ class BrowserDriverServer private constructor(
 
     private fun checkUrl(url: String) {
         require(url.startsWith("http://") || url.startsWith("https://")) { "only http and https URLs are allowed" }
-        val host = URI(url).host ?: throw IllegalArgumentException("URL has no host")
-        // Loopback is refused for arbitrary targets (an SSRF guard against
-        // the driver and the harness's own ports), with one narrow exception:
-        // the exact fixture port the test driver injected. Nothing else on
-        // loopback — including this driver and the harness — is reachable.
-        if (fixturePort > 0 && host == "127.0.0.1" && URI(url).port == fixturePort) return
-        require(!isPrivateHost(host)) { "requests to private/loopback addresses are not allowed" }
+        require(BrowserSecurity.isSafeWebUrl(url, fixturePort)) { "requests to private/loopback addresses are not allowed" }
     }
 
-    private fun isPrivateHost(host: String): Boolean {
-        if (host == "localhost" || host.endsWith(".localhost") || host.endsWith(".local") || host.endsWith(".internal")) return true
-        return try {
-            val address = InetAddress.getByName(host)
-            address.isLoopbackAddress || address.isLinkLocalAddress || address.isSiteLocalAddress || address.isAnyLocalAddress
-        } catch (_: Exception) {
-            false
-        }
-    }
+    private fun isPrivateHost(host: String): Boolean = BrowserSecurity.isPrivateHost(host)
 
     // ── HTTP layer ──────────────────────────────────────────────────────────
 
@@ -600,6 +593,26 @@ class BrowserDriverServer private constructor(
         /** The live WebView of a session, for the Compose take-control view.
          *  Callers must touch it on the main thread only. */
         fun attachedWebView(sessionName: String): WebView? = current?.webViews?.get(sessionName)
+
+        /** Adopts a bot session's WebView for interactive display in InAppBrowserSurface.
+         *  Detaches from decorView and resets translation so it renders on screen. */
+        fun adoptSessionWebView(sessionName: String): WebView? {
+            val server = current ?: return null
+            val view = server.webViews[sessionName] ?: return null
+            (view.parent as? ViewGroup)?.removeView(view)
+            view.translationX = 0f
+            view.isFocusable = true
+            view.isClickable = true
+            return view
+        }
+
+        /** Releases an adopted session WebView back to the background decorView holder. */
+        fun releaseSessionWebView(sessionName: String, view: WebView) {
+            val server = current ?: return
+            if (server.webViews[sessionName] === view) {
+                server.attachToHostWindow(view)
+            }
+        }
 
         /** The window whose decor view hosts the bots' session WebViews. The
          *  app registers this on every Activity resume: an unattached WebView

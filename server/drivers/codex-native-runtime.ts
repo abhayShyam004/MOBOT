@@ -33,7 +33,7 @@ export const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/respon
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const USER_AGENT = "openmausbot-codex-native";
 const MAX_TOOL_CALLS = 128;
-const MAX_ROUNDS = 16;
+const MAX_ROUNDS = 64;
 
 /** A failure in the ChatGPT backend protocol itself; never retried blindly. */
 export class CodexResponsesError extends Error {}

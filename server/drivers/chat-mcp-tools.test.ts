@@ -138,7 +138,7 @@ describe("Chat MCP session", () => {
 
   it.each([
     ["repeated cursor", `reply(message, {tools:[],nextCursor:"same"});`],
-    ["too many tools", `reply(message, {tools:Array.from({length:129},(_,i)=>({name:"tool"+i,inputSchema:schema}))});`],
+    ["too many tools", `reply(message, {tools:Array.from({length:257},(_,i)=>({name:"tool"+i,inputSchema:schema}))});`],
     ["duplicate tool", `reply(message, {tools:[{name:"same",inputSchema:schema},{name:"same",inputSchema:schema}]});`],
     ["invalid RPC", `process.stdout.write('{"result":1}\\n');`],
     ["oversized incomplete frame", `process.stdout.write("x".repeat(2*1024*1024+1));`],

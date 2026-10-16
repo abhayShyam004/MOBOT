@@ -157,7 +157,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
         headers: { authorization: `Bearer ${options.apiKey}`, "content-type": "application/json" },
         body: JSON.stringify({
           ...options.requestBody(model, messages, stream),
-          ...(tools.length ? { tools } : {}),
+          ...(tools.length ? { tools, tool_choice: "auto" } : {}),
         }),
         signal: activeSignal,
       });
@@ -378,7 +378,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
           function: { name: tool.name, description: tool.description, parameters: tool.inputSchema },
         }));
         const allDefinitions = tools.definitions.concat(harnessDefinitions);
-        for (let round = 0; round < 16; round++) {
+        for (let round = 0; round < 64; round++) {
           abort.signal.throwIfAborted();
           native("out", options.nativeLog.outgoing(turn, messages, model));
           let attempt = 0;
@@ -461,6 +461,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             ...(completion.protocolReasoning ? { reasoning_content: completion.protocolReasoning } : {}),
             ...(completion.protocolReasoningDetails.length ? { reasoning_details: completion.protocolReasoningDetails } : {}),
           });
+          let roundHadFailure = false;
           for (const call of completion.toolCalls) {
             abort.signal.throwIfAborted();
             let result: { text: string; ok: boolean } | undefined;
@@ -546,10 +547,16 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             const text = safeText(settledResult.text);
             const output = preview({ ok: settledResult.ok, result: text });
             emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.id, ok: settledResult.ok, output });
-            if (!settledResult.ok) toolFailed = true;
+            if (!settledResult.ok) {
+              toolFailed = true;
+              roundHadFailure = true;
+            }
             messages.push({ role: "tool", tool_call_id: call.id, content: JSON.stringify({ ok: settledResult.ok, result: text }) });
             abort.signal.throwIfAborted();
             if (fatal) throw fatal;
+          }
+          if (!roundHadFailure && completion.toolCalls.length > 0) {
+            toolFailed = false;
           }
         }
         if (!ok) throw new ChatProtocolError("model-call limit reached before a final response");

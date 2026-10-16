@@ -17,7 +17,15 @@ sealed interface MarkdownBlock {
         val alignments: List<TableAlignment>,
         val rows: List<List<String>>,
     ) : MarkdownBlock
+    data class Image(
+        val url: String,
+        val alt: String? = null,
+    ) : MarkdownBlock
 }
+
+private val IMAGE_BLOCK_REGEX = Regex("""^!\[([^\]]*)\]\(([^)]+)\)$""")
+private val ATTACHED_IMAGE_TAG_REGEX = Regex("""^<attached-image[\t ]+path="([^"\r\n]*)"(?:[\t ]+name="([^"\r\n]*)")?[\t ]*/>$""")
+private val INLINE_IMAGE_REGEX = Regex("""!\[([^\]]*)\]\(([^)]+)\)""")
 
 object Markdown {
     fun blocks(source: String): List<MarkdownBlock> {
@@ -64,6 +72,41 @@ object Markdown {
                     blocks += MarkdownBlock.Rule
                     continue
                 }
+            }
+
+            val imgMatch = IMAGE_BLOCK_REGEX.matchEntire(trimmed)
+            if (imgMatch != null) {
+                flushParagraph()
+                val alt = imgMatch.groupValues[1].ifBlank { null }
+                val url = imgMatch.groupValues[2].trim()
+                blocks += MarkdownBlock.Image(url, alt)
+                continue
+            }
+
+            val tagMatch = ATTACHED_IMAGE_TAG_REGEX.matchEntire(trimmed)
+            if (tagMatch != null) {
+                flushParagraph()
+                val url = tagMatch.groupValues[1].trim()
+                val alt = tagMatch.groupValues.getOrNull(2)?.ifBlank { null }
+                blocks += MarkdownBlock.Image(url, alt)
+                continue
+            }
+
+            val inlineMatch = INLINE_IMAGE_REGEX.find(line)
+            if (inlineMatch != null) {
+                flushParagraph()
+                val before = line.substring(0, inlineMatch.range.first).trim()
+                if (before.isNotEmpty()) {
+                    blocks += MarkdownBlock.Paragraph(before)
+                }
+                val alt = inlineMatch.groupValues[1].ifBlank { null }
+                val url = inlineMatch.groupValues[2].trim()
+                blocks += MarkdownBlock.Image(url, alt)
+                val after = line.substring(inlineMatch.range.last + 1).trim()
+                if (after.isNotEmpty()) {
+                    paragraph += after
+                }
+                continue
             }
 
             heading(trimmed)?.let {

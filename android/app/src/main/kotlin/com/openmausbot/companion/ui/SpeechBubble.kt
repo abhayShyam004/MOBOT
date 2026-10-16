@@ -192,23 +192,20 @@ private const val QUARTER = 90f
  */
 object BubbleColor {
     /**
-     * What you said: the brand colour, held down to a whisper of it.
-     *
-     * It used to be the mascot palette's full blue — a saturated fill that made
-     * every screenful of transcript a two-colour argument, and the loudest thing
-     * in a conversation about something else. The person's own words still read
-     * as theirs, in the app's own colour, without the app shouting them.
+     * User bubble: Grok obsidian dark charcoal in daylight, deep dark in dark mode.
      */
     val mine: Color
-        @Composable get() = AppTheme.colors.myBubble
+        @Composable get() = if (AppTheme.isDark) Color(0xFF2C2C30) else Color(0xFF1F1F21)
 
     val mineText: Color
-        @Composable get() = AppTheme.colors.onMyBubble
+        @Composable get() = Color.White
 
     /**
-     * What a bot said: one step off the page, in the design system's own surface
-     * token, so a bubble and a sheet are the same material at different sizes.
+     * Assistant bubble: Grok clean, soft light gray in daylight, subtle dark surface in dark mode.
      */
     val theirs: Color
-        @Composable get() = AppTheme.colors.surface
+        @Composable get() = if (AppTheme.isDark) Color(0xFF212124) else Color(0xFFF3F3F5)
+
+    val theirsText: Color
+        @Composable get() = if (AppTheme.isDark) Color(0xFFF0F0F2) else Color(0xFF1A1A1C)
 }

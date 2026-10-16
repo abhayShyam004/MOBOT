@@ -79,6 +79,24 @@ class HarnessHost(
     val boundPort: Int?
         get() = (_status.value as? HostStatus.Running)?.port
 
+    val isReady: Boolean
+        get() = _status.value is HostStatus.Running
+
+    suspend fun awaitReady(timeoutMs: Long = 45_000L): Boolean {
+        if (!wantRunning.get()) {
+            start()
+        }
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (System.currentTimeMillis() < deadline) {
+            when (_status.value) {
+                is HostStatus.Running -> return true
+                is HostStatus.Failed -> return false
+                else -> delay(100)
+            }
+        }
+        return _status.value is HostStatus.Running
+    }
+
     suspend fun start() {
         if (wantRunning.get()) return
         wantRunning.set(true)
@@ -331,7 +349,7 @@ class HarnessHost(
         // Surface the captured output next to the exit reason in logcat:
         // this is the single most useful place to find the server's own
         // error message (bad ELF, linker failure, JS exception, …).
-        _output.value.takeLast(15).forEach { logE("host-output| $it") }
+        _output.value.takeLast(50).forEach { logE("host-output| $it") }
         if (!wantRunning.get()) {
             _status.value = HostStatus.Idle
             return
@@ -435,8 +453,19 @@ class HarnessHost(
             connection.readTimeout = 2_000
             connection.requestMethod = "GET"
             val code = connection.responseCode
+            val body = if (code in 200..299) {
+                runCatching {
+                    connection.inputStream.bufferedReader().use { it.readText() }
+                }.getOrDefault("")
+            } else ""
             connection.disconnect()
-            if (code in 200..299) HealthResult.Reachable else HealthResult.HttpError(code)
+            if (code in 200..299 && body.contains("openmausbot")) {
+                HealthResult.Reachable
+            } else if (code in 200..299) {
+                HealthResult.Error("Foreign service listening on port $port")
+            } else {
+                HealthResult.HttpError(code)
+            }
         }.getOrElse { error ->
             when {
                 error is java.net.ConnectException -> HealthResult.ConnectionRefused

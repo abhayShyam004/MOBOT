@@ -52,6 +52,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.R
 
 /**
@@ -510,18 +511,10 @@ internal fun BotRow(
             .fillMaxWidth()
             .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .semantics {
-                // The dot is the only thing that says "unread" in the layout, so
-                // it is said again in words rather than left to colour alone.
                 if (unread) stateDescription = "Unread"
             }
-            // 19 dp above and below the face, against the reference's own pitch:
-            // its rows measure about 0.24 of the screen width apart, of which the
-            // face is 0.12. Rows this airy are what let the eye land on one bot
-            // without a rule under it to say where the last one ended.
-            .padding(start = AppSpacing.gutter, end = AppSpacing.gutter, top = 19.dp, bottom = 19.dp),
-        // 20 + 40 + 16 = the 76 dp the design puts the name at, measured off its
-        // own rows: text starts at 0.198 of the screen width there.
-        horizontalArrangement = Arrangement.spacedBy(AppSpacing.lg),
+            .padding(horizontal = 20.dp, vertical = 13.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         AvatarBadge(
@@ -535,24 +528,25 @@ internal fun BotRow(
 
         Column(
             modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(3.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                // The name may use what is left over once the chip and the stamp
-                // have their intrinsic widths; a long one ellipsizes instead of
-                // pushing the time off the row.
                 Row(
                     modifier = Modifier.weight(1f),
-                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
                         text = name,
-                        style = MaterialTheme.typography.titleMedium,
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontSize = 17.5.sp,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = (-0.3).sp,
+                        ),
                         color = colors.textPrimary,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -565,33 +559,36 @@ internal fun BotRow(
                 if (stamp.isNotEmpty()) {
                     Text(
                         text = stamp,
-                        style = MaterialTheme.typography.bodySmall,
+                        style = MaterialTheme.typography.bodySmall.copy(
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.Normal,
+                        ),
                         color = colors.textTertiary,
                         maxLines = 1,
                     )
                 }
             }
 
-            if (activity.isNotEmpty() || unread) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = activity,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = colors.textSecondary,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    if (unread) {
-                        // In the bot's own colour, the same one its face is drawn
-                        // in: the dot is the row saying "this one", not the app
-                        // saying "a notification".
-                        AppStatusDot(color = accent, size = 10.dp)
-                    }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = activity.ifEmpty { "No messages yet" },
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        fontSize = 14.5.sp,
+                        fontWeight = FontWeight.Normal,
+                        letterSpacing = (-0.1).sp,
+                    ),
+                    color = colors.textSecondary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                if (unread) {
+                    // Vibrant Grok electric blue unread indicator
+                    AppStatusDot(color = Color(0xFF1D9BF0), size = 8.5.dp)
                 }
             }
         }

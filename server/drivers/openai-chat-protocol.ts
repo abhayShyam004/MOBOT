@@ -5,7 +5,7 @@ export interface ChatToolCall {
   function: { name: string; arguments: string };
 }
 
-export const MAX_CHAT_TOOL_CALLS = 32;
+export const MAX_CHAT_TOOL_CALLS = 128;
 const MAX_ARGUMENT_CHARS = 256_000;
 
 export class ChatProtocolError extends Error {}

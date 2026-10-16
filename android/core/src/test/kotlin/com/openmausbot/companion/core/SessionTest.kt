@@ -1873,6 +1873,67 @@ class SessionTest {
         scope.cancel()
     }
 
+    @Test
+    fun localHostWaitsForReadinessBeforeStreaming() = runTest {
+        val loopback = Connection(id = "c-self", name = "This phone", host = "127.0.0.1", port = 18799)
+        val tokenStore = FakeTokenStore().apply { saved["c-self"] = "local-token" }
+        var isReady = false
+        val readinessChecked = CompletableDeferred<Unit>()
+        val streamFlow = MutableSharedFlow<StreamFrame>(extraBufferCapacity = 8)
+
+        val session = session(
+            connectionStore = FakeConnectionStore(loopback),
+            tokenStore = tokenStore,
+            localHostReadyProvider = {
+                readinessChecked.complete(Unit)
+                while (!isReady) {
+                    kotlinx.coroutines.delay(50)
+                }
+                true
+            },
+            events = { _, _ -> streamFlow },
+        )
+        session.awaitRestored()
+        session.connect()
+        runCurrent()
+
+        readinessChecked.await()
+        assertIs<Session.Status.Starting>(session.status.value)
+        assertEquals(0, streamFlow.subscriptionCount.value)
+
+        isReady = true
+        advanceTimeBy(100)
+        runCurrent()
+
+        assertEquals(1, streamFlow.subscriptionCount.value)
+        streamFlow.tryEmit(StreamFrame(Frame.Hello(cursor = "c1", resumed = false), seq = 1))
+        runCurrent()
+        yield()
+        runCurrent()
+
+        assertEquals(Session.Status.Live, session.status.value)
+    }
+
+    @Test
+    fun localHostReportsOfflineIfReadinessFails() = runTest {
+        val loopback = Connection(id = "c-self", name = "This phone", host = "127.0.0.1", port = 18799)
+        val tokenStore = FakeTokenStore().apply { saved["c-self"] = "local-token" }
+
+        val session = session(
+            connectionStore = FakeConnectionStore(loopback),
+            tokenStore = tokenStore,
+            localHostReadyProvider = { false },
+            events = { _, _ -> emptyFlow() },
+        )
+        session.awaitRestored()
+        session.connect()
+        runCurrent()
+        advanceUntilIdle()
+
+        val status = assertIs<Session.Status.Offline>(session.status.value)
+        assertEquals("Local engine failed to start.", status.message)
+    }
+
     private fun kotlinx.coroutines.test.TestScope.session(
         connectionStore: ConnectionStore = FakeConnectionStore(),
         tokenStore: TokenStore = FakeTokenStore(),
@@ -1889,6 +1950,7 @@ class SessionTest {
         },
         // Default: the older sidecar every existing test implicitly speaks to.
         metadata: suspend (CompanionClient) -> CompanionConnectionMetadata = { throw APIError.Status(404) },
+        localHostReadyProvider: (suspend () -> Boolean)? = null,
     ): Session = Session(
         scope = backgroundScope,
         connectionStore = connectionStore,
@@ -1901,6 +1963,7 @@ class SessionTest {
         eventsFn = { _, since, screens -> events(since, screens) },
         hydrateFn = { _, _ -> hydrate() },
         metadataFn = metadata,
+        localHostReadyProvider = localHostReadyProvider,
     )
 
     private fun roomJson(): String = """{

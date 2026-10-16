@@ -94,6 +94,6 @@ internal fun rememberSettledStatus(status: Session.Status): SettledStatus {
     val offlineFor = offlineSince?.let { now - it } ?: 0L
     val visible = StartupSettle.visible(status, everLive, offlineFor)
     return remember(visible, everLive) {
-        SettledStatus(status = visible, settled = everLive || visible != Session.Status.Connecting)
+        SettledStatus(status = visible, settled = everLive || (visible != Session.Status.Connecting && visible !is Session.Status.Starting))
     }
 }

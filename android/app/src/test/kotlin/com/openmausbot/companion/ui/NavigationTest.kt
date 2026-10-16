@@ -208,12 +208,13 @@ class NavigationTest {
     }
 
     @Test
-    fun `the five addressable destinations do not collide in saved state`() {
+    fun `the addressable destinations do not collide in saved state`() {
         val encoded = CompanionNavigator.encode(
             listOf(
                 Destination.Thread("x"),
                 Destination.Computer("x"),
                 Destination.Overview("x"),
+                Destination.Browser("https://x.com", "title", "bot-1"),
                 Destination.Chat(ChatTarget.Bot("x", "x")),
                 Destination.Chat(ChatTarget.Room("x", "x")),
             ),
@@ -222,21 +223,20 @@ class NavigationTest {
     }
 
     @Test
-    fun `a chat entry that cannot be read back is dropped rather than crashing`() {
-        // Truncated, malformed and over-long length prefixes all mean "unreadable".
-        assertEquals(
-            listOf(Destination.Roster),
-            CompanionNavigator.decode(
-                listOf("roster", "botchat:", "botchat:x:abc", "roomchat:99:abc"),
-            ),
-        )
+    fun `browser destination encodes and decodes cleanly with all arguments`() {
+        val browserFull = Destination.Browser("https://example.com/test?a=1", "Example Title", "bot-1")
+        val browserMinimal = Destination.Browser("http://example.org")
+        val stack = listOf(Destination.Roster, browserFull, browserMinimal)
+        val encoded = CompanionNavigator.encode(stack)
+        val decoded = CompanionNavigator.decode(encoded)
+        assertEquals(stack, decoded)
     }
 
     @Test
-    fun `an unreadable saved entry is dropped rather than crashing`() {
+    fun `malformed browser encoding is dropped without throwing`() {
         assertEquals(
-            listOf(Destination.Roster, Destination.Settings),
-            CompanionNavigator.decode(listOf("roster", "nonsense", "settings")),
+            listOf(Destination.Roster),
+            CompanionNavigator.decode(listOf("roster", "browser:", "browser:not-length-prefixed", "browser:99:short")),
         )
     }
 

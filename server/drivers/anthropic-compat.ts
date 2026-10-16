@@ -351,7 +351,7 @@ export const AnthropicCompatDriver: ProviderDriver<AnthropicCompatConfig> = {
             function: { name: tool.name, description: tool.description, parameters: tool.inputSchema },
           }));
           const definitions = tools.definitions.concat(harnessDefinitions);
-          for (let round = 0; round < 16; round++) {
+          for (let round = 0; round < 64; round++) {
             abort.signal.throwIfAborted();
             native("out", { model, system, messages, tools: definitions.map((tool) => tool.function.name) });
             let attempt = 0;

@@ -67,8 +67,11 @@ class AttachmentRulesTest {
         assertEquals(FilePreviewKind.MARKDOWN, FilePreviewRules.kind("text/markdown", "x.bin"))
         assertEquals(FilePreviewKind.MARKDOWN, FilePreviewRules.kind("application/octet-stream", "README.md"))
         assertEquals(FilePreviewKind.TEXT, FilePreviewRules.kind("text/plain", "notes"))
-        assertEquals(FilePreviewKind.TEXT, FilePreviewRules.kind("application/json", "data.json"))
-        assertEquals(FilePreviewKind.OTHER, FilePreviewRules.kind("application/pdf", "report.pdf"))
+        assertEquals(FilePreviewKind.CODE, FilePreviewRules.kind("application/json", "data.json"))
+        assertEquals(FilePreviewKind.PDF, FilePreviewRules.kind("application/pdf", "report.pdf"))
+        assertEquals(FilePreviewKind.CSV, FilePreviewRules.kind("text/csv", "data.csv"))
+        assertEquals(FilePreviewKind.CODE, FilePreviewRules.kind("text/x-python", "script.py"))
+        assertEquals(FilePreviewKind.OTHER, FilePreviewRules.kind("application/octet-stream", "binary.dat"))
         assertEquals("report.pdf", FilePreviewRules.nameForOpening("/Users/x/report.pdf"))
         assertEquals("report.pdf", FilePreviewRules.nameForOpening("""C:\Users\x\report.pdf"""))
     }

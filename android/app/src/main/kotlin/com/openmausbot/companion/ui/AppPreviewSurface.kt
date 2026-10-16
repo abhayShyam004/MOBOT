@@ -9,6 +9,7 @@ import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.activity.compose.BackHandler
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -112,6 +113,18 @@ fun AppPreviewSurface(
     var pageLoadingProgress by remember { mutableFloatStateOf(0f) }
     var isPageLoading by remember { mutableStateOf(false) }
 
+    val handleBack = {
+        val view = webViewInstance
+        if (view != null && view.canGoBack()) {
+            view.goBack()
+        } else {
+            onClose()
+        }
+    }
+    BackHandler(enabled = true) {
+        handleBack()
+    }
+
     Surface(
         modifier = modifier.fillMaxSize(),
         color = colors.background,
@@ -213,6 +226,11 @@ fun AppPreviewSurface(
                                 onClick = { launchExternalBrowser(context, state.url) },
                             )
                         }
+                        AppPill(
+                            text = "Close",
+                            tone = PillTone.Quiet,
+                            onClick = onClose,
+                        )
                     }
                 }
             }

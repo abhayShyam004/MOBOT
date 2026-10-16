@@ -15,14 +15,42 @@ export class GeneralProcessManager {
   private readonly processes = new Map<string, ManagedProcessRecord>();
   private readonly childHandles = new Map<string, ChildProcess>();
   private readonly logDir: string;
+  private readonly registryFile: string;
 
   constructor(workspacePath?: string) {
     const root = workspacePath || process.env.AC_WORKSPACE || process.cwd();
     this.logDir = join(root, ".omb-proc-logs");
+    this.registryFile = join(this.logDir, "processes.json");
     try {
       mkdirSync(this.logDir, { recursive: true });
     } catch {
       // Ignore directory creation failure if already exists
+    }
+    this.loadFromDisk();
+  }
+
+  private saveToDisk(): void {
+    try {
+      const records = Array.from(this.processes.values());
+      writeFileSync(this.registryFile, JSON.stringify(records, null, 2), "utf8");
+    } catch {
+      // Best-effort persistence
+    }
+  }
+
+  private loadFromDisk(): void {
+    try {
+      if (existsSync(this.registryFile)) {
+        const raw = readFileSync(this.registryFile, "utf8");
+        const list: ManagedProcessRecord[] = JSON.parse(raw);
+        for (const item of list) {
+          if (item && item.id) {
+            this.processes.set(item.id, item);
+          }
+        }
+      }
+    } catch {
+      // Best-effort load
     }
   }
 
@@ -86,6 +114,7 @@ export class GeneralProcessManager {
         record.state = "CRASHED";
         record.lastError = err.message;
         record.endTime = new Date().toISOString();
+        this.saveToDisk();
         try {
           appendFileSync(logFile, `\n[process.error] ${err.message}\n`);
         } catch {}
@@ -100,6 +129,7 @@ export class GeneralProcessManager {
         } else {
           record.state = code === 0 ? "STOPPED" : "CRASHED";
         }
+        this.saveToDisk();
         try {
           appendFileSync(logFile, `\n[process.exit] Code: ${code}, Signal: ${signal}\n`);
         } catch {}
@@ -111,12 +141,14 @@ export class GeneralProcessManager {
       // Give process 200ms grace period to catch immediate failure on launch
       await new Promise((r) => setTimeout(r, 200));
       await this.inspectProcess(id);
+      this.saveToDisk();
 
       return record;
     } catch (err: any) {
       record.state = "CRASHED";
       record.lastError = err.message;
       record.endTime = new Date().toISOString();
+      this.saveToDisk();
       return record;
     }
   }
@@ -144,6 +176,7 @@ export class GeneralProcessManager {
       if (!isAlive) {
         record.state = "CRASHED";
         if (!record.endTime) record.endTime = new Date().toISOString();
+        this.saveToDisk();
       } else {
         // If healthEndpoint is set, probe it
         if (record.healthEndpoint) {
@@ -176,6 +209,7 @@ export class GeneralProcessManager {
     } catch (err: any) {
       if (err.code === "ESRCH") {
         record.state = "STOPPED";
+        this.saveToDisk();
         return { ok: true, state: "STOPPED" };
       }
     }
@@ -189,6 +223,7 @@ export class GeneralProcessManager {
       } catch {
         record.state = "STOPPED";
         record.endTime = new Date().toISOString();
+        this.saveToDisk();
         return { ok: true, state: "STOPPED" };
       }
     }
@@ -200,6 +235,7 @@ export class GeneralProcessManager {
 
     record.state = "STOPPED";
     record.endTime = new Date().toISOString();
+    this.saveToDisk();
     return { ok: true, state: "STOPPED" };
   }
 

@@ -6,25 +6,35 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import android.graphics.ImageDecoder
+import android.graphics.pdf.PdfRenderer
 import android.os.Build
+import android.os.ParcelFileDescriptor
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.MaterialTheme
@@ -40,6 +50,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -82,6 +93,12 @@ enum class FilePreviewKind {
     MARKDOWN,
     /** Monospace, in the app. */
     TEXT,
+    /** Native multi-page PDF viewer with high-res rendering. */
+    PDF,
+    /** Structured tabular view for CSV and TSV datasets. */
+    CSV,
+    /** Source code viewer with syntax surface and line numbers. */
+    CODE,
     /** Handed to whatever app opens it — Android's Quick Look. */
     OTHER,
 }
@@ -94,11 +111,20 @@ object FilePreviewRules {
     fun kind(contentType: String, filename: String): FilePreviewKind {
         val mime = contentType.lowercase()
         val suffix = filename.substringAfterLast('.', "").lowercase()
-        if (mime.startsWith("image/") || suffix in setOf("png", "jpg", "jpeg", "gif", "webp")) {
+        if (mime.startsWith("image/") || suffix in setOf("png", "jpg", "jpeg", "gif", "webp", "bmp", "svg")) {
             return FilePreviewKind.IMAGE
         }
-        if (mime == "text/markdown" || suffix == "md" || suffix == "markdown") return FilePreviewKind.MARKDOWN
-        if (mime.startsWith("text/") || mime == "application/json") return FilePreviewKind.TEXT
+        if (mime == "application/pdf" || suffix == "pdf") {
+            return FilePreviewKind.PDF
+        }
+        if (mime == "text/csv" || mime == "text/tab-separated-values" || suffix in setOf("csv", "tsv")) {
+            return FilePreviewKind.CSV
+        }
+        if (mime == "text/markdown" || suffix in setOf("md", "markdown")) return FilePreviewKind.MARKDOWN
+        if (suffix in setOf("js", "mjs", "cjs", "ts", "jsx", "tsx", "py", "sh", "bash", "kt", "java", "c", "cpp", "h", "rs", "go", "json", "yaml", "yml", "xml", "html", "css", "sql")) {
+            return FilePreviewKind.CODE
+        }
+        if (mime.startsWith("text/") || mime.contains("json") || mime.contains("xml")) return FilePreviewKind.TEXT
         return FilePreviewKind.OTHER
     }
 
@@ -440,6 +466,7 @@ internal fun FilePreviewSheet(
     onDismiss: () -> Unit,
     onShare: () -> String?,
     onOpen: () -> String?,
+    onOpenBrowser: ((String) -> Unit)? = null,
 ) {
     var actionError by remember(item.file.absolutePath) { mutableStateOf<String?>(null) }
     val uriHandler = LocalUriHandler.current
@@ -477,6 +504,9 @@ internal fun FilePreviewSheet(
                 }
                 when (item.kind) {
                     FilePreviewKind.IMAGE -> FullScreenImage(item)
+                    FilePreviewKind.PDF -> PdfViewer(item, onOpenExternal = { actionError = onOpen() })
+                    FilePreviewKind.CSV -> CsvViewer(item)
+                    FilePreviewKind.CODE -> CodeViewer(item)
                     FilePreviewKind.MARKDOWN -> {
                         val text = remember(item.file.absolutePath) { FilePreviewRules.text(item.data) }
                         SelectionContainer(modifier = Modifier.weight(1f)) {
@@ -486,6 +516,8 @@ internal fun FilePreviewSheet(
                                     val web = LocalMessageLink.resolve(raw) as? LocalMessageLink.Web
                                     if (web == null) {
                                         actionError = "Open links to other computer files from the original message."
+                                    } else if (onOpenBrowser != null) {
+                                        onOpenBrowser(web.url)
                                     } else {
                                         runCatching { uriHandler.openUri(web.url) }
                                             .onFailure { actionError = "That link couldn't be opened on this phone." }
@@ -514,6 +546,283 @@ internal fun FilePreviewSheet(
                         }
                     }
                     FilePreviewKind.OTHER -> GenericFilePreview(item)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PdfViewer(item: FilePreviewItem, onOpenExternal: () -> Unit) {
+    var pageCount by remember(item.file.absolutePath) { mutableStateOf(0) }
+    var pages by remember(item.file.absolutePath) { mutableStateOf<List<ImageBitmap>>(emptyList()) }
+    var error by remember(item.file.absolutePath) { mutableStateOf<String?>(null) }
+    var loading by remember(item.file.absolutePath) { mutableStateOf(true) }
+
+    LaunchedEffect(item.file.absolutePath) {
+        loading = true
+        error = null
+        try {
+            val (count, rendered) = withContext(Dispatchers.IO) {
+                ParcelFileDescriptor.open(item.file, ParcelFileDescriptor.MODE_READ_ONLY).use { pfd ->
+                    PdfRenderer(pfd).use { renderer ->
+                        val total = renderer.pageCount
+                        val bitmaps = mutableListOf<ImageBitmap>()
+                        val maxPages = minOf(total, 50)
+                        for (i in 0 until maxPages) {
+                            val page = renderer.openPage(i)
+                            val targetWidth = (page.width * 2).coerceIn(720, 1600)
+                            val targetHeight = (page.height * targetWidth) / page.width
+                            val bitmap = android.graphics.Bitmap.createBitmap(targetWidth, targetHeight, android.graphics.Bitmap.Config.ARGB_8888)
+                            val canvas = android.graphics.Canvas(bitmap)
+                            canvas.drawColor(android.graphics.Color.WHITE)
+                            page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
+                            page.close()
+                            bitmaps.add(bitmap.asImageBitmap())
+                        }
+                        total to bitmaps
+                    }
+                }
+            }
+            pageCount = count
+            pages = rendered
+        } catch (e: Exception) {
+            error = e.localizedMessage ?: "Could not render PDF"
+        } finally {
+            loading = false
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        when {
+            loading -> {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                }
+            }
+            error != null -> {
+                Column(
+                    modifier = Modifier.fillMaxSize().padding(24.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Text("Couldn't preview PDF: $error", color = MaterialTheme.colorScheme.error, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(16.dp))
+                    Button(onClick = onOpenExternal) {
+                        Text("Open in external app")
+                    }
+                }
+            }
+            pages.isEmpty() -> {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text("This PDF contains no pages.", color = secondaryTint)
+                }
+            }
+            else -> {
+                LazyColumn(
+                    modifier = Modifier.fillMaxSize().background(if (AppTheme.isDark) Color(0xFF141416) else Color(0xFFF2F2F7)),
+                    contentPadding = PaddingValues(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    item {
+                        Text(
+                            text = if (pageCount == 1) "1 page" else "$pageCount pages",
+                            fontSize = 12.sp,
+                            color = secondaryTint,
+                            modifier = Modifier.padding(bottom = 4.dp),
+                        )
+                    }
+                    items(pages.size) { index ->
+                        val pageBitmap = pages[index]
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(Color.White)
+                                .border(1.dp, Color(0xFFE0E0E0), RoundedCornerShape(8.dp))
+                                .padding(4.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Image(
+                                bitmap = pageBitmap,
+                                contentDescription = "Page ${index + 1}",
+                                contentScale = ContentScale.FillWidth,
+                                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)),
+                            )
+                            Text(
+                                text = "Page ${index + 1} of $pageCount",
+                                fontSize = 11.sp,
+                                color = Color.Gray,
+                                modifier = Modifier.padding(vertical = 4.dp),
+                            )
+                        }
+                    }
+                    if (pageCount > 50) {
+                        item {
+                            Text(
+                                text = "Showing first 50 pages. Use Open to view full document in an external app.",
+                                fontSize = 12.sp,
+                                color = secondaryTint,
+                                textAlign = TextAlign.Center,
+                                modifier = Modifier.padding(16.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CsvViewer(item: FilePreviewItem) {
+    val text = remember(item.file.absolutePath) { FilePreviewRules.text(item.data) }
+    val rows = remember(text) {
+        text.lines()
+            .filter { it.isNotBlank() }
+            .take(200)
+            .map { line ->
+                val delimiter = if (item.filename.endsWith(".tsv", ignoreCase = true)) '\t' else ','
+                parseCsvLine(line, delimiter)
+            }
+    }
+    if (rows.isEmpty()) {
+        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Text("Empty dataset.", color = secondaryTint)
+        }
+        return
+    }
+
+    val header = rows.first()
+    val dataRows = rows.drop(1)
+    val isDark = AppTheme.isDark
+    val borderColour = if (isDark) Color(0xFF333336) else Color(0xFFE5E5EA)
+    val headerBg = if (isDark) Color(0xFF242428) else Color(0xFFF2F2F7)
+    val altRowBg = if (isDark) Color(0xFF1E1E22) else Color(0xFFF9F9FB)
+
+    Column(modifier = Modifier.fillMaxSize().padding(12.dp)) {
+        Text(
+            text = "${rows.size} rows · ${header.size} columns",
+            fontSize = 12.sp,
+            color = secondaryTint,
+            modifier = Modifier.padding(bottom = 8.dp),
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .border(1.dp, borderColour, RoundedCornerShape(8.dp))
+                .clip(RoundedCornerShape(8.dp))
+                .horizontalScroll(rememberScrollState())
+                .verticalScroll(rememberScrollState()),
+        ) {
+            Column {
+                Row(modifier = Modifier.background(headerBg)) {
+                    header.forEach { cell ->
+                        Text(
+                            text = cell,
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            modifier = Modifier
+                                .widthIn(min = 90.dp, max = 220.dp)
+                                .border(0.5.dp, borderColour)
+                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
+                dataRows.forEachIndexed { rowIndex, row ->
+                    Row(modifier = Modifier.background(if (rowIndex % 2 == 1) altRowBg else Color.Transparent)) {
+                        header.indices.forEach { colIndex ->
+                            val cell = row.getOrElse(colIndex) { "" }
+                            Text(
+                                text = cell,
+                                fontSize = 12.sp,
+                                modifier = Modifier
+                                    .widthIn(min = 90.dp, max = 220.dp)
+                                    .border(0.5.dp, borderColour)
+                                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun parseCsvLine(line: String, delimiter: Char): List<String> {
+    val result = mutableListOf<String>()
+    val current = StringBuilder()
+    var inQuotes = false
+    var i = 0
+    while (i < line.length) {
+        val c = line[i]
+        when {
+            c == '"' -> {
+                if (inQuotes && i + 1 < line.length && line[i + 1] == '"') {
+                    current.append('"')
+                    i++
+                } else {
+                    inQuotes = !inQuotes
+                }
+            }
+            c == delimiter && !inQuotes -> {
+                result.add(current.toString().trim())
+                current.setLength(0)
+            }
+            else -> current.append(c)
+        }
+        i++
+    }
+    result.add(current.toString().trim())
+    return result
+}
+
+@Composable
+private fun CodeViewer(item: FilePreviewItem) {
+    val text = remember(item.file.absolutePath) { FilePreviewRules.text(item.data) }
+    val lines = remember(text) { text.lines() }
+    val isDark = AppTheme.isDark
+    val bg = if (isDark) Color(0xFF18181B) else Color(0xFFF7F7F8)
+    val gutterColor = if (isDark) Color(0xFF52525B) else Color(0xFFA1A1AA)
+
+    SelectionContainer(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(bg)
+                .verticalScroll(rememberScrollState())
+                .horizontalScroll(rememberScrollState())
+                .padding(12.dp),
+        ) {
+            Column(
+                modifier = Modifier.padding(end = 12.dp),
+                horizontalAlignment = Alignment.End,
+            ) {
+                lines.indices.forEach { idx ->
+                    Text(
+                        text = "${idx + 1}",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        color = gutterColor,
+                        lineHeight = 18.sp,
+                    )
+                }
+            }
+            Column {
+                lines.forEach { line ->
+                    Text(
+                        text = line.ifEmpty { " " },
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        lineHeight = 18.sp,
+                        softWrap = false,
+                    )
                 }
             }
         }

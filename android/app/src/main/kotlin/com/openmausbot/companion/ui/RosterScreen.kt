@@ -204,76 +204,24 @@ fun RosterScreen(navigator: CompanionNavigator) {
     // every bot paid for its thread count: whitespace separates bots here, which
     // is both what the design is drawn from and what keeps the list dense.
     val entry: @Composable (ChatSummary) -> Unit = { summary ->
-        Column {
-            ChatRow(
-                summary = summary,
-                face = faces[summary.id] ?: MausState.IDLE,
-                waiting = summary.id in waiting,
-                onClick = { navigator.open(summary.chat) },
-                // Long-press is where deletion lives on a phone — the same
-                // gesture MessageRow uses for its menu.
-                onLongClick = { deletingChat = summary.chat },
-                // The face opens the bot rather than the conversation: a bot is
-                // the lasting thing, and its own screen is where its threads,
-                // memory and capabilities live.
-                onOpen = (summary.chat as? Chat.BotChat)?.let { owned ->
-                    { navigator.push(Destination.Overview(owned.bot.id)) }
-                },
-            )
-            // The thread tree is drawn only when there is something to disclose.
-            // A bot with one thread used to pay a third line for "1 thread", on
-            // every bot, which is most of what made this list half as dense as
-            // the design it is drawn from. A search still opens every bot's
-            // threads, because then the tree is the answer being asked for.
-            (summary.chat as? Chat.BotChat)?.bot?.let { bot ->
-                val threads = bot.threadGroups(queuedThreadIds = state.queuedThreadIds).sumOf { it.tasks.size }
-                if (threads < 2 && bot.id !in expandedBots && query.isBlank()) return@let
-                BotThreadTree(
-                    bot = bot,
-                    queuedThreadIds = state.queuedThreadIds,
-                    query = query,
-                    expanded = bot.id in expandedBots,
-                    collapsedFolders = collapsedFolders,
-                    creating = bot.id in creatingThreads,
-                    onToggle = {
-                        haptics.play(HapticCue.SELECT)
-                        expandedBots = if (bot.id in expandedBots) expandedBots - bot.id else expandedBots + bot.id
-                    },
-                    onToggleFolder = { key ->
-                        haptics.play(HapticCue.SELECT)
-                        collapsedFolders = if (key in collapsedFolders) collapsedFolders - key else collapsedFolders + key
-                    },
-                    onCreate = {
-                        // Hoisted across bot sections and search, so moving a row
-                        // cannot permit a second creation while the first is pending.
-                        if (bot.id !in creatingThreads) {
-                            creatingThreads = creatingThreads + bot.id
-                            scope.launch {
-                                try {
-                                    val created = session.createTask(bot, title = null)
-                                    if (created != null) {
-                                        navigator.open(Chat.BotChat(created))
-                                    } else if (session.actionError == null) {
-                                        session.actionError = "Couldn't create a thread. Check the connection and try again."
-                                    }
-                                } finally {
-                                    creatingThreads = creatingThreads - bot.id
-                                }
-                            }
-                        }
-                    },
-                    onManage = { managingThreads = Chat.BotChat(bot) },
-                    onOpen = navigator::open,
-                )
-            }
-        }
+        ChatRow(
+            summary = summary,
+            face = faces[summary.id] ?: MausState.IDLE,
+            waiting = summary.id in waiting,
+            onClick = { navigator.open(summary.chat) },
+            // Long-press is where deletion lives on a phone — the same
+            // gesture MessageRow uses for its menu.
+            onLongClick = { deletingChat = summary.chat },
+            // The face opens the bot rather than the conversation: a bot is
+            // the lasting thing, and its own screen is where its threads,
+            // memory and capabilities live.
+            onOpen = (summary.chat as? Chat.BotChat)?.let { owned ->
+                { navigator.push(Destination.Overview(owned.bot.id)) }
+            },
+        )
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
-        // The page's own geometry, behind everything: a fan in the corner and two
-        // quiet discs, drawn under the list so a screen with nothing on it yet
-        // still looks designed rather than blank.
-        DecorativeBackdrop(motif = BackdropMotif.HOME, height = 240.dp)
+    Box(modifier = Modifier.fillMaxSize().background(AppTheme.colors.background)) {
         Column(modifier = Modifier.fillMaxSize()) {
             RosterHeader(
                 bar = bar,
@@ -293,6 +241,7 @@ fun RosterScreen(navigator: CompanionNavigator) {
                 onOpenDailyBriefing = { showingDailyBriefing = true },
                 onOpenUniversalSearch = { showingUniversalSearch = true },
                 onOpenQuickCapture = { showingQuickCapture = true },
+                onOpenMascotStudio = { navigator.push(Destination.MascotShowcase) },
                 canCreateBot = true,
                 canOrganize = canCreateSection,
             )
@@ -313,10 +262,8 @@ fun RosterScreen(navigator: CompanionNavigator) {
                     .fillMaxWidth()
                     .weight(1f),
             ) {
-                // Unsearched, the empty state is about bots: channels are tiles
-                // in the strip, not rows.
                 val nothingToList =
-                    if (query.isEmpty()) !RosterLayout.listsAnyBot(summaries) else rows.isEmpty()
+                    if (query.isEmpty()) summaries.isEmpty() else rows.isEmpty()
                 if (nothingToList && hits.isEmpty()) {
                     if (!settled.settled && query.isEmpty()) {
                         // Nothing to show *yet*, which is not the same as nothing
@@ -330,14 +277,10 @@ fun RosterScreen(navigator: CompanionNavigator) {
                         AppEmptyState(
                             title = if (query.isEmpty()) "Your workspace is empty" else "Nothing matches",
                             message = if (query.isEmpty()) {
-                                "Create your first bot and it will show up here, with everything it is working on."
+                                "Your local computer agent is ready to help you work."
                             } else {
                                 "No bot or thread matches “$query”."
                             },
-                            // An empty screen keeps the one action that ends the
-                            // emptiness; the hero above the list steps aside for
-                            // it, because two invitations to the same thing is
-                            // one too many.
                             action = if (query.isEmpty()) {
                                 {
                                     AppPill(
@@ -355,149 +298,53 @@ fun RosterScreen(navigator: CompanionNavigator) {
 
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = BAR_CLEARANCE),
+                    contentPadding = PaddingValues(bottom = if (updates.isNotEmpty()) BAR_CLEARANCE else 24.dp),
                 ) {
-                    if (RosterLayout.showsGroups(query)) {
-                        // The hero opens the roster only once there is a roster to
-                        // open: with nothing listed, the empty state says the same
-                        // thing in the middle of the page, and a greeting above it
-                        // would be the app talking to itself.
-                        if (RosterLayout.listsAnyBot(summaries) || attention.isNotEmpty()) {
-                            item(key = "hero") {
-                                RosterHero(
-                                    bots = fleet,
-                                    working = busy,
-                                )
-                            }
-                        }
-                        if (attention.isNotEmpty()) {
-                            item(key = "attention-label") {
-                                SectionLabel("Needs attention", Modifier.padding(top = 2.dp, bottom = 4.dp))
-                            }
-                            items(attention, key = { "attention-${it.id}" }) { entry ->
-                                AttentionRow(entry = entry, onOpen = {
-                                    state.bots.firstOrNull { it.id == entry.botId }
-                                        ?.let { bot -> Chat.BotChat(bot.forTask(entry.task.threadId) ?: bot) }
-                                        ?.let(navigator::open)
-                                })
-                            }
-                        }
-                        state.unsectionedChief?.let { chief ->
-                            summariesById[chief.id]?.let { summary ->
-                                item(key = "chief-${chief.id}") {
-                                    entry(summary)
-                                }
-                            }
-                        }
-                        val pinned = RosterLayout.byRecency(state.pinnedBots.mapNotNull { summariesById[it.id] })
-                        if (pinned.isNotEmpty()) {
-                            item(key = "pinned-label") {
-                                SectionLabel("Pinned", Modifier.padding(top = 2.dp, bottom = 4.dp))
-                            }
-                            items(pinned, key = { "pinned-${it.id}" }) { summary ->
-                                entry(summary)
-                            }
-                        }
-                        item(key = "channels") {
-                            GroupsStrip(
-                                rooms = state.unsectionedChannels,
-                                members = tiles,
-                                onOpen = { navigator.open(Chat.RoomChat(it)) },
-                                onCreate = {
-                                    haptics.play(TactileAction.START_NEW_GROUP)
-                                    showingNewGroup = true
-                                },
-                            )
-                        }
-                        if (state.botChats.isNotEmpty()) {
-                            item(key = "bot-chats") {
-                                GroupsStrip(
-                                    rooms = state.botChats,
-                                    members = tiles,
-                                    onOpen = { navigator.open(Chat.RoomChat(it)) },
-                                    onCreate = null,
-                                )
-                            }
-                        }
-                        val unsectioned = RosterLayout.byRecency(state.unsectionedBots.mapNotNull { summariesById[it.id] })
-                        // No "Bots" heading over the bots: it is the screen
-                        // naming its own contents, and the label was a whole
-                        // band of height spent saying nothing the rows did not.
-                        items(unsectioned, key = { "bot-${it.id}" }) { summary ->
+                    if (query.isEmpty()) {
+                        items(summaries, key = { it.id }) { summary ->
                             entry(summary)
                         }
-                        // Chiefs, then the section's channels, then its bots —
-                        // the order of `rosterSections` in `ChatListView.swift`.
-                        state.sidebarSections.forEach { section ->
-                            item(key = "section-${section.id}") {
-                                SectionLabel(section.name, Modifier.padding(top = 18.dp, bottom = 4.dp))
-                            }
-                            val sectionChiefs = RosterLayout.byRecency(section.chiefs.mapNotNull { summariesById[it.id] })
-                            val sectionBots = RosterLayout.byRecency(section.bots.mapNotNull { summariesById[it.id] })
-                            items(sectionChiefs, key = { "section-${section.id}-chief-${it.id}" }) { summary ->
-                                entry(summary)
-                            }
-                            if (section.channels.isNotEmpty()) {
-                                item(key = "section-${section.id}-channels") {
-                                GroupsStrip(
-                                    rooms = section.channels,
-                                        members = tiles,
-                                        onOpen = { navigator.open(Chat.RoomChat(it)) },
-                                        onCreate = null,
-                                    )
-                                }
-                            }
-                            items(sectionBots, key = { "section-${section.id}-bot-${it.id}" }) { summary ->
-                                entry(summary)
-                            }
-                        }
-                    }
-
-                    if (query.isNotEmpty() && hits.isNotEmpty()) {
-                        item(key = "search-header") {
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 10.dp, bottom = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                SectionLabel("Messages")
-                                Spacer(Modifier.weight(1f))
-                                if (searching) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier
-                                            .padding(end = 20.dp)
-                                            .size(14.dp),
-                                        strokeWidth = 2.dp,
-                                    )
-                                }
-                            }
-                        }
-                        items(hits, key = { it.id }) { hit ->
-                            SearchHitRow(
-                                hit = hit,
-                                onClick = {
-                                    scope.launch {
-                                        // Session.open switches task, sets the
-                                        // active branch, loads the `around` page
-                                        // and focuses the message — the chat
-                                        // screen honours the focus when it opens.
-                                        session.open(hit)?.let {
-                                            haptics.play(TactileAction.OPEN_SEARCH_RESULT)
-                                            navigator.open(it)
-                                        }
+                    } else {
+                        if (hits.isNotEmpty()) {
+                            item(key = "search-header") {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 20.dp, end = 20.dp, top = 10.dp, bottom = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    SectionLabel("Messages")
+                                    Spacer(Modifier.weight(1f))
+                                    if (searching) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(14.dp),
+                                            strokeWidth = 2.dp,
+                                        )
                                     }
-                                },
-                            )
+                                }
+                            }
+                            items(hits, key = { it.id }) { hit ->
+                                SearchHitRow(
+                                    hit = hit,
+                                    onClick = {
+                                        scope.launch {
+                                            session.open(hit)?.let {
+                                                haptics.play(TactileAction.OPEN_SEARCH_RESULT)
+                                                navigator.open(it)
+                                            }
+                                        }
+                                    },
+                                )
+                            }
+                            item(key = "chats-label") {
+                                SectionLabel("Threads", Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp, bottom = 4.dp))
+                            }
                         }
-                        item(key = "chats-label") {
-                            SectionLabel("Threads", Modifier.padding(top = 14.dp, bottom = 4.dp))
-                        }
-                    }
 
-                    if (query.isNotEmpty()) {
-                        items(rows, key = { it.chat.threadId }) { summary ->
-                            entry(summary)
+                        if (rows.isNotEmpty()) {
+                            items(rows, key = { it.chat.threadId }) { summary ->
+                                entry(summary)
+                            }
                         }
                     }
                 }
@@ -597,7 +444,7 @@ fun RosterScreen(navigator: CompanionNavigator) {
 }
 
 /** Room for the floating bar, so the last row can scroll clear of it. */
-private val BAR_CLEARANCE = 72.dp
+private val BAR_CLEARANCE = 96.dp
 
 /** Two flags and a string: enough to survive a rotation with the search still up. */
 private val RosterBarSaver = listSaver<RosterBar, Any>(
@@ -637,6 +484,7 @@ private fun RosterHeader(
     onOpenDailyBriefing: () -> Unit,
     onOpenUniversalSearch: () -> Unit,
     onOpenQuickCapture: () -> Unit,
+    onOpenMascotStudio: () -> Unit = {},
     canCreateBot: Boolean,
     canOrganize: Boolean,
 ) {
@@ -646,43 +494,47 @@ private fun RosterHeader(
         if (bar.searchOpen) focus.requestFocus() else focusManager.clearFocus()
     }
 
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = AppSpacing.gutter, vertical = AppSpacing.sm),
-        horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (bar.searchOpen) {
+    if (bar.searchOpen) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             Row(
                 modifier = Modifier
                     .weight(1f)
-                    .height(44.dp)
-                    .clip(AppRadii.pill)
-                    .background(AppTheme.colors.surface)
-                    .padding(horizontal = AppSpacing.lg),
-                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+                    .height(42.dp)
+                    .clip(RoundedCornerShape(21.dp))
+                    .background(AppTheme.colors.surfaceRaised)
+                    .padding(horizontal = 14.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Icon(
                     imageVector = Icons.Filled.Search,
                     contentDescription = null,
-                    tint = secondaryTint,
+                    tint = AppTheme.colors.textTertiary,
                     modifier = Modifier.size(18.dp),
                 )
                 Box(modifier = Modifier.weight(1f)) {
                     if (bar.query.isEmpty()) {
-                        Text("Search threads", fontSize = 17.sp, color = secondaryTint)
+                        Text(
+                            "Search",
+                            fontSize = 16.sp,
+                            color = AppTheme.colors.textTertiary,
+                        )
                     }
                     BasicTextField(
                         value = bar.query,
                         onValueChange = { onBar(bar.typed(it)) },
                         singleLine = true,
                         textStyle = LocalTextStyle.current.copy(
-                            fontSize = 17.sp,
-                            color = MaterialTheme.colorScheme.onSurface,
+                            fontSize = 16.sp,
+                            color = AppTheme.colors.textPrimary,
                         ),
-                        cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
+                        cursorBrush = SolidColor(AppTheme.colors.textPrimary),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -694,60 +546,129 @@ private fun RosterHeader(
                         Icon(
                             imageVector = Icons.Filled.Close,
                             contentDescription = "Clear search",
-                            tint = secondaryTint,
-                            modifier = Modifier.size(20.dp),
+                            tint = AppTheme.colors.textTertiary,
+                            modifier = Modifier.size(18.dp),
                         )
                     }
                 }
             }
-            Box(
+            Text(
+                text = "Cancel",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium,
+                color = AppTheme.colors.textPrimary,
                 modifier = Modifier
-                    .height(MIN_TOUCH_TARGET)
-                    .clip(AppRadii.pill)
+                    .clip(RoundedCornerShape(8.dp))
                     .clickable(role = Role.Button, onClick = { onBar(bar.cancelSearch()) })
-                    .padding(horizontal = AppSpacing.lg),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text("Cancel", fontSize = 16.sp, color = AppTheme.colors.textSecondary)
+                    .padding(horizontal = 4.dp, vertical = 8.dp),
+            )
+        }
+    } else {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            var menuOpen by remember { mutableStateOf(false) }
+
+            Box {
+                Box(
+                    modifier = Modifier
+                        .size(38.dp)
+                        .clip(CircleShape)
+                        .background(AppTheme.colors.surfaceRaised)
+                        .combinedClickable(
+                            role = Role.Button,
+                            onClick = onSettings,
+                            onLongClick = { menuOpen = true },
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Settings,
+                        contentDescription = "Settings",
+                        tint = AppTheme.colors.textPrimary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
+
+                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                    DropdownMenuItem(
+                        text = { Text("Settings") },
+                        onClick = {
+                            menuOpen = false
+                            onSettings()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("🎭 Mascot Studio") },
+                        onClick = {
+                            menuOpen = false
+                            onOpenMascotStudio()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("🔍 Universal Search") },
+                        onClick = {
+                            menuOpen = false
+                            onOpenUniversalSearch()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("📥 Quick Capture") },
+                        onClick = {
+                            menuOpen = false
+                            onOpenQuickCapture()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("⚡ Smart Recap") },
+                        onClick = {
+                            menuOpen = false
+                            onOpenSmartRecap()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("☀️ Daily Briefing") },
+                        onClick = {
+                            menuOpen = false
+                            onOpenDailyBriefing()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Updates") },
+                        onClick = {
+                            menuOpen = false
+                            onOpenUpdates()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("New section") },
+                        onClick = {
+                            menuOpen = false
+                            onOrganize()
+                        },
+                        enabled = canOrganize,
+                    )
+                }
             }
-        } else {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-                modifier = Modifier
-                    .clip(AppRadii.pill)
-                    .clickable(role = Role.Button, onClick = onSettings)
-                    .padding(horizontal = AppSpacing.xs, vertical = AppSpacing.xs),
-            ) {
-                AppMark()
-                Text(
-                    text = "MOBOT",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    letterSpacing = 1.2.sp,
-                    color = AppTheme.colors.textPrimary,
-                )
-            }
+
             Spacer(Modifier.weight(1f))
+
             HeaderGlyphButton(
                 icon = Icons.Filled.Search,
                 contentDescription = "Search",
+                glyph = 24.dp,
                 onClick = onOpenSearch,
             )
+
             HeaderGlyphButton(
                 icon = Icons.Filled.Add,
                 contentDescription = "New bot",
+                glyph = 26.dp,
                 onClick = onCreateBot,
                 enabled = canCreateBot,
-            )
-            RosterOverflowMenu(
-                onOpenUpdates = onOpenUpdates,
-                onOpenSmartRecap = onOpenSmartRecap,
-                onOpenDailyBriefing = onOpenDailyBriefing,
-                onOpenUniversalSearch = onOpenUniversalSearch,
-                onOpenQuickCapture = onOpenQuickCapture,
-                onOrganize = onOrganize,
-                enabled = canOrganize,
             )
         }
     }
@@ -763,7 +684,9 @@ private fun RosterOverflowMenu(
     onOpenDailyBriefing: () -> Unit,
     onOpenUniversalSearch: () -> Unit,
     onOpenQuickCapture: () -> Unit,
+    onOpenMascotStudio: () -> Unit = {},
     onOrganize: () -> Unit,
+    onSettings: () -> Unit,
     enabled: Boolean,
 ) {
     var open by remember { mutableStateOf(false) }
@@ -775,6 +698,13 @@ private fun RosterOverflowMenu(
             enabled = true,
         )
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text("🎭 Mascot Studio") },
+                onClick = {
+                    open = false
+                    onOpenMascotStudio()
+                },
+            )
             DropdownMenuItem(
                 text = { Text("🔍 Universal Search") },
                 onClick = {
@@ -817,6 +747,13 @@ private fun RosterOverflowMenu(
                     onOrganize()
                 },
                 enabled = enabled,
+            )
+            DropdownMenuItem(
+                text = { Text("⚙️ Settings") },
+                onClick = {
+                    open = false
+                    onSettings()
+                },
             )
         }
     }
@@ -1127,6 +1064,7 @@ private fun SearchHitRow(hit: SearchHit, onClick: () -> Unit) {
 fun StatusBanner(status: Session.Status = LocalCompanion.current.session.status.collectAsState().value) {
     val banner: Pair<String, Color>? = when (val current = status) {
         Session.Status.Live, Session.Status.Unpaired -> null
+        is Session.Status.Starting -> current.message to secondaryTint
         Session.Status.Connecting -> "Connecting…" to secondaryTint
         is Session.Status.Offline -> current.message to Color(MausPalette.argb("orange"))
         Session.Status.Unauthorized ->

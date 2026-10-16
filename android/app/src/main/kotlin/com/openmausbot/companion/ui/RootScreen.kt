@@ -30,6 +30,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.openmausbot.companion.core.ChatTarget
 import com.openmausbot.companion.core.Connection
 import com.openmausbot.companion.core.NotificationAuthorizationState
 import com.openmausbot.companion.core.NotificationOnboardingPolicy
@@ -40,6 +41,7 @@ import com.openmausbot.companion.core.OnboardingRoute
 import com.openmausbot.companion.core.OnboardingRouter
 import com.openmausbot.companion.core.ErrorClassifier
 import com.openmausbot.companion.core.Session
+import com.openmausbot.companion.mascot.MascotShowcaseScreen
 import com.openmausbot.companion.terminal.TerminalSessions
 import kotlinx.coroutines.launch
 
@@ -420,8 +422,9 @@ private fun PairedScreen(
     val terminalOpen = terminalPresentation?.visible == true
 
     // Leaving the terminal is what the back gesture does while it is on screen;
-    // the navigator only sees a back press once the terminal is not showing.
-    BackHandler(enabled = navigator.canGoBack && !terminalOpen) { navigator.pop() }
+    // InAppBrowserSurface manages its own layered back handling when current.
+    // The navigator only sees a back press once the terminal is not showing and browser is not active.
+    BackHandler(enabled = navigator.canGoBack && !terminalOpen && navigator.current !is Destination.Browser) { navigator.pop() }
 
     Box(modifier = Modifier.fillMaxSize()) {
         when (val destination = navigator.current) {
@@ -433,6 +436,10 @@ private fun PairedScreen(
                 onOpenSpecializedCapabilities = { navigator.push(Destination.SpecializedCapabilities) },
                 onOpenConnectedApps = { navigator.push(Destination.ConnectedApps) },
                 onOpenProjects = { navigator.push(Destination.Projects) },
+                onOpenMascotStudio = { navigator.push(Destination.MascotShowcase) },
+            )
+            Destination.MascotShowcase -> MascotShowcaseScreen(
+                onBack = navigator::pop,
             )
             Destination.Routines -> TasksRoutinesScreen(
                 onBack = navigator::pop,
@@ -448,6 +455,10 @@ private fun PairedScreen(
                 onBack = navigator::pop,
             )
             Destination.DeploymentAccounts -> ConnectedAppsScreen(onBack = navigator::pop)
+            is Destination.Browser -> InAppBrowserSurface(
+                destination = destination,
+                onClose = navigator::pop,
+            )
             // One branch for both shapes of chat address, so a notification's
             // thread becoming an addressed chat re-reads the same screen
             // instead of rebuilding it.
@@ -461,6 +472,13 @@ private fun PairedScreen(
                 onOpenOverview = { navigator.push(Destination.Overview(it)) },
                 onOpenMemory = { navigator.push(Destination.Memory(it)) },
                 onOpenModelProviders = { navigator.push(Destination.ModelProviders) },
+                onOpenBrowser = { url, title ->
+                    val botId = when (destination) {
+                        is Destination.Chat -> (destination.target as? ChatTarget.Bot)?.botId
+                        else -> null
+                    }
+                    navigator.push(Destination.Browser(url = url, title = title, botId = botId))
+                },
                 // Push Computer keeps the chat under the top; pop to roster
                 // does not.
                 retainsDraft = navigator::retainsChatDraft,

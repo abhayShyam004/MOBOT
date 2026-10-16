@@ -293,5 +293,31 @@ class MarkdownTest {
         is MarkdownBlock.Quote -> block.text
         MarkdownBlock.Rule -> ""
         is MarkdownBlock.Table -> block.headers.joinToString("") + block.rows.flatten().joinToString("")
+        is MarkdownBlock.Image -> block.url
+    }
+
+    @Test
+    fun `parses inline and attached images as distinct blocks`() {
+        val markdown = """
+            Here is the chart:
+            ![Chart](attachment:chart.png)
+            And an attached image tag:
+            <attached-image path="/api/attachments/photo.jpg" name="photo.jpg" />
+            Done!
+        """.trimIndent()
+        val blocks = Markdown.blocks(markdown)
+        assertEquals(5, blocks.size)
+        assertTrue(blocks[0] is MarkdownBlock.Paragraph)
+        assertEquals("Here is the chart:", (blocks[0] as MarkdownBlock.Paragraph).text)
+        assertTrue(blocks[1] is MarkdownBlock.Image)
+        assertEquals("attachment:chart.png", (blocks[1] as MarkdownBlock.Image).url)
+        assertEquals("Chart", (blocks[1] as MarkdownBlock.Image).alt)
+        assertTrue(blocks[2] is MarkdownBlock.Paragraph)
+        assertEquals("And an attached image tag:", (blocks[2] as MarkdownBlock.Paragraph).text)
+        assertTrue(blocks[3] is MarkdownBlock.Image)
+        assertEquals("/api/attachments/photo.jpg", (blocks[3] as MarkdownBlock.Image).url)
+        assertEquals("photo.jpg", (blocks[3] as MarkdownBlock.Image).alt)
+        assertTrue(blocks[4] is MarkdownBlock.Paragraph)
+        assertEquals("Done!", (blocks[4] as MarkdownBlock.Paragraph).text)
     }
 }

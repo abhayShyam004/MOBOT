@@ -626,7 +626,7 @@ export async function saveImageUpload(
 /** Existence check with the same name discipline as readAttachment, without
  * reading up to 10MB of pixels just to learn the file is there. */
 export function attachmentExists(name: string): boolean {
-  if (!/^[A-Za-z0-9-]+\.(png|jpg|gif|webp)$/.test(name)) return false;
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/.test(name)) return false;
   try {
     return statSync(join(ATTACHMENTS_DIR, name)).isFile();
   } catch {
@@ -638,7 +638,7 @@ export function attachmentExists(name: string): boolean {
  * filename (no separators, no dotfiles) inside ATTACHMENTS_DIR resolve —
  * the route must never become a general file server for the data dir. */
 export function readAttachment(name: string): { bytes: Buffer; mime: string } | null {
-  if (!/^[A-Za-z0-9-]+\.(png|jpg|jpeg|gif|webp)$/.test(name)) return null;
+  if (!/^[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/.test(name)) return null;
   const path = join(ATTACHMENTS_DIR, name);
   if (extname(path) === ".jpeg") return null; // saved as .jpg; .jpeg is not a name we write
   try {
@@ -649,15 +649,30 @@ export function readAttachment(name: string): { bytes: Buffer; mime: string } | 
 }
 
 function mimeForExt(ext: string): string {
-  switch (ext) {
-    case ".png":
-      return "image/png";
-    case ".jpg":
-      return "image/jpeg";
-    case ".gif":
-      return "image/gif";
-    case ".webp":
-      return "image/webp";
+  const normalized = ext.toLowerCase();
+  for (const [mime, extension] of Object.entries(IMAGE_MIMES)) {
+    if (extension === normalized) return mime;
+  }
+  for (const [mime, extension] of Object.entries(FILE_MIMES)) {
+    if (extension === normalized) return mime;
+  }
+  switch (normalized) {
+    case ".svg":
+      return "image/svg+xml";
+    case ".zip":
+      return "application/zip";
+    case ".gz":
+      return "application/gzip";
+    case ".tar":
+      return "application/x-tar";
+    case ".py":
+    case ".js":
+    case ".ts":
+    case ".sh":
+    case ".html":
+    case ".css":
+    case ".sql":
+      return "text/plain";
     default:
       return "application/octet-stream";
   }

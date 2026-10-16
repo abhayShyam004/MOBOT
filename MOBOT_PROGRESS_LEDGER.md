@@ -400,3 +400,15 @@
   - Keystore tokens and credentials completely untouched.
 
 ### Final Deep Routine System Upgrade Verdict: COMPLETE
+
+---
+
+## Phase 1 Content Pipeline — Final Gap Verification (2026-10-15, physical SM-A075F)
+
+Full report: `MOBOT_PHASE1_CONTENT_PIPELINE_VERIFICATION.md`.
+
+- **Cases 1–8:** PASS on hardware (single image once, multi-image count/order/no duplicates, TEXT→IMAGE→TEXT order, native fullscreen image viewer, native PDF/Markdown/CSV previews with external hand-off only for ZIP, tool failure with no internal output in chat, per-message artifact association, and restart + reopen with every attachment resolving HTTP 200 and no duplicate cards).
+- **Defect found (D1):** two delivered images (`yellow_circle.png`, `release-pack-graphic.png`) were structurally invalid PNGs produced by the agent's own sandbox encoders, yet `android_computer_verify_image` reported `verified: true` (once with `width: 1229472850`, i.e. the ASCII bytes `IHDR`). `BotImageAttachment` then dropped them silently, so the image was never shown.
+- **Fix:** `server/computer-agent/artifact-manager.ts` now inspects the full PNG container (chunk framing, types, lengths, CRCs, IHDR/IDAT/IEND) instead of trusting the 8-byte signature, reports the corruption through `validateArtifact`/`verify_image`, and refuses to register a file whose extension claims an image but whose contents are not readable. Test fixtures upgraded to real PNGs; three regression tests added.
+- **Post-fix checks:** `computer-agent.test.ts` + `attachments.test.ts` **74/74 PASS**; `pnpm typecheck` unchanged from baseline.
+- **Shipped and re-verified on device (2026-10-15 21:30–21:54):** `server.zip` sha256 `43ad92d9…` (10,656,243 B) → ARM64 APK sha256 `360e3d04…` (90,291,467 B) → installed as `lastUpdateTime 2026-10-15 21:31:38`. The device-side extracted bundle contains the new validation. Production-tool gate: valid 64×64 PNG verifies and registers; malformed framing, bad IHDR CRC and missing-IDAT PNGs all return `verified:false` with the specific reason and are refused by registration, and none reached the transcript. Re-ran single image, three images, TEXT→IMAGE→TEXT, multi-artifact turn, restart+reopen: order and association correct, no duplicates, 20/20 attachments resolve, native viewer launches in-app. Host tests 74/74, Android unit tests 1123/1123 (138 suites), `assembleDebug` exit 0.

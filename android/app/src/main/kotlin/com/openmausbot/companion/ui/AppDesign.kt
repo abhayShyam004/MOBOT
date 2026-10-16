@@ -13,6 +13,7 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDirection
 import androidx.compose.ui.unit.Dp
@@ -47,39 +48,69 @@ import androidx.compose.ui.unit.sp
  */
 @Immutable
 data class AppColors(
-    /** The page: a warm off-white, never a cold white. */
+    /** The page: neutral OLED ground (#141414) in dark, warm off-white (#F3F2EE) in light. */
     val background: Color,
-    /** Raised surfaces: cards, fields, the sheets a screen floats on the page. */
+    /** Raised surfaces: cards, fields, sheets. */
     val surface: Color,
+    /** Elevated surface: inputs, elevated dialogs, card highlights (#202024 / #FFFFFF). */
+    val elevatedSurface: Color = surface,
+    /** Surface variant: grouped section background / subtle secondary fills (#18181B / #E9E8E3). */
+    val surfaceVariant: Color = surface,
     /** A soft neutral on [surface] — chips, tags, an unfilled control. */
     val surfaceRaised: Color,
-    /** Sunken wells: the composer at rest, code blocks, terminal bodies. */
+    /** Sunken wells: code blocks, terminal bodies, inset canvas (#0D0D0D / #EFEEE9). */
     val surfaceSunken: Color,
-    /** One hairline, used for separators and nothing else. */
+    /** One hairline, used for separators and subtle dividers. */
     val hairline: Color,
+    /** Crisp 1px card and input borders (#313538 / #D4D4D8). */
+    val border: Color = hairline,
+    /** Subtle 1px inner borders (#262626 / #E4E4E7). */
+    val subtleBorder: Color = hairline,
+    /** Divider lines. */
+    val divider: Color = hairline,
+    /** Primary text ink. Maximum contrast. */
     val textPrimary: Color,
+    /** Secondary text: descriptions, subtitles, timestamps. */
     val textSecondary: Color,
-    /** Metadata: timestamps, counts, captions. Never body copy. */
+    /** Metadata: timestamps, counts, captions. */
     val textTertiary: Color,
+    /** Disabled text ink. */
+    val disabledText: Color = textTertiary,
     /**
-     * The one filled action on a screen, and almost nothing else: the send
-     * button, a primary pill. Charcoal rather than a hue, which is what keeps a
-     * screen of coloured avatars from arguing with its own buttons.
+     * Primary action fill and content: high-contrast pill button.
+     * White on dark ground, Charcoal on light ground.
      */
     val accent: Color,
     val onAccent: Color,
-    /** The app's own mark — the mascot's green, the one place the brand shows. */
+    val primaryAction: Color = accent,
+    val primaryActionContent: Color = onAccent,
+    val secondaryAction: Color = surfaceRaised,
+    /** The app's own mark. */
     val brand: Color,
-    /** A selection wash: the row or chip a person just chose. */
+    /** Selection and interaction washes. */
     val selected: Color,
-    /** Restrained state colours. They inform; they never decorate. */
+    val pressed: Color = surfaceRaised,
+    val focused: Color = border,
+    val disabled: Color = surfaceRaised,
+    /** Semantic state colours. */
     val positive: Color,
     val caution: Color,
     val danger: Color,
-    /** The person's own words: the transcript's high-contrast side. */
+    val info: Color = brand,
+    val success: Color = positive,
+    val warning: Color = caution,
+    val destructive: Color = danger,
+    /** Agent execution states. */
+    val thinking: Color = caution,
+    val running: Color = brand,
+    val waiting: Color = caution,
+    val recovering: Color = caution,
+    val error: Color = danger,
+    val complete: Color = positive,
+    /** The person's own words: high-contrast user bubble. */
     val myBubble: Color,
     val onMyBubble: Color,
-    /** Decorative geometry, drawn well under anything readable. */
+    /** Decorative geometry. */
     val petalTeal: Color,
     val petalSand: Color,
     val petalBlush: Color,
@@ -87,32 +118,39 @@ data class AppColors(
 )
 
 /**
- * What the app looks like in daylight — the primary design.
- *
- * Values are measured off the reference this language came from: a canvas of
- * `#E8E9E5`–`#F3F2EE`, white cards and fields, soft `#F5F5F4` wells, ink at
- * `#17181A`, a charcoal `#1C1D1F` filled action, and the pastel set at the
- * saturation the reference's own geometry carries.
+ * What the app looks like in daylight — clean, warm, high-contrast.
  */
 internal val LightAppColors = AppColors(
     background = Color(0xFFF3F2EE),
     surface = Color(0xFFFFFFFF),
+    elevatedSurface = Color(0xFFFFFFFF),
+    surfaceVariant = Color(0xFFE9E8E3),
     surfaceRaised = Color(0xFFE9E8E3),
     surfaceSunken = Color(0xFFEFEEE9),
     hairline = Color(0x14000000),
+    border = Color(0xFFD4D4D8),
+    subtleBorder = Color(0xFFE4E4E7),
+    divider = Color(0x14000000),
     textPrimary = Color(0xFF17181A),
     textSecondary = Color(0xFF55585D),
     textTertiary = Color(0xFF878A8F),
+    disabledText = Color(0xFFA1A1AA),
     accent = Color(0xFF1C1D1F),
     onAccent = Color(0xFFFFFFFF),
+    secondaryAction = Color(0xFFE4E4E7),
     brand = Color(MausPalette.argb("green")),
     selected = Color(0xFFDCE8E4),
+    pressed = Color(0xFFE2E8F0),
+    focused = Color(0xFFCBD5E1),
+    disabled = Color(0xFFF1F5F9),
     positive = Color(0xFF1E8A4C),
     caution = Color(0xFFA87514),
     danger = Color(0xFFBC4038),
-    // The person's own words take the reference's dark bubble: the transcript has
-    // one side in ink and one in white, so which side is speaking is legible
-    // before a single word is read.
+    info = Color(0xFF0284C7),
+    thinking = Color(0xFFD97706),
+    running = Color(0xFF0284C7),
+    waiting = Color(0xFF7C3AED),
+    recovering = Color(0xFFEA580C),
     myBubble = Color(0xFF1D1F21),
     onMyBubble = Color(0xFFF6F7F4),
     petalTeal = Color(0xFF9CC3BF),
@@ -122,32 +160,41 @@ internal val LightAppColors = AppColors(
 )
 
 /**
- * The same system after dark: same structure, same scarcity, inverted weight.
- *
- * Warm near-black rather than blue-black, so it reads as the same material as the
- * light scheme, and the pastels are held down to deep muted tones — the same
- * shapes in the same places, at the brightness a dark screen can carry.
+ * The same system after dark: calm OLED neutral depth, crisp hairlines, pure white primary CTA.
  */
 internal val DarkAppColors = AppColors(
-    background = Color(0xFF121311),
-    surface = Color(0xFF1B1C19),
-    surfaceRaised = Color(0xFF252720),
-    surfaceSunken = Color(0xFF0E0F0D),
-    hairline = Color(0x1FFFFFFF),
-    textPrimary = Color(0xFFF1F2ED),
-    textSecondary = Color(0xFFA5A8A1),
-    textTertiary = Color(0xFF767A72),
-    // Inverted: after dark the *filled* side is the light one, the same way the
-    // reference's dark pill would become a light pill on a dark page.
-    accent = Color(0xFFEFF0EA),
-    onAccent = Color(0xFF17181A),
-    brand = Color(0xFF3FBD86),
+    background = Color(0xFF141414),
+    surface = Color(0xFF18181B),
+    elevatedSurface = Color(0xFF202024),
+    surfaceVariant = Color(0xFF18181B),
+    surfaceRaised = Color(0xFF202024),
+    surfaceSunken = Color(0xFF0D0D0D),
+    hairline = Color(0xFF262626),
+    border = Color(0xFF313538),
+    subtleBorder = Color(0xFF262626),
+    divider = Color(0xFF262626),
+    textPrimary = Color(0xFFFFFFFF),
+    textSecondary = Color(0xFFA1A1AA),
+    textTertiary = Color(0xFF71717A),
+    disabledText = Color(0xFF52525B),
+    accent = Color(0xFFFFFFFF),
+    onAccent = Color(0xFF141414),
+    secondaryAction = Color(0xFF27272A),
+    brand = Color(0xFF00C972),
     selected = Color(0xFF233029),
-    positive = Color(0xFF57C288),
-    caution = Color(0xFFD9B471),
-    danger = Color(0xFFE4888A),
-    myBubble = Color(0xFF2B3730),
-    onMyBubble = Color(0xFFE9F2EC),
+    pressed = Color(0xFF27272A),
+    focused = Color(0xFF52525B),
+    disabled = Color(0xFF27272A),
+    positive = Color(0xFF00C972),
+    caution = Color(0xFFFF9800),
+    danger = Color(0xFFFF3E51),
+    info = Color(0xFF38BDF8),
+    thinking = Color(0xFFFFAF38),
+    running = Color(0xFF2A92FE),
+    waiting = Color(0xFFA97EFE),
+    recovering = Color(0xFFFF781C),
+    myBubble = Color(0xFF202024),
+    onMyBubble = Color(0xFFFFFFFF),
     petalTeal = Color(0xFF2E4A46),
     petalSand = Color(0xFF4A3F26),
     petalBlush = Color(0xFF4A3331),
@@ -158,91 +205,104 @@ internal val DarkAppColors = AppColors(
 internal val LocalAppColors = staticCompositionLocalOf { LightAppColors }
 
 /**
- * The spacing scale. Everything that separates two things uses one of these, so
- * rhythm is a decision made once rather than per screen.
+ * The spacing scale adhering to an 8-point base grid with 4-point micro steps.
  */
 object AppSpacing {
-    /** Between an icon and its label. */
+    /** 2dp micro-gap between status dot and text. */
+    val xxs: Dp = 2.dp
+    val micro: Dp = 2.dp
+
+    /** 4dp icon-to-label gap / micro step. */
     val xs: Dp = 4.dp
 
-    /** Between two lines of one block. */
+    /** 8dp row spacing / chip gap. */
     val sm: Dp = 8.dp
+    val row: Dp = 8.dp
 
-    /** Inside a control. */
+    /** 12dp inside a control / compact card padding. */
     val md: Dp = 12.dp
+    val control: Dp = 12.dp
 
-    /** Between controls in a group. */
+    /** 14dp card padding. */
+    val card: Dp = 14.dp
+
+    /** 16dp default group padding / message margin. */
     val lg: Dp = 16.dp
+    val message: Dp = 6.dp
+    val turnGap: Dp = 14.dp
+    val screenVertical: Dp = 16.dp
 
-    /** The screen gutter. Every screen lines its content up on this. */
-    val gutter: Dp = 20.dp
+    /** 18dp primary screen horizontal gutter (measured: 18.1dp). */
+    val gutter: Dp = 18.dp
+    val screenHorizontal: Dp = 18.dp
 
-    /** Between two groups. */
+    /** 20dp modal padding. */
+    val modal: Dp = 20.dp
+
+    /** 24dp section spacing. */
+    val section: Dp = 24.dp
+
+    /** 28dp between two distinct groups. */
     val xl: Dp = 28.dp
 
-    /** Above a screen's title block. */
-    val xxl: Dp = 40.dp
+    /** 32dp major section gap. */
+    val xxl: Dp = 32.dp
+
+    /** 40dp above screen hero or title. */
+    val xxxl: Dp = 40.dp
 }
 
-/** Corner radii, so a "rounded surface" means the same curve everywhere. */
+/** Corner radii: dual-geometry with full pill rounding for controls and subtle squircles for content. */
 object AppRadii {
-    /** A chip, a tag, a small tile. */
+    val micro: Dp = 4.dp
+    val xs: Dp = 8.dp
+    val compactCard: Dp = 12.dp
     val small: Dp = 12.dp
-
-    /** A row, a field, a list item that is itself a surface. */
+    val card: Dp = 16.dp
+    val message: Dp = 16.dp
     val row: Dp = 18.dp
-
-    /** A card: content that is one object. */
-    val card: Dp = 22.dp
-
-    /** A sheet, and the backdrop's own tiles. */
-    val sheet: Dp = 28.dp
+    val dialog: Dp = 20.dp
+    val input: Dp = 24.dp
+    val sheet: Dp = 24.dp
+    val button: Dp = 24.dp
 
     val cardShape: Shape get() = RoundedCornerShape(card)
+    val compactCardShape: Shape get() = RoundedCornerShape(compactCard)
+    val inputShape: Shape get() = RoundedCornerShape(input)
+    val dialogShape: Shape get() = RoundedCornerShape(dialog)
+    val sheetShape: Shape get() = RoundedCornerShape(sheet)
     val rowShape: Shape get() = RoundedCornerShape(row)
     val smallShape: Shape get() = RoundedCornerShape(small)
     val pill: Shape get() = CircleShape
 }
 
-/**
- * Motion. Short and purposeful: a screen change, an expanding section, a row
- * arriving. Nothing bounces, nothing spins for decoration, and nothing that a
- * person did not initiate animates for longer than [SLOW].
- */
+/** Elevation layers using surface value shifts and crisp hairlines instead of heavy drop shadows. */
+object AppElevation {
+    val level0: Dp = 0.dp // Base Ground (#141414)
+    val level1: Dp = 1.dp // Recessed (#0D0D0D)
+    val level2: Dp = 2.dp // Surface Card (#18181B / #202024)
+    val level3: Dp = 4.dp // Interactive Element (#222226)
+    val level4: Dp = 8.dp // Modal / Bottom Sheet
+    val floating: Dp = 12.dp // Floating Action Pill / Dock
+}
+
+/** Motion tokens: Purposeful, calibrated physics without decorative bounce. */
 object AppMotion {
-    /** A state change the person caused: a toggle, a chip becoming selected. */
     const val FAST: Int = 120
-
-    /** The default: a section expanding, a sheet arriving, a row settling in. */
     const val BASE: Int = 220
-
-    /** Screen-level transitions and list rearrangements. */
     const val SLOW: Int = 320
 }
 
-/** Sizes shared by more than one screen. */
+/** Sizes shared across P0 surfaces. */
 object AppSizes {
-    /**
-     * The avatar in a roster row: the loudest object in the list.
-     *
-     * 46 dp, taken off the reference this is drawn from: its faces measure 0.118
-     * of the screen width, and the row's own pitch — avatar plus the whitespace
-     * around it — came to about 0.205, which is what makes the list airy without
-     * making it a gallery.
-     */
-    val rowAvatar: Dp = 46.dp
-
-    /** An avatar beside a transcript row, or in a chat's top bar. */
+    val rowAvatar: Dp = 52.dp
     val smallAvatar: Dp = 38.dp
-
-    /** The profile avatar in a screen header. */
     val headerAvatar: Dp = 34.dp
-
-    /** A status dot — unread, presence. */
     val dot: Dp = 8.dp
-
-    /** The glyph inside a chrome button. */
     val glyph: Dp = 20.dp
+    val smallGlyph: Dp = 16.dp
+    val largeGlyph: Dp = 24.dp
+    val iconTouchTarget: Dp = 44.dp
 }
 
 /**
@@ -254,6 +314,8 @@ object AppSizes {
 object AppTheme {
     val colors: AppColors
         @Composable @ReadOnlyComposable get() = LocalAppColors.current
+    val isDark: Boolean
+        @Composable @ReadOnlyComposable get() = LocalAppColors.current == DarkAppColors
 }
 
 /**
@@ -266,14 +328,127 @@ object AppTheme {
  * only the size of the line is this treatment's business.
  */
 object AppType {
-    /** The one oversized line a screen is allowed to spend. */
+    /** The one oversized hero line a screen is allowed to spend (32sp / 38sp, Bold, -0.5px tracking). */
     val hero: TextStyle
         @Composable @ReadOnlyComposable
         get() = MaterialTheme.typography.displayLarge.copy(
-            fontSize = 42.sp,
-            lineHeight = 44.sp,
+            fontSize = 32.sp,
+            lineHeight = 38.sp,
             fontWeight = FontWeight.Bold,
-            letterSpacing = (-1.4).sp,
+            letterSpacing = (-0.5).sp,
+        )
+
+    /** Large heading (28sp / 34sp, Bold, -0.3px tracking). */
+    val largeHeading: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.displayMedium.copy(
+            fontSize = 28.sp,
+            lineHeight = 34.sp,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = (-0.3).sp,
+        )
+
+    /** Screen title (22sp / 28sp, Semibold, -0.2px tracking). */
+    val screenTitle: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.headlineMedium.copy(
+            fontSize = 22.sp,
+            lineHeight = 28.sp,
+            fontWeight = FontWeight.SemiBold,
+            letterSpacing = (-0.2).sp,
+        )
+
+    /** Section heading (18sp / 24sp, Semibold). */
+    val sectionHeading: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.titleLarge.copy(
+            fontSize = 18.sp,
+            lineHeight = 24.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+
+    /** Body regular (15sp / 22sp, Regular). */
+    val body: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.bodyLarge.copy(
+            fontSize = 15.sp,
+            lineHeight = 22.sp,
+            fontWeight = FontWeight.Normal,
+        )
+
+    /** Body emphasized (15sp / 22sp, Medium/Semibold). */
+    val bodyEmphasized: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.bodyLarge.copy(
+            fontSize = 15.sp,
+            lineHeight = 22.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+
+    /** Secondary copy (13sp / 18sp, Regular). */
+    val secondary: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.bodyMedium.copy(
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.Normal,
+        )
+
+    /** Metadata: timestamps, counts, tags (12sp / 16sp, Medium). */
+    val metadata: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.labelMedium.copy(
+            fontSize = 12.sp,
+            lineHeight = 16.sp,
+            fontWeight = FontWeight.Medium,
+            letterSpacing = 0.2.sp,
+        )
+
+    /** Caption (11sp / 15sp, Regular). */
+    val caption: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.bodySmall.copy(
+            fontSize = 11.sp,
+            lineHeight = 15.sp,
+            fontWeight = FontWeight.Normal,
+        )
+
+    /** Button label (15sp / 20sp, Semibold). */
+    val button: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.labelLarge.copy(
+            fontSize = 15.sp,
+            lineHeight = 20.sp,
+            fontWeight = FontWeight.SemiBold,
+        )
+
+    /** Label (13sp / 18sp, Medium). */
+    val label: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = MaterialTheme.typography.labelLarge.copy(
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.Medium,
+        )
+
+    /** Monospace body (13sp / 18sp, Monospace). */
+    val code: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = TextStyle(
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.Normal,
+        )
+
+    /** Monospace bold / commands (13sp / 18sp, Monospace Semibold). */
+    val codeBold: TextStyle
+        @Composable @ReadOnlyComposable
+        get() = TextStyle(
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.SemiBold,
         )
 }
 
@@ -355,23 +530,17 @@ internal fun appColorScheme(colors: AppColors, dark: Boolean) = run {
         onSecondary = colors.onAccent,
         background = colors.background,
         onBackground = colors.textPrimary,
-        surface = colors.background,
+        surface = colors.surface,
         onSurface = colors.textPrimary,
-        surfaceVariant = colors.surfaceRaised,
+        surfaceVariant = colors.surfaceVariant,
         onSurfaceVariant = colors.textSecondary,
-        // Every one of Material's "container" levels is the page's own white.
-        // A `Card`, a dialog, a bottom sheet and an `ElevatedCard` all pick from
-        // these slots, and the design language has exactly one raised surface:
-        // white on the warm page, at different corner radii. Leaving the default
-        // M3 mapping in place gave a card the *background* colour, which is a grey
-        // rectangle on a grey page.
         surfaceContainer = colors.surface,
-        surfaceContainerHigh = colors.surface,
-        surfaceContainerHighest = colors.surface,
+        surfaceContainerHigh = colors.elevatedSurface,
+        surfaceContainerHighest = colors.elevatedSurface,
         surfaceContainerLow = colors.surface,
-        surfaceContainerLowest = colors.surface,
-        outline = colors.hairline,
-        outlineVariant = colors.hairline,
+        surfaceContainerLowest = colors.background,
+        outline = colors.border,
+        outlineVariant = colors.subtleBorder,
         error = colors.danger,
         onError = colors.onAccent,
         scrim = Color.Black,

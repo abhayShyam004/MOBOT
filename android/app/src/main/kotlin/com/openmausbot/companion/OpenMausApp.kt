@@ -105,6 +105,7 @@ class OpenMausApp : Application() {
         discovery = NsdDiscovery(this)
         permissions = CompanionPermissions(this)
         onboarding = OnboardingPreferences(this)
+        harnessHost = HarnessHost(appScope, AndroidHostFiles(this), HarnessHostPort)
         session = Session(
             scope = appScope,
             connectionStore = StandaloneConnectionStore(DataStoreConnectionStore(this)),
@@ -117,6 +118,7 @@ class OpenMausApp : Application() {
                     ?: android.os.Build.MODEL
             },
             notificationSink = notifications,
+            localHostReadyProvider = { harnessHost.awaitReady() },
         )
         avatars = AvatarImageStore(fetch = session::avatarData)
         voicePreview = VoicePreviewPlayer(this)
@@ -173,7 +175,6 @@ class OpenMausApp : Application() {
         // notification Android requires for long-running work and keeps the
         // process alive through backgrounding; the host itself outlives the
         // UI entirely.
-        harnessHost = HarnessHost(appScope, AndroidHostFiles(this), HarnessHostPort)
         // Phase 7: the browser driver (owns the bots' WebViews) must outlive
         // the harness process and every Activity — app scope, started once.
         // Session WebViews attach to the resumed Activity's decor: an

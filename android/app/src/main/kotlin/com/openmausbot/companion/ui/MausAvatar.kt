@@ -54,7 +54,7 @@ import kotlinx.coroutines.flow.collectLatest
 @Composable
 internal fun MausAvatar(
     color: String,
-    /** Which catalog body to draw; null and unknown ids fall back to the cursor. */
+    /** Which catalog body to draw; null and unknown ids fall back to catalog order. */
     bodyId: String? = MausSilhouette.defaultBody,
     size: Dp = 52.dp,
     state: MausState = MausState.IDLE,
@@ -65,9 +65,19 @@ internal fun MausAvatar(
     val engine = remember { MausFaceEngine() }
     val geometry = remember { MausFaceGeometry() }
     val clock = remember { MausFrameClock() }
-    val body = remember(color, bodyId) {
+    val effectiveBodyId = remember(bodyId, color) {
+        if (!bodyId.isNullOrBlank() && bodyId in MausBodies.all) {
+            bodyId
+        } else {
+            // Assign a deterministic catalog body so bots have distinct silhouettes
+            val catalog = MausBodies.order
+            val hash = (color.hashCode() xor (bodyId?.hashCode() ?: 0)).let { if (it < 0) -it else it }
+            catalog[hash % catalog.size]
+        }
+    }
+    val body = remember(color, effectiveBodyId) {
         // The gradient runs corner to corner of the body's own bounds.
-        val bounds = MausSilhouette.faceBoxBounds(bodyId)
+        val bounds = MausSilhouette.faceBoxBounds(effectiveBodyId)
         Brush.linearGradient(
             colorStops = MausPalette.gradient(color)
                 .map { (position, argb) -> position to Color(argb) }
@@ -108,7 +118,7 @@ internal fun MausAvatar(
         val live = moving
         engine.setState(state, now)
         if (live) engine.advance(now) else engine.rest()
-        drawMaus(engine, geometry, body, bodyId, live, now)
+        drawMaus(engine, geometry, body, effectiveBodyId, live, now)
     }
 }
 

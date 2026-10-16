@@ -275,7 +275,7 @@ export interface WireMessage {
   text?: string;
   /** Durable provider output stored by the harness; renderers receive only
    * the allowlisted /api/attachments URL. */
-  attachments?: Array<{ kind: "image"; path: string; mime: string }>;
+  attachments?: Array<{ kind: "image" | "file" | "document" | "pdf" | "code" | "archive" | "dataset" | string; path: string; mime?: string; name?: string }>;
   /** Native structured response payload carrying versioned components (Phase J). */
   structured?: StructuredResponseData;
   card?: OptionCardData;

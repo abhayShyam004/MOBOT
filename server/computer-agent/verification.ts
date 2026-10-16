@@ -8,12 +8,31 @@ import { createHash } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
 import { defaultProcessManager, GeneralProcessManager } from "./process-manager.ts";
+import { defaultArtifactManager, resolveWorkspacePath, type ArtifactKind, type ArtifactValidationResult } from "./artifact-manager.ts";
 import type {
   ServiceVerificationOptions,
   ServiceVerificationResult,
   FileVerificationOptions,
   FileVerificationResult,
 } from "./types.ts";
+
+export interface ImageVerificationOptions {
+  path: string;
+  minBytes?: number;
+  minWidth?: number;
+  minHeight?: number;
+}
+
+export interface ImageVerificationResult {
+  verified: boolean;
+  path: string;
+  format?: string;
+  width?: number;
+  height?: number;
+  sizeBytes: number;
+  sha256?: string;
+  error?: string;
+}
 
 export class SystemVerifier {
   private readonly processManager: GeneralProcessManager;
@@ -164,7 +183,8 @@ export class SystemVerifier {
    * Verify file existence, integrity, and syntax.
    */
   verifyFile(path: string, options: FileVerificationOptions = { path }): FileVerificationResult {
-    if (!existsSync(path)) {
+    const resolvedPath = resolveWorkspacePath(path);
+    if (!existsSync(resolvedPath)) {
       return {
         verified: false,
         path,
@@ -176,8 +196,8 @@ export class SystemVerifier {
     }
 
     try {
-      const stat = statSync(path);
-      const content = readFileSync(path);
+      const stat = statSync(resolvedPath);
+      const content = readFileSync(resolvedPath);
       const sizeBytes = stat.size;
       const sha256 = createHash("sha256").update(content).digest("hex");
       const lineCount = content.toString("utf8").split("\n").length;
@@ -235,6 +255,86 @@ export class SystemVerifier {
         error: `Failed to read file: ${err.message}`,
       };
     }
+  }
+
+  /**
+   * Empirically verify that an image file exists, is not empty/corrupted,
+   * matches valid image magic bytes, and has valid dimensions.
+   */
+  verifyImage(path: string, options: Partial<ImageVerificationOptions> = {}): ImageVerificationResult {
+    const resolvedPath = resolveWorkspacePath(path);
+    const minBytes = options.minBytes ?? 24;
+    const fileRes = this.verifyFile(resolvedPath, { path: resolvedPath, expectedMinBytes: minBytes });
+    if (!fileRes.verified || !fileRes.exists) {
+      return {
+        verified: false,
+        path,
+        sizeBytes: fileRes.sizeBytes,
+        error: fileRes.error || `Image file not found: ${path}`,
+      };
+    }
+
+    const validation = defaultArtifactManager.validateArtifact(resolvedPath, { expectedKind: "image", minBytes });
+    if (!validation.valid) {
+      return {
+        verified: false,
+        path,
+        sizeBytes: fileRes.sizeBytes,
+        sha256: fileRes.sha256,
+        error: validation.error || "Invalid image file",
+      };
+    }
+
+    const width = validation.metadata?.width as number | undefined;
+    const height = validation.metadata?.height as number | undefined;
+    const format = (validation.metadata?.format as string | undefined) || validation.mime.replace("image/", "");
+
+    if (options.minWidth && (width === undefined || width < options.minWidth)) {
+      return {
+        verified: false,
+        path,
+        format,
+        width,
+        height,
+        sizeBytes: fileRes.sizeBytes,
+        sha256: fileRes.sha256,
+        error: `Image width ${width ?? "unknown"} is less than required minimum ${options.minWidth}`,
+      };
+    }
+
+    if (options.minHeight && (height === undefined || height < options.minHeight)) {
+      return {
+        verified: false,
+        path,
+        format,
+        width,
+        height,
+        sizeBytes: fileRes.sizeBytes,
+        sha256: fileRes.sha256,
+        error: `Image height ${height ?? "unknown"} is less than required minimum ${options.minHeight}`,
+      };
+    }
+
+    return {
+      verified: true,
+      path,
+      format,
+      width,
+      height,
+      sizeBytes: fileRes.sizeBytes,
+      sha256: fileRes.sha256,
+    };
+  }
+
+  /**
+   * Empirically verify any artifact using ArtifactManager validation.
+   */
+  verifyArtifact(path: string, options: { expectedKind?: ArtifactKind; minBytes?: number } = {}): ArtifactValidationResult & { path: string } {
+    const validation = defaultArtifactManager.validateArtifact(path, options);
+    return {
+      path,
+      ...validation,
+    };
   }
 
   private probeHttp(

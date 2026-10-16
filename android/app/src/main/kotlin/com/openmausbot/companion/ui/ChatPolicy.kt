@@ -332,6 +332,7 @@ object RosterLayout {
         val name = connectionName ?: NOT_PAIRED
         return when (status) {
             Session.Status.Live -> "$name · connected"
+            is Session.Status.Starting -> "$name · starting…"
             Session.Status.Connecting -> "$name · connecting…"
             is Session.Status.Offline -> "$name · offline"
             Session.Status.Unauthorized -> "$name · unpaired"

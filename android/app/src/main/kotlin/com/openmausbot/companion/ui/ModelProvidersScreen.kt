@@ -126,29 +126,13 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
         compatUrl = session.readProviderStatus()?.openaiCompat?.url.orEmpty()
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .backdrop(motif = BackdropMotif.SETTINGS, band = 180.dp),
+    SettingsSubPage(
+        title = "Model Providers",
+        subtitle = "Configure AI models, API keys, and CLI sign-in engines",
+        onBack = onBack,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = AppSpacing.xs, end = AppSpacing.gutter, top = AppSpacing.xs, bottom = AppSpacing.md),
-            horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            HeaderBackButton(onBack)
-            Text(
-                text = "Model providers",
-                style = MaterialTheme.typography.headlineSmall,
-                color = AppTheme.colors.textPrimary,
-            )
-        }
-
         Column(
             modifier = Modifier
-                .verticalScroll(rememberScrollState())
                 .padding(horizontal = AppSpacing.gutter)
                 .padding(bottom = 48.dp),
             verticalArrangement = Arrangement.spacedBy(AppSpacing.lg),

@@ -1,7 +1,10 @@
 package com.openmausbot.companion.ui
 
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,11 +24,19 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.LinkAnnotation
@@ -43,6 +54,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.openmausbot.companion.core.Markdown
 import com.openmausbot.companion.core.MarkdownBlock
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Bot replies, rendered — the port of `ios/App/MarkdownText.swift`.
@@ -73,9 +86,16 @@ fun MarkdownText(
      * instead of handed to a browser that cannot reach it.
      */
     openLink: ((String) -> Unit)? = null,
+    /**
+     * Where a tapped inline image goes; null leaves it inert.
+     */
+    openImage: ((String) -> Unit)? = null,
 ) {
     val blocks = Markdown.blocks(source)
-    CompositionLocalProvider(LocalLinkOpener provides openLink) {
+    CompositionLocalProvider(
+        LocalLinkOpener provides openLink,
+        LocalImageOpener provides openImage,
+    ) {
         Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
             blocks.forEachIndexed { index, block ->
                 MarkdownBlockView(block, tail = caret && index == blocks.lastIndex)
@@ -86,13 +106,14 @@ fun MarkdownText(
 
 /** The opener [MarkdownText] was given, reachable from every block's inline run. */
 private val LocalLinkOpener = compositionLocalOf<((String) -> Unit)?> { null }
+private val LocalImageOpener = compositionLocalOf<((String) -> Unit)?> { null }
 
 @Composable
 private fun MarkdownBlockView(block: MarkdownBlock, tail: Boolean) {
     val muted = secondaryTint
     when (block) {
         is MarkdownBlock.Paragraph ->
-            Text(inline(block.text, tail, muted), fontSize = 17.sp)
+            Text(inline(block.text, tail, muted), fontSize = 16.sp, lineHeight = 22.sp)
 
         is MarkdownBlock.Heading ->
             // Three sizes, not six. A chat bubble is not a document, and an h4
@@ -100,9 +121,9 @@ private fun MarkdownBlockView(block: MarkdownBlock, tail: Boolean) {
             Text(
                 text = inline(block.text, tail, muted),
                 fontSize = when {
-                    block.level <= 1 -> 21.sp
-                    block.level == 2 -> 19.sp
-                    else -> 17.sp
+                    block.level <= 1 -> 20.sp
+                    block.level == 2 -> 18.sp
+                    else -> 16.sp
                 },
                 fontWeight = FontWeight.SemiBold,
                 modifier = Modifier.padding(top = 2.dp),
@@ -123,7 +144,7 @@ private fun MarkdownBlockView(block: MarkdownBlock, tail: Boolean) {
                         .fillMaxHeight()
                         .background(muted.copy(alpha = 0.4f), RoundedCornerShape(1.5.dp)),
                 )
-                Text(inline(block.text, tail, muted), fontSize = 17.sp, color = muted)
+                Text(inline(block.text, tail, muted), fontSize = 16.sp, lineHeight = 22.sp, color = muted)
             }
 
         is MarkdownBlock.Code ->
@@ -162,6 +183,51 @@ private fun MarkdownBlockView(block: MarkdownBlock, tail: Boolean) {
         MarkdownBlock.Rule -> HorizontalDivider(Modifier.padding(vertical = 2.dp))
 
         is MarkdownBlock.Table -> MarkdownTableView(block)
+
+        is MarkdownBlock.Image -> InlineMarkdownImageView(
+            url = block.url,
+            alt = block.alt,
+            onOpen = LocalImageOpener.current,
+        )
+    }
+}
+
+@Composable
+private fun InlineMarkdownImageView(
+    url: String,
+    alt: String?,
+    onOpen: ((String) -> Unit)?,
+) {
+    val session = LocalCompanion.current.session
+    val resolvedPath = if (url.startsWith("attachment:")) {
+        "/api/attachments/" + url.removePrefix("attachment:")
+    } else {
+        url
+    }
+    var bitmap by remember(resolvedPath) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(resolvedPath) {
+        if (resolvedPath.startsWith("/api/attachments/")) {
+            val bytes = session.attachmentImage(resolvedPath) ?: return@LaunchedEffect
+            bitmap = withContext(Dispatchers.IO) {
+                runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }.getOrNull()
+            }
+        }
+    }
+    val decoded = bitmap
+    if (decoded != null) {
+        Image(
+            bitmap = decoded,
+            contentDescription = alt ?: "Image",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(12.dp))
+                .then(
+                    if (onOpen != null) {
+                        Modifier.clickable { onOpen(resolvedPath) }
+                    } else Modifier,
+                ),
+        )
     }
 }
 
@@ -233,11 +299,12 @@ private fun MarkerRow(symbol: String, indent: Int, text: String, tail: Boolean, 
     ) {
         Text(
             text = symbol,
-            fontSize = 17.sp,
+            fontSize = 16.sp,
+            lineHeight = 22.sp,
             color = muted,
             modifier = Modifier.widthIn(min = 16.dp),
         )
-        Text(inline(text, tail, muted), fontSize = 17.sp)
+        Text(inline(text, tail, muted), fontSize = 16.sp, lineHeight = 22.sp)
     }
 }
 
