@@ -7,9 +7,9 @@ import {
   RoutineExecutionPromptBuilder,
   RoutinePostExecutionProcessor,
   RoutineSetupCoordinator,
-} from "./routine-engine";
-import type { Routine, RoutineRun } from "../../shared/routines";
-import { sharedObservability } from "./observability";
+} from "./routine-engine.ts";
+import type { Routine, RoutineRun } from "../../shared/routines.ts";
+import { sharedObservability } from "./observability.ts";
 
 describe("Routine Engine Upgrades", () => {
   let tempDir: string;
@@ -206,7 +206,7 @@ describe("Routine Engine Upgrades", () => {
       expect(result.suppressNotification).toBe(true);
 
       const events = sharedObservability.getEvents();
-      const suppressed = events.find((e) => e.type === "ROUTINE_NOTIFICATION_SUPPRESSED");
+      const suppressed = events.find((e: { type: string; payload?: any }) => e.type === "ROUTINE_NOTIFICATION_SUPPRESSED");
       expect(suppressed).toBeDefined();
       expect(suppressed?.payload.reason).toBe("empty_result");
     });
@@ -243,7 +243,7 @@ describe("Routine Engine Upgrades", () => {
       expect(result.verificationStatus).toBe("verified");
 
       const events = sharedObservability.getEvents();
-      const discovered = events.find((e) => e.type === "ROUTINE_ITEMS_DISCOVERED");
+      const discovered = events.find((e: { type: string; payload?: any }) => e.type === "ROUTINE_ITEMS_DISCOVERED");
       expect(discovered).toBeDefined();
       expect(discovered?.payload.itemsFound).toBeGreaterThanOrEqual(1);
     });
@@ -267,7 +267,7 @@ describe("Routine Engine Upgrades", () => {
         filters: "Research papers and breakthrough models",
       });
       expect(q3.step).toBe("frequency");
-      expect(q3.question.options.map((o) => o.id)).toContain("daily");
+      expect(q3.question.options.map((o: { id: string }) => o.id)).toContain("daily");
 
       // Step 4: Frequency answered
       const q4 = RoutineSetupCoordinator.getNextStep({
@@ -276,7 +276,7 @@ describe("Routine Engine Upgrades", () => {
         frequency: "daily",
       });
       expect(q4.step).toBe("time");
-      expect(q4.question.options.some((o) => o.id.includes(":00"))).toBe(true);
+      expect(q4.question.options.some((o: { id: string }) => o.id.includes(":00"))).toBe(true);
 
       // Step 5: Time answered
       const q5 = RoutineSetupCoordinator.getNextStep({
