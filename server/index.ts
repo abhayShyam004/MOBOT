@@ -370,9 +370,10 @@ export function cleanUserFacingText(text: string): string {
   let cleaned = text;
   cleaned = cleaned.replace(/\[(?:image|file)\s+attached\]/gi, "");
   cleaned = cleaned.replace(/\[image:\s*[^\]]+\]/gi, "");
-  cleaned = cleaned.replace(/\[(?:download\s+the\s+[^\]]+|download\s+[^\]]+)\]\((?:attachment:[^\)]+|\/api\/attachments\/[^\)]+)\)/gi, "");
+  cleaned = cleaned.replace(/\[(?:download\s+the\s+[^\]]+|download\s+[^\]]+)\]\((?:attachment:[^)]+|\/api\/attachments\/[^)]+)\)/gi, "");
   cleaned = cleaned.replace(/!\[[^\]]*\]\(attachment:[a-f0-9-]+\.[a-z0-9]+\)/gi, "");
-  cleaned = cleaned.replace(/\s*\*\([^\)]*peeking at the filename[^\)]*\)\*\s*/gi, "\n");    cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
+  cleaned = cleaned.replace(/\s*\*\([^)]*peeking at the filename[^)]*\)\*\s*/gi, "\n");
+  cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
   return cleaned;
 }
 

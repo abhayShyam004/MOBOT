@@ -10,7 +10,6 @@
 // Preserves all authentic user bots, tasks, and messages.
 
 import { execSync } from "node:child_process";
-import { readFileSync, existsSync } from "node:fs";
 
 const SERIAL = "R8YY90VT4EM";
 const PORT_HOST = 28799;
@@ -138,6 +137,9 @@ try {
       runAFinished = true;
       break;
     }
+  }
+  if (!runAFinished) {
+    throw new Error("Routine A run did not settle in time");
   }
   console.log(`✓ TEST A PASSED: Setup, triggerConfig, deliveryConfig, and execution run confirmed.`);
 

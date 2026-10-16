@@ -4,7 +4,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { EnvironmentDiscovery } from "./environment-discovery.ts";
 import { GeneralProcessManager } from "./process-manager.ts";
 import { SystemVerifier } from "./verification.ts";
-import { TaskOrchestrator, defaultTaskOrchestrator } from "./orchestrator.ts";
+import { TaskOrchestrator } from "./orchestrator.ts";
 import { COMPUTER_AGENT_TOOLS } from "./agent-tools.ts";
 import http from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -799,6 +799,7 @@ describe("General-Purpose Computer Agent Layer", () => {
         ],
         completionCriteria: [{ description: "Service verified listening on port 4000" }],
       });
+      expect(plan.id).toBeDefined();
 
       // Start step 1
       const startRes = orchestrator.startStep("step_1");
