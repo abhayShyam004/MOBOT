@@ -416,8 +416,24 @@ const appConfigSchema = z.object({
       "Use a model ID without control characters",
     ).optional(),
   }).optional(),
-  /** Non-secret profile details shown in the sidebar. */
-  profile: z.object({ name: optionalText, email: optionalText }).optional(),
+  /** Non-secret profile details shown in the sidebar and persistent context. */
+  profile: z.object({
+    name: optionalText,
+    email: optionalText,
+    location: z.object({
+      city: optionalText,
+      region: optionalText,
+      country: optionalText,
+      countryCode: optionalText,
+      postalCode: optionalText,
+      latitude: z.number().min(-90).max(90).optional(),
+      longitude: z.number().min(-180).max(180).optional(),
+      timezone: optionalText,
+      source: z.enum(["ip", "device", "profile", "user_set", "timezone_inferred"]).optional(),
+      updatedAt: z.number().optional(),
+      enabled: z.boolean().optional(),
+    }).optional(),
+  }).optional(),
   /** UI language override (BCP-47, lowercase). Empty/absent = follow the
    * system language. Unknown tags degrade to English in the renderer. */
   language: optionalText,

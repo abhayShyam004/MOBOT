@@ -56,4 +56,5 @@ deploy/podman/.env.*
 .omb-proc-logs/
 backups/
 bg/
+MOBOT_PROJECT_HANDOFF.zip
 

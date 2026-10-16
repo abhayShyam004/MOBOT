@@ -286,8 +286,12 @@ import {
   searchMemoryFiles,
   SESSION_SEARCH_SYSTEM_PROMPT,
   workspaceDir,
+  loadMemory,
 } from "./workspace.ts";
 import { readMemoryTopic } from "./workspace.ts";
+import { sharedGoalManager } from "./goals.ts";
+import { sharedWatchManager } from "./watches.ts";
+import { sharedSwarmCoordinator } from "./specialist-swarm.ts";
 import {
   MEMORY_INDEX,
   MemoryStoreError,
@@ -364,6 +368,13 @@ import { getProjectManager, getRepairLoop, getDeploymentManager } from "./app-bu
 import { defaultCapabilityRegistry } from "./capabilities/capability-registry.ts";
 import { artifactsFromToolOutput, defaultArtifactManager, isUserFacingArtifact } from "./computer-agent/artifact-manager.ts";
 import { readCuaConnection, gatedLocalComputer } from "./local-computer.ts";
+import { extractStructuredContent } from "./structured-extract.ts";
+import {
+  formatLocationPromptBlock,
+  loadUserLocation,
+  saveUserLocation,
+  disableUserLocation,
+} from "./location-context.ts";
 
 export function cleanUserFacingText(text: string): string {
   if (!text) return text;
@@ -1884,6 +1895,7 @@ function previewSystemPrompt(bot: BotRecord) {
     { id: "ask", label: "Questions", text: ASK_PROMPT },
     { id: "routine", label: "Routines", text: agentsMounted ? ROUTINE_PROMPT : "" },
     { id: "profile", label: "Profile changes", text: agentsMounted ? PROFILE_PROMPT : "" },
+    { id: "user-location", label: "User location context", text: formatLocationPromptBlock(loadUserLocation(DATA_DIR)) },
     { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
     { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: agentsMounted, fileTools: Boolean(privateWorkspace) }) },
     { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
@@ -1967,6 +1979,9 @@ async function botOverview(bot: BotRecord): Promise<BotOverview> {
     sectionPeers,
     timeZone,
     recent,
+    goals: sharedGoalManager.listGoals(bot.id),
+    watches: sharedWatchManager.listWatches(bot.id),
+    memoryText: loadMemory(bot.id)?.text ?? "",
   });
 }
 
@@ -4669,10 +4684,17 @@ bus.subscribe((event: RuntimeEvent) => {
           failureReportedTurns.set(event.threadId, event.turnId ?? null);
           break;
         }
-        pushMessage({ role: "bot", kind: "text", text, turnId: event.turnId });
+        const { cleanText, structured } = extractStructuredContent(text);
+        pushMessage({
+          role: "bot",
+          kind: structured && !cleanText ? "structured" : "text",
+          text: cleanText,
+          ...(structured ? { structured } : {}),
+          turnId: event.turnId,
+        });
         // kept so "finished" can say what it finished with, rather than
         // just that something ended
-        lastReply.set(event.threadId, text);
+        lastReply.set(event.threadId, cleanText);
       } else if (event.itemType === "assistant_image") {
         try {
           const decoded = decodeGeneratedImage(event.data);
@@ -6332,7 +6354,7 @@ async function startTurn(
   const askUserTool = {
     name: "ask_user",
     description:
-      "Pause mid-task to get the person's decision, preference, or missing knowledge — then continue the SAME task with their answer. You decide on your own when a reasonable default exists; reach for this only when different answers would materially change what you do next (an approach that shapes later work, a preference you cannot infer, context only they have, or sign-off before something irreversible or hard to undo). REQUIREMENTS DISCOVERY 99.99% MULTIPLE-CHOICE RULE: For requirements discovery and application building, approximately 99.99% of questions MUST be structured multiple-choice / selectable-option questions (type: 'single_choice' or 'multiple_choice') with 4-8 concrete choices. The user must normally answer by tapping an option rather than typing a paragraph. Never ask open-ended generic questions when options can be generated. Use multi-select for feature sets and capabilities, single-select for mutually exclusive choices. Descriptive/free-text is an extreme exception reserved for company names, headlines, or after the user selects 'Other'. The task visibly pauses at the card until they answer. ONE question. `type` — single_choice: exactly one pick; multiple_choice: several picks with minSelections/maxSelections; confirmation: yes/no; free_text: they type the answer (omit choices). Assign each option a stable snake_case id; the answer cites it. 4-8 options, each with a one-line description of when to choose it. The person can always type their own answer unless allowOther is false. Their answer returns as this tool's result; continue the task with it.",
+      "Interactively ask the user a structured multiple-choice question, preference choice, or clarification — then continue the SAME task with their answer. Call this tool autonomously whenever the user's request is broad, ambiguous, or requires clarification or preference selection (such as recommendations, choosing products/services, selecting categories, scoping goals, deciding features, or picking preferences). NEVER write option menus, bulleted choices, or lettered lists as plain chat text. The phone UI renders this tool call as interactive, tappable choice cards. ONE question. `type` — single_choice: exactly one pick; multiple_choice: several picks with minSelections/maxSelections; confirmation: yes/no; free_text: they type the answer (omit choices). Assign each option a stable snake_case id; the answer cites it. 4-8 options, each with a one-line description of when to choose it. Use multi-select for non-mutually exclusive choices. The person can always type their own answer unless allowOther is false. Their answer returns as this tool's result; continue the task with it.",
     inputSchema: {
       type: "object",
       properties: {
@@ -7220,6 +7242,7 @@ async function startTurn(
         { id: "routine", label: "Routines", text: routinePrompt },
         { id: "routine-execution", label: "Routine execution", text: opts?.automationSource === "schedule" || opts?.automationSource === "manual" ? ROUTINE_EXECUTION_PROMPT : "" },
         { id: "profile", label: "Profile changes", text: profilePrompt },
+        { id: "user-location", label: "User location context", text: formatLocationPromptBlock(loadUserLocation(DATA_DIR)) },
         { id: "learn", label: "Skill authoring", text: learnPrompt },
         { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
         // what the bot said lately in its other conversations, so a task
@@ -8905,6 +8928,7 @@ async function runGroupMemberTurn(
     { id: "recall", label: "Recall", text: integrations.agents ? SESSION_SEARCH_SYSTEM_PROMPT : "" },
     { id: "recent", label: "Recent work", text: recentWorkPrompt(recentLines) },
     { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
+    { id: "user-location", label: "User location context", text: formatLocationPromptBlock(loadUserLocation(DATA_DIR)) },
     // the room path has always put a newline before memory and trimmed
     // the block's leading space; keep that so existing prompts are
     // byte-identical. The write guidance follows the tools actually
@@ -16402,6 +16426,134 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 200, await botOverview(bot));
     }
 
+    // ── Bot Goals (Part 2: Goal Engine) ──────────────────────────────────
+    m = path.match(/^\/api\/bots\/([\w-]+)\/goals$/);
+    if (m) {
+      const botId = m[1];
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      if (method === "GET") {
+        return json(res, 200, { goals: sharedGoalManager.listGoals(botId) });
+      }
+      if (method === "POST") {
+        const body = await readBody(req);
+        if (!body || typeof body.title !== "string" || !body.title.trim()) {
+          return json(res, 400, { error: "title is required" });
+        }
+        const goal = sharedGoalManager.createGoal({
+          botId,
+          title: body.title.trim(),
+          objective: body.objective?.trim() || body.title.trim(),
+          motivation: body.motivation,
+          milestones: body.milestones,
+          nextAction: body.nextAction,
+          blockers: body.blockers,
+        });
+        return json(res, 201, { goal });
+      }
+    }
+
+    m = path.match(/^\/api\/bots\/([\w-]+)\/goals\/([\w-]+)$/);
+    if (m) {
+      const [, botId, goalId] = m;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const goal = sharedGoalManager.getGoal(goalId);
+      if (!goal || goal.botId !== botId) return json(res, 404, { error: "no such goal" });
+      if (method === "GET") {
+        return json(res, 200, { goal });
+      }
+      if (method === "PUT") {
+        const body = await readBody(req);
+        const updated = sharedGoalManager.updateGoal(goalId, body);
+        return json(res, 200, { goal: updated });
+      }
+      if (method === "DELETE") {
+        sharedGoalManager.deleteGoal(goalId);
+        return json(res, 200, { ok: true });
+      }
+    }
+
+    m = path.match(/^\/api\/bots\/([\w-]+)\/goals\/([\w-]+)\/milestones\/([\w-]+)\/complete$/);
+    if (m && method === "POST") {
+      const [, botId, goalId, milestoneId] = m;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const updated = sharedGoalManager.completeMilestone(goalId, milestoneId);
+      if (!updated) return json(res, 404, { error: "no such goal or milestone" });
+      return json(res, 200, { goal: updated });
+    }
+
+    // ── Bot Watches (Part 3: World Awareness / Watch System) ──────────────
+    m = path.match(/^\/api\/bots\/([\w-]+)\/watches$/);
+    if (m) {
+      const botId = m[1];
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      if (method === "GET") {
+        return json(res, 200, { watches: sharedWatchManager.listWatches(botId) });
+      }
+      if (method === "POST") {
+        const body = await readBody(req);
+        if (!body || !body.target || !body.condition) {
+          return json(res, 400, { error: "target and condition are required" });
+        }
+        const watch = sharedWatchManager.createWatch({
+          botId,
+          target: String(body.target),
+          condition: String(body.condition),
+          source: body.source,
+          cadenceMinutes: body.cadenceMinutes,
+          notificationPolicy: body.notificationPolicy,
+          expiresAt: body.expiresAt,
+        });
+        return json(res, 201, { watch });
+      }
+    }
+
+    m = path.match(/^\/api\/bots\/([\w-]+)\/watches\/([\w-]+)$/);
+    if (m) {
+      const [, botId, watchId] = m;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const watch = sharedWatchManager.getWatch(watchId);
+      if (!watch || watch.botId !== botId) return json(res, 404, { error: "no such watch" });
+      if (method === "GET") {
+        return json(res, 200, { watch });
+      }
+      if (method === "PUT") {
+        const body = await readBody(req);
+        const updated = sharedWatchManager.updateWatch(watchId, body);
+        return json(res, 200, { watch: updated });
+      }
+      if (method === "DELETE") {
+        sharedWatchManager.deleteWatch(watchId);
+        return json(res, 200, { ok: true });
+      }
+    }
+
+    m = path.match(/^\/api\/bots\/([\w-]+)\/watches\/([\w-]+)\/check$/);
+    if (m && method === "POST") {
+      const [, botId, watchId] = m;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const result = await sharedWatchManager.checkWatch(watchId);
+      if (!result) return json(res, 404, { error: "no such watch" });
+      return json(res, 200, { result, watch: sharedWatchManager.getWatch(watchId) });
+    }
+
+    // ── Specialist Swarm Dispatch (Part 4: Specialist Agents) ────────────
+    m = path.match(/^\/api\/bots\/([\w-]+)\/specialists\/dispatch$/);
+    if (m && method === "POST") {
+      const botId = m[1];
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const body = await readBody(req);
+      if (!body || !body.mainTask || !Array.isArray(body.specialists)) {
+        return json(res, 400, { error: "mainTask and specialists array are required" });
+      }
+      const swarmResult = await sharedSwarmCoordinator.dispatch({
+        botId,
+        mainTask: String(body.mainTask),
+        specialists: body.specialists,
+        coordinatorContext: body.coordinatorContext,
+      });
+      return json(res, 200, { result: swarmResult });
+    }
+
     m = path.match(/^\/api\/bots\/([\w-]+)\/history$/);
     if (m && method === "GET") {
       if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
@@ -18255,6 +18407,28 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       } finally {
         mcpConfigBusy = false;
       }
+    }
+
+    // ── Persistent User Location Context ──
+    if (method === "GET" && path === "/api/user-location") {
+      const loc = loadUserLocation(DATA_DIR);
+      return json(res, 200, loc ?? { enabled: false });
+    }
+    if ((method === "PUT" || method === "POST") && path === "/api/user-location") {
+      const body = await readBody(req, 16384);
+      if (!body || typeof body !== "object") {
+        return json(res, 400, { error: "Invalid location payload" });
+      }
+      const success = saveUserLocation(body as any, DATA_DIR);
+      if (!success) {
+        return json(res, 400, { error: "Invalid location data" });
+      }
+      const saved = loadUserLocation(DATA_DIR);
+      return json(res, 200, { ok: true, location: saved });
+    }
+    if (method === "DELETE" && path === "/api/user-location") {
+      disableUserLocation(DATA_DIR);
+      return json(res, 200, { ok: true, enabled: false });
     }
 
     // ── app config (API keys — never echoed back, booleans only) ──

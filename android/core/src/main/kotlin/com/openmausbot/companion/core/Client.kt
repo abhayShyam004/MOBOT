@@ -782,6 +782,12 @@ class CompanionClient(
     suspend fun overview(botId: String): BotOverview =
         send(makeRequest("GET", "/api/bots/${segment(botId)}/overview"))
 
+    suspend fun checkWatch(botId: String, watchId: String): JsonObject =
+        send(makeRequest("POST", "/api/bots/${segment(botId)}/watches/${segment(watchId)}/check"))
+
+    suspend fun completeMilestone(botId: String, goalId: String, milestoneId: String): JsonObject =
+        send(makeRequest("POST", "/api/bots/${segment(botId)}/goals/${segment(goalId)}/milestones/${segment(milestoneId)}/complete"))
+
     suspend fun createBot(): Bot = send<CreatedBot>(makeRequest("POST", "/api/bots")).bot
 
     /**

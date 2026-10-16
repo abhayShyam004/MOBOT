@@ -1581,10 +1581,112 @@ data class BotOverviewWho(val name: String, val title: String, val blurb: String
 data class BotOverviewRecent(val at: Double, val summary: String)
 
 @Serializable
+data class CalendarItemOverview(
+    val id: String,
+    val title: String,
+    val type: String,
+    val time: String,
+    val status: String,
+    val description: String? = null,
+    val routineId: String? = null,
+)
+
+@Serializable
+data class CalendarDayOverview(
+    val dayDate: String,
+    val dayName: String,
+    val dayNumber: Int,
+    val isToday: Boolean,
+    val items: List<CalendarItemOverview> = emptyList(),
+)
+
+@Serializable
+data class UpcomingItemOverview(
+    val id: String,
+    val title: String,
+    val scheduledAt: Double,
+    val formattedTime: String,
+    val type: String,
+    val status: String,
+    val cadence: String? = null,
+    val target: String? = null,
+)
+
+@Serializable
+data class MemoryItemOverview(
+    val id: String,
+    val text: String,
+    val category: String,
+    val source: String? = null,
+    val date: String? = null,
+)
+
+@Serializable
+data class AutomationOverview(
+    val id: String,
+    val name: String,
+    val status: String,
+    val schedule: String,
+    val lastRunAt: Double? = null,
+    val lastRunStatus: String? = null,
+    val nextRunAt: Double? = null,
+)
+
+@Serializable
+data class AbilityOverview(
+    val id: String,
+    val name: String,
+    val description: String,
+    val available: Boolean,
+    val category: String,
+)
+
+@Serializable
+data class GoalOverview(
+    val id: String,
+    val title: String,
+    val status: String,
+    val progress: Int,
+    val milestoneCount: Int,
+    val completedMilestones: Int,
+    val nextAction: String? = null,
+    val blockers: List<String> = emptyList(),
+)
+
+@Serializable
+data class WatchOverview(
+    val id: String,
+    val target: String,
+    val condition: String,
+    val source: String,
+    val status: String,
+    val cadenceMinutes: Int,
+    val lastChecked: Double? = null,
+    val lastKnownState: String? = null,
+)
+
+@Serializable
+data class ActivityOverview(
+    val id: String,
+    val summary: String,
+    val at: Double,
+    val type: String,
+)
+
+@Serializable
 data class BotOverview(
     val who: BotOverviewWho,
     val does: List<String> = emptyList(),
     val reaches: List<String> = emptyList(),
     val wont: List<String> = emptyList(),
     val recent: List<BotOverviewRecent> = emptyList(),
+    val calendar: List<CalendarDayOverview> = emptyList(),
+    val upcoming: List<UpcomingItemOverview> = emptyList(),
+    val memory: List<MemoryItemOverview> = emptyList(),
+    val automations: List<AutomationOverview> = emptyList(),
+    val abilities: List<AbilityOverview> = emptyList(),
+    val goals: List<GoalOverview> = emptyList(),
+    val watches: List<WatchOverview> = emptyList(),
+    val activities: List<ActivityOverview> = emptyList(),
 )
+

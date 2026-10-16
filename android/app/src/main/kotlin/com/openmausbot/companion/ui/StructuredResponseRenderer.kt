@@ -82,14 +82,24 @@ import com.openmausbot.companion.core.MapData
 import com.openmausbot.companion.core.MediaData
 import com.openmausbot.companion.core.Message
 import com.openmausbot.companion.core.SemanticCardData
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import com.openmausbot.companion.core.CompletionCardData
+import com.openmausbot.companion.core.DailyBriefingData
+import com.openmausbot.companion.core.ProductData
+import com.openmausbot.companion.core.SmartRecapData
 import com.openmausbot.companion.core.SourcesData
 import com.openmausbot.companion.core.StructuredComponent
 import com.openmausbot.companion.core.StructuredResponseData
 import com.openmausbot.companion.core.TableData
 import com.openmausbot.companion.core.TimelineData
-import com.openmausbot.companion.core.CompletionCardData
-import com.openmausbot.companion.core.SmartRecapData
-import com.openmausbot.companion.core.DailyBriefingData
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.jsonPrimitive
@@ -130,6 +140,7 @@ fun StructuredResponseView(
                     "decision_matrix" -> DecisionMatrixRenderer(component)
                     "dashboard" -> DashboardRenderer(component)
                     "card" -> SemanticCardRenderer(component)
+                    "product" -> ProductCardRenderer(component, onEvent)
                     "sources" -> SourcesRenderer(component)
                     "code" -> CodeRenderer(component)
                     "diagram" -> DiagramRenderer(component)
@@ -341,6 +352,7 @@ private fun ComponentContainer(
 
             val actions = component.actions
             if (!actions.isNullOrEmpty()) {
+                val uriHandler = LocalUriHandler.current
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
@@ -348,9 +360,16 @@ private fun ComponentContainer(
                     actions.forEach { action ->
                         val isPrimary = action.style == "primary"
                         val isDanger = action.style == "danger"
+                        val actionUrl = action.url
+                        val onClick: () -> Unit = {
+                            if (!actionUrl.isNullOrBlank()) {
+                                try { uriHandler.openUri(actionUrl) } catch (_: Exception) {}
+                            }
+                            onEvent?.invoke(component.id, action.id, actionUrl?.let { mapOf("url" to it) } ?: emptyMap())
+                        }
                         if (isPrimary) {
                             Button(
-                                onClick = { onEvent?.invoke(component.id, action.id, emptyMap()) },
+                                onClick = onClick,
                                 enabled = action.disabled != true,
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                             ) {
@@ -358,7 +377,7 @@ private fun ComponentContainer(
                             }
                         } else {
                             OutlinedButton(
-                                onClick = { onEvent?.invoke(component.id, action.id, emptyMap()) },
+                                onClick = onClick,
                                 enabled = action.disabled != true,
                                 contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                             ) {
@@ -2689,6 +2708,268 @@ private fun DailyBriefingRenderer(
                             color = AppTheme.colors.textPrimary,
                         )
                     }
+                }
+            }
+        }
+    }
+}
+
+// ── 23. Product Card Renderer ──
+@Composable
+private fun ProductCardRenderer(
+    component: StructuredComponent,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+) {
+    val product = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<ProductData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (product == null) {
+        FallbackRenderer(component)
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+    val session = LocalCompanion.current.session
+
+    var imageBitmap by remember(product.imageUrl) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(product.imageUrl) {
+        val url = product.imageUrl?.trim()
+        if (url.isNullOrEmpty()) return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            try {
+                if (url.startsWith("/api/attachments/") || url.startsWith("attachment:")) {
+                    val path = if (url.startsWith("attachment:")) "/api/attachments/" + url.removePrefix("attachment:") else url
+                    val bytes = session.attachmentImage(path)
+                    if (bytes != null) {
+                        imageBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                    }
+                } else if (url.startsWith("http://") || url.startsWith("https://")) {
+                    val conn = (java.net.URI(url).toURL().openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                        instanceFollowRedirects = true
+                        setRequestProperty("User-Agent", "Mozilla/5.0 OpenMausBot")
+                    }
+                    if (conn.responseCode in 200..299) {
+                        conn.inputStream.use { stream ->
+                            val bytes = stream.readBytes()
+                            if (bytes.isNotEmpty()) {
+                                imageBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Graceful fallback: do not invent or break if image fails
+            }
+        }
+    }
+
+    val brandColor = AppTheme.colors.accent
+    val priceColor = Color(0xFF10B981)
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // 1. Badge & Retailer row
+        val badge = product.badge
+        val retailer = product.retailer
+        if (!badge.isNullOrBlank() || !retailer.isNullOrBlank()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!badge.isNullOrBlank()) {
+                    Text(
+                        text = badge,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = brandColor,
+                        modifier = Modifier
+                            .background(brandColor.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+                            .border(1.dp, brandColor.copy(alpha = 0.30f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 2.dp),
+                    )
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+                if (!retailer.isNullOrBlank()) {
+                    Text(
+                        text = retailer,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = AppTheme.colors.textSecondary,
+                    )
+                }
+            }
+        }
+
+        // 2. Product Image (if available)
+        imageBitmap?.let { bitmap ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 200.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(AppTheme.colors.surfaceSunken)
+                    .border(1.dp, AppTheme.colors.hairline, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = product.name,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth().padding(4.dp),
+                )
+            }
+        }
+
+        // 3. Name & Brand
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = product.name,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = AppTheme.colors.textPrimary,
+            )
+            if (!product.brand.isNullOrBlank()) {
+                Text(
+                    text = "by ${product.brand}",
+                    fontSize = 12.sp,
+                    color = AppTheme.colors.textSecondary,
+                )
+            }
+        }
+
+        // 4. Price & Rating row
+        val price = product.price
+        if (!price.isNullOrBlank() || product.rating != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!price.isNullOrBlank()) {
+                    Text(
+                        text = price,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = priceColor,
+                    )
+                }
+                if (product.rating != null) {
+                    val ratingStr = "★ %.1f".format(java.util.Locale.US, product.rating) +
+                        (product.reviewsCount?.let { " ($it)" } ?: "")
+                    Text(
+                        text = ratingStr,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFF59E0B),
+                    )
+                }
+            }
+        }
+
+        // 5. Recommendation Reason
+        val reason = product.reason
+        if (!reason.isNullOrBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(brandColor.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
+                    .border(1.dp, brandColor.copy(alpha = 0.20f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    text = reason,
+                    fontSize = 12.5.sp,
+                    lineHeight = 17.sp,
+                    color = AppTheme.colors.textPrimary,
+                )
+            }
+        }
+
+        // 6. Key Details / Specs
+        if (product.details.isNotEmpty()) {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                product.details.forEach { detail ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Text(
+                            text = "•",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = brandColor,
+                        )
+                        Text(
+                            text = detail,
+                            fontSize = 12.sp,
+                            lineHeight = 16.sp,
+                            color = AppTheme.colors.textSecondary,
+                        )
+                    }
+                }
+            }
+        }
+
+        // 7. Metadata Key-Value Table (if present)
+        product.metadata?.takeIf { it.isNotEmpty() }?.let { meta ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(AppTheme.colors.surfaceSunken.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                meta.forEach { (k, v) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(text = k, fontSize = 11.sp, color = AppTheme.colors.textSecondary)
+                        Text(text = v, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                    }
+                }
+            }
+        }
+
+        // 8. Native Clickable Action Button ("View product ↗")
+        val destinationUrl = product.sourceUrl
+        if (!destinationUrl.isNullOrBlank()) {
+            Spacer(modifier = Modifier.height(2.dp))
+            Button(
+                onClick = {
+                    try {
+                        uriHandler.openUri(destinationUrl)
+                    } catch (_: Exception) {}
+                    onEvent?.invoke(component.id, "view_product", mapOf("url" to destinationUrl))
+                },
+                modifier = Modifier.fillMaxWidth(),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
+            ) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = product.actionLabel ?: "View product",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(text = "↗", fontSize = 13.sp)
                 }
             }
         }

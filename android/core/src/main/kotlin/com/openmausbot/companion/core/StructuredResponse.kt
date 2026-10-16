@@ -28,6 +28,7 @@ data class ComponentAction(
     val label: String,
     val style: String? = null,
     val disabled: Boolean? = null,
+    val url: String? = null,
 )
 
 // ── 1. Table ──
@@ -527,5 +528,20 @@ data class SmartLinkResponse(
     val suggestedActions: List<SmartLinkAction> = emptyList(),
 )
 
-
-
+// ── 23. Product Card ──
+@Serializable
+data class ProductData(
+    val name: String,
+    val brand: String? = null,
+    val price: String? = null,
+    val rating: Double? = null,
+    val reviewsCount: Int? = null,
+    val retailer: String? = null,
+    val sourceUrl: String? = null,
+    val imageUrl: String? = null,
+    val reason: String? = null,
+    val details: List<String> = emptyList(),
+    val badge: String? = null,
+    val metadata: Map<String, String>? = null,
+    val actionLabel: String? = "View product",
+)

@@ -9,6 +9,93 @@ import type { RoutineRequestSchedule } from "../shared/routine-request.ts";
 import { approvalModeFor } from "../shared/approval-mode.ts";
 import { cronScheduleLabel } from "../shared/cron-label.ts";
 
+import type { Goal } from "./goals.ts";
+import type { Watch } from "./watches.ts";
+
+export interface CalendarItemOverview {
+  id: string;
+  title: string;
+  type: "routine" | "run" | "watch" | "goal" | "reminder";
+  time: string;
+  status: string;
+  description?: string;
+  routineId?: string;
+}
+
+export interface CalendarDayOverview {
+  dayDate: string; // YYYY-MM-DD
+  dayName: string; // e.g. Mon, Tue, Wed
+  dayNumber: number; // e.g. 16
+  isToday: boolean;
+  items: CalendarItemOverview[];
+}
+
+export interface UpcomingItemOverview {
+  id: string;
+  title: string;
+  scheduledAt: number;
+  formattedTime: string;
+  type: "routine" | "watch" | "goal";
+  status: "active" | "paused" | "pending";
+  cadence?: string;
+  target?: string;
+}
+
+export interface MemoryItemOverview {
+  id: string;
+  text: string;
+  category: "preference" | "fact" | "instruction" | "context";
+  source?: string;
+  date?: string;
+}
+
+export interface AutomationOverview {
+  id: string;
+  name: string;
+  status: "active" | "paused" | "failed";
+  schedule: string;
+  lastRunAt?: number;
+  lastRunStatus?: string;
+  nextRunAt?: number;
+}
+
+export interface AbilityOverview {
+  id: string;
+  name: string;
+  description: string;
+  available: boolean;
+  category: "core" | "device" | "connected";
+}
+
+export interface GoalOverview {
+  id: string;
+  title: string;
+  status: "active" | "paused" | "completed" | "blocked";
+  progress: number;
+  milestoneCount: number;
+  completedMilestones: number;
+  nextAction?: string;
+  blockers: string[];
+}
+
+export interface WatchOverview {
+  id: string;
+  target: string;
+  condition: string;
+  source: string;
+  status: "active" | "paused" | "triggered" | "expired";
+  cadenceMinutes: number;
+  lastChecked?: number;
+  lastKnownState?: string;
+}
+
+export interface ActivityOverview {
+  id: string;
+  summary: string;
+  at: number;
+  type: "research" | "goal" | "watch" | "routine" | "memory";
+}
+
 export interface BotOverview {
   who: { name: string; title: string; blurb: string; soulLead: string };
   does: string[];
@@ -18,6 +105,15 @@ export interface BotOverview {
   /** Optional setup ideas, each pointing at the relevant settings section.
    * These are customization suggestions, not requirements for chatting. */
   setup: SetupStep[];
+  // Command Center extensions
+  calendar: CalendarDayOverview[];
+  upcoming: UpcomingItemOverview[];
+  memory: MemoryItemOverview[];
+  automations: AutomationOverview[];
+  abilities: AbilityOverview[];
+  goals: GoalOverview[];
+  watches: WatchOverview[];
+  activities: ActivityOverview[];
 }
 
 export type SetupStepId = "identity" | "soul" | "folder" | "apps" | "schedule";
@@ -56,6 +152,8 @@ export interface OverviewFacts {
     enabled: boolean;
     schedule: RoutineRequestSchedule | Routine["schedule"];
     nextRunAt: number | null;
+    taskObjective?: string;
+    prompt?: string;
   }>;
   runs: Array<{ routineId: string; status: string; finishedAt?: number; startedAt?: number; scheduledFor: number }>;
   webhooks: Array<{ name: string; enabled: boolean }>;
@@ -66,6 +164,11 @@ export interface OverviewFacts {
   sectionPeers: number;
   timeZone: string;
   recent: Array<{ at: number; summary: string }>;
+  // Command Center facts
+  goals?: Goal[];
+  watches?: Watch[];
+  memoryText?: string;
+  now?: number;
 }
 
 /** The first paragraph of a SOUL.md-style persona, capped at 240 characters
@@ -260,6 +363,338 @@ function wontLines(facts: OverviewFacts): string[] {
   return lines;
 }
 
+function formatDayDate(date: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const year = parts.find((p) => p.type === "year")?.value ?? "2026";
+  const month = parts.find((p) => p.type === "month")?.value ?? "01";
+  const day = parts.find((p) => p.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
+}
+
+const SHORT_DAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+function buildWeeklyCalendar(facts: OverviewFacts): CalendarDayOverview[] {
+  const nowMs = facts.now ?? Date.now();
+  const nowDate = new Date(nowMs);
+  const tz = facts.timeZone;
+  const todayStr = formatDayDate(nowDate, tz);
+
+  const days: CalendarDayOverview[] = [];
+  for (let offset = -1; offset <= 5; offset++) {
+    const d = new Date(nowMs + offset * 86400000);
+    const dayDate = formatDayDate(d, tz);
+    const dayOfWeek = d.getDay();
+    const dayNumber = d.getDate();
+    const isToday = dayDate === todayStr;
+
+    const items: CalendarItemOverview[] = [];
+
+    for (const r of facts.routines) {
+      if (!r.enabled) continue;
+      if (r.nextRunAt) {
+        const nextDate = formatDayDate(new Date(r.nextRunAt), tz);
+        if (nextDate === dayDate) {
+          items.push({
+            id: `routine-${r.id}`,
+            routineId: r.id,
+            title: r.name,
+            type: "routine",
+            time: time(r.nextRunAt, tz),
+            status: "active",
+            description: r.prompt || r.taskObjective,
+          });
+        }
+      } else if (r.schedule.type === "interval") {
+        items.push({
+          id: `routine-cadence-${r.id}`,
+          routineId: r.id,
+          title: r.name,
+          type: "routine",
+          time: schedulePhrase(r.schedule, tz),
+          status: "active",
+          description: r.prompt,
+        });
+      }
+    }
+
+    for (const run of facts.runs) {
+      const runTime = run.finishedAt ?? run.startedAt ?? run.scheduledFor;
+      if (formatDayDate(new Date(runTime), tz) === dayDate) {
+        const rName = facts.routines.find((rt) => rt.id === run.routineId)?.name ?? "Automation Run";
+        items.push({
+          id: `run-${run.routineId}-${runTime}`,
+          routineId: run.routineId,
+          title: rName,
+          type: "run",
+          time: time(runTime, tz),
+          status: run.status,
+        });
+      }
+    }
+
+    for (const goal of facts.goals ?? []) {
+      for (const m of goal.milestones) {
+        if (m.dueDate && formatDayDate(new Date(m.dueDate), tz) === dayDate) {
+          items.push({
+            id: `goal-milestone-${m.id}`,
+            title: `Milestone: ${m.title}`,
+            type: "goal",
+            time: "Deadline",
+            status: m.completed ? "completed" : "pending",
+            description: `Goal: ${goal.title}`,
+          });
+        }
+      }
+    }
+
+    if (isToday) {
+      for (const w of facts.watches ?? []) {
+        if (w.status === "active") {
+          items.push({
+            id: `watch-${w.id}`,
+            title: `Watch: ${w.target.slice(0, 30)}`,
+            type: "watch",
+            time: `Every ${w.cadenceMinutes}m`,
+            status: w.status,
+            description: w.condition,
+          });
+        }
+      }
+    }
+
+    days.push({
+      dayDate,
+      dayName: SHORT_DAY_NAMES[dayOfWeek] ?? "Day",
+      dayNumber,
+      isToday,
+      items,
+    });
+  }
+
+  return days;
+}
+
+function buildUpcomingItems(facts: OverviewFacts): UpcomingItemOverview[] {
+  const items: UpcomingItemOverview[] = [];
+  const tz = facts.timeZone;
+
+  for (const r of facts.routines) {
+    if (!r.enabled) continue;
+    if (r.nextRunAt) {
+      items.push({
+        id: `routine-${r.id}`,
+        title: r.name,
+        scheduledAt: r.nextRunAt,
+        formattedTime: `${formatDayDate(new Date(r.nextRunAt), tz)} ${time(r.nextRunAt, tz)}`,
+        type: "routine",
+        status: "active",
+        cadence: schedulePhrase(r.schedule, tz),
+        target: r.prompt,
+      });
+    }
+  }
+
+  for (const w of facts.watches ?? []) {
+    if (w.status === "active") {
+      const nextCheck = (w.lastChecked ?? Date.now()) + w.cadenceMinutes * 60000;
+      items.push({
+        id: `watch-${w.id}`,
+        title: `Watch: ${w.condition}`,
+        scheduledAt: nextCheck,
+        formattedTime: time(nextCheck, tz),
+        type: "watch",
+        status: "active",
+        cadence: `Every ${w.cadenceMinutes} min`,
+        target: w.target,
+      });
+    }
+  }
+
+  items.sort((a, b) => a.scheduledAt - b.scheduledAt);
+  return items.slice(0, 10);
+}
+
+function buildMemoryItems(facts: OverviewFacts): MemoryItemOverview[] {
+  const items: MemoryItemOverview[] = [];
+  const raw = facts.memoryText ?? "";
+
+  const lines = raw.split(/\r?\n/);
+  let idCounter = 1;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("- ") && !trimmed.startsWith("* ")) continue;
+    const content = trimmed.slice(2).trim();
+    if (!content || content.startsWith("Durable notes") || content.startsWith("The first 200 lines")) continue;
+
+    const lower = content.toLowerCase();
+    let category: MemoryItemOverview["category"] = "fact";
+    if (lower.includes("prefer") || lower.includes("like") || lower.includes("want") || lower.includes("favorite")) {
+      category = "preference";
+    } else if (lower.includes("must") || lower.includes("always") || lower.includes("never") || lower.includes("rule")) {
+      category = "instruction";
+    } else if (lower.includes("project") || lower.includes("working on") || lower.includes("repo") || lower.includes("app")) {
+      category = "context";
+    }
+
+    const dateMatch = content.match(/^(\d{4}-\d{2}-\d{2}|\d{2}:\d{2})/);
+    const date = dateMatch ? dateMatch[1] : undefined;
+    const cleanText = date ? content.replace(/^(\d{4}-\d{2}-\d{2}|\d{2}:\d{2})\s*[·•-]?\s*/, "") : content;
+
+    items.push({
+      id: `mem-${idCounter++}`,
+      text: cleanText,
+      category,
+      date,
+    });
+  }
+
+  return items;
+}
+
+function buildAutomations(facts: OverviewFacts): AutomationOverview[] {
+  const automations: AutomationOverview[] = [];
+  const tz = facts.timeZone;
+
+  for (const r of facts.routines) {
+    const latest = latestRunFor(facts.runs, r.id);
+    const lastRunAt = latest ? latest.finishedAt ?? latest.startedAt ?? latest.scheduledFor : undefined;
+    automations.push({
+      id: r.id,
+      name: r.name,
+      status: !r.enabled ? "paused" : latest?.status === "failed" ? "failed" : "active",
+      schedule: schedulePhrase(r.schedule, tz),
+      lastRunAt,
+      lastRunStatus: latest?.status,
+      nextRunAt: r.nextRunAt ?? undefined,
+    });
+  }
+
+  return automations;
+}
+
+function buildAbilities(facts: OverviewFacts): AbilityOverview[] {
+  const abilities: AbilityOverview[] = [
+    {
+      id: "web",
+      name: "Web & Search",
+      description: "Search current information, docs, and online products",
+      available: true,
+      category: "core",
+    },
+    {
+      id: "files",
+      name: "Device Files & Workspaces",
+      description: facts.bot.cwd ? `Access to workspace at ${facts.bot.cwd}` : "Private sandboxed workspace storage",
+      available: true,
+      category: "core",
+    },
+    {
+      id: "browser",
+      name: "Autonomous Browser",
+      description: "Direct headless browser navigation, page inspection, and DOM reading",
+      available: facts.browserEnabled === true && facts.bot.browser !== false && facts.bot.computer !== "off",
+      category: "device",
+    },
+    {
+      id: "device_control",
+      name: "Android Device Control",
+      description: "Device capability layer: calendar, contacts, clipboard, and apps",
+      available: true,
+      category: "device",
+    },
+    {
+      id: "terminal",
+      name: "System Terminal",
+      description: "Execution of local CLI commands and build scripts",
+      available: facts.bot.computer !== "off",
+      category: "core",
+    },
+  ];
+
+  if (facts.connectedApps.configured) {
+    for (const service of facts.connectedApps.services) {
+      abilities.push({
+        id: `connected_${service}`,
+        name: service.charAt(0).toUpperCase() + service.slice(1),
+        description: `Connected third-party service integration via Composio`,
+        available: true,
+        category: "connected",
+      });
+    }
+  }
+
+  return abilities;
+}
+
+function buildGoalOverviews(facts: OverviewFacts): GoalOverview[] {
+  return (facts.goals ?? []).map((g) => ({
+    id: g.id,
+    title: g.title,
+    status: g.status,
+    progress: g.progress,
+    milestoneCount: g.milestones.length,
+    completedMilestones: g.milestones.filter((m) => m.completed).length,
+    nextAction: g.nextAction,
+    blockers: g.blockers,
+  }));
+}
+
+function buildWatchOverviews(facts: OverviewFacts): WatchOverview[] {
+  return (facts.watches ?? []).map((w) => ({
+    id: w.id,
+    target: w.target,
+    condition: w.condition,
+    source: w.source,
+    status: w.status,
+    cadenceMinutes: w.cadenceMinutes,
+    lastChecked: w.lastChecked ?? undefined,
+    lastKnownState: w.lastKnownState ?? undefined,
+  }));
+}
+
+function buildActivityOverviews(facts: OverviewFacts): ActivityOverview[] {
+  const activities: ActivityOverview[] = [];
+
+  for (const r of facts.recent) {
+    activities.push({
+      id: `recent-${r.at}-${r.summary.slice(0, 10)}`,
+      summary: r.summary,
+      at: r.at,
+      type: "memory",
+    });
+  }
+
+  for (const run of facts.runs.slice(0, 5)) {
+    const rName = facts.routines.find((rt) => rt.id === run.routineId)?.name ?? "Automation";
+    const at = run.finishedAt ?? run.startedAt ?? run.scheduledFor;
+    activities.push({
+      id: `run-act-${run.routineId}-${at}`,
+      summary: `Completed routine: "${rName}" (${run.status})`,
+      at,
+      type: "routine",
+    });
+  }
+
+  for (const w of facts.watches ?? []) {
+    for (const h of w.history.slice(0, 2)) {
+      activities.push({
+        id: `watch-act-${w.id}-${h.at}`,
+        summary: h.triggered ? `Watch alert triggered: ${w.condition}` : `Checked condition: ${w.condition}`,
+        at: h.at,
+        type: "watch",
+      });
+    }
+  }
+
+  activities.sort((a, b) => b.at - a.at);
+  return activities.slice(0, 15);
+}
+
 export function buildBotOverview(facts: OverviewFacts): BotOverview {
   return {
     who: {
@@ -273,6 +708,15 @@ export function buildBotOverview(facts: OverviewFacts): BotOverview {
     wont: wontLines(facts),
     recent: facts.recent,
     setup: setupSteps(facts),
+    // Enhanced Bot Command Center sections
+    calendar: buildWeeklyCalendar(facts),
+    upcoming: buildUpcomingItems(facts),
+    memory: buildMemoryItems(facts),
+    automations: buildAutomations(facts),
+    abilities: buildAbilities(facts),
+    goals: buildGoalOverviews(facts),
+    watches: buildWatchOverviews(facts),
+    activities: buildActivityOverviews(facts),
   };
 }
 

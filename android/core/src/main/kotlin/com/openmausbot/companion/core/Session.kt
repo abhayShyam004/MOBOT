@@ -2853,6 +2853,28 @@ class Session(
         }
     }
 
+    suspend fun checkWatch(botId: String, watchId: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.checkWatch(botId, watchId)
+            true
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            false
+        }
+    }
+
+    suspend fun completeMilestone(botId: String, goalId: String, milestoneId: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.completeMilestone(botId, goalId, milestoneId)
+            true
+        } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            false
+        }
+    }
+
     suspend fun loadRoutineRunAvailability(): RoutineRunAvailability? {
         val activeClient = client ?: return null
         return try {

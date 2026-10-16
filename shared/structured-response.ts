@@ -33,13 +33,15 @@ export type StructuredComponentType =
   | "form"
   | "media"
   | "card"
-  | "sources";
+  | "sources"
+  | "product";
 
 export interface ComponentAction {
   id: string;
   label: string;
   style?: "primary" | "secondary" | "danger";
   disabled?: boolean;
+  url?: string;
 }
 
 // ── 1. Table ──
@@ -430,6 +432,23 @@ export interface SourcesComponentData {
   sources: SourceItem[];
 }
 
+// ── Product Card ──
+export interface ProductComponentData {
+  name: string;
+  brand?: string;
+  price?: string;
+  rating?: number;
+  reviewsCount?: number;
+  retailer?: string;
+  sourceUrl?: string;
+  imageUrl?: string;
+  reason?: string;
+  details?: string[];
+  badge?: string;
+  metadata?: Record<string, string>;
+  actionLabel?: string;
+}
+
 // ── Structured Component Envelope ──
 export interface StructuredComponent {
   id: string;
@@ -605,6 +624,13 @@ export const STRUCTURED_COMPONENT_REGISTRY: Record<StructuredComponentType, Comp
     schemaVersion: 1,
     semanticPurpose: "Referenced URLs, citations, verification evidence, and external documentation.",
     supportedInteractions: ["open_link"],
+    mobileLayout: "compact",
+  },
+  product: {
+    type: "product",
+    schemaVersion: 1,
+    semanticPurpose: "Rich product cards with image, price, specs, rating, retailer, and direct action link.",
+    supportedInteractions: ["open_product", "view_details"],
     mobileLayout: "compact",
   },
 };
@@ -1124,6 +1150,33 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
         break;
       }
 
+      case "product": {
+        const prod = comp.data as ProductComponentData | undefined;
+        if (!prod || !prod.name) {
+          errors.push(`Component '${compId}' (product) missing product name.`);
+          break;
+        }
+        sanitizedComp.data = {
+          name: sanitizeString(prod.name) || "Product",
+          brand: sanitizeString(prod.brand),
+          price: sanitizeString(prod.price),
+          rating: typeof prod.rating === "number" ? Math.min(5, Math.max(0, prod.rating)) : undefined,
+          reviewsCount: typeof prod.reviewsCount === "number" ? prod.reviewsCount : undefined,
+          retailer: sanitizeString(prod.retailer),
+          sourceUrl: sanitizeUrl(prod.sourceUrl),
+          imageUrl: sanitizeUrl(prod.imageUrl),
+          reason: sanitizeString(prod.reason),
+          details: Array.isArray(prod.details)
+            ? prod.details.slice(0, 10).map((d) => sanitizeString(d) || "").filter(Boolean)
+            : undefined,
+          badge: sanitizeString(prod.badge),
+          metadata: prod.metadata,
+          actionLabel: sanitizeString(prod.actionLabel) || "View product",
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
       default:
         // Graceful fallback for unknown component types
         sanitizedComp.type = "card";
@@ -1297,6 +1350,21 @@ export function structuredResponseToFallbackText(resp: StructuredResponseData): 
         break;
       }
 
+      case "product": {
+        const data = comp.data as ProductComponentData;
+        const brand = data.brand ? `${data.brand} ` : "";
+        const price = data.price ? ` (${data.price})` : "";
+        parts.push(`**${brand}${data.name}**${price}`);
+        if (data.reason) parts.push(`*${data.reason}*`);
+        if (data.details && data.details.length) {
+          parts.push(data.details.map((d) => `- ${d}`).join("\n"));
+        }
+        if (data.sourceUrl) {
+          parts.push(`[${data.actionLabel || "View product"}](${data.sourceUrl})`);
+        }
+        break;
+      }
+
       default:
         if (typeof comp.data === "string") parts.push(comp.data);
         else parts.push(JSON.stringify(comp.data));
@@ -1323,6 +1391,7 @@ function sanitizeColor(val: unknown): string | undefined {
 function sanitizeUrl(val: unknown): string | undefined {
   if (typeof val !== "string") return undefined;
   const trimmed = val.trim();
+  if (trimmed.startsWith("/api/")) return trimmed;
   try {
     const url = new URL(trimmed);
     if (url.protocol === "http:" || url.protocol === "https:") {
@@ -1339,6 +1408,7 @@ function sanitizeActions(val: unknown): ComponentAction[] | undefined {
     label: sanitizeString(a.label) || "Action",
     style: ["primary", "secondary", "danger"].includes(a.style) ? a.style : "secondary",
     disabled: Boolean(a.disabled),
+    url: sanitizeUrl(a.url),
   }));
 }
 
