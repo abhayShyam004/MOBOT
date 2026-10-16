@@ -59,7 +59,7 @@ describe("Routine Engine Upgrades", () => {
       expect(loaded.lastSnapshotHash).toBe("abc123hash");
       // Bounded to 500
       expect(loaded.deliveredFingerprints).toHaveLength(500);
-      expect(loaded.deliveredFingerprints[499]).toBe("fp-549");
+      expect(loaded.deliveredFingerprints?.[499]).toBe("fp-549");
     });
 
     it("filters novel items accurately and flags seen ones", () => {
@@ -115,13 +115,13 @@ describe("Routine Engine Upgrades", () => {
       nextRunAt: 2000,
       taskObjective: "Monitor and summarize breakthrough multimodal papers",
       workflowConfig: {
-        sourceStrategy: "authoritative_first",
+        sourceStrategy: "primary_first",
         freshnessWindowHours: 24,
         verificationRequired: true,
       },
       deliveryConfig: {
-        mode: "always",
-        format: "card",
+        notificationMode: "normal",
+        resultSurface: "cards",
       },
     };
 
@@ -175,14 +175,16 @@ describe("Routine Engine Upgrades", () => {
       runOn: "maus",
       target: "bot",
       enabled: true,
-      schedule: { type: "daily", time: "09:00" },
+      schedule: { type: "daily", time: "09:00", weekdays: [1, 2, 3, 4, 5] },
       durationMinutes: 30,
       createdAt: 1000,
       updatedAt: 1000,
       nextRunAt: 2000,
-      deliveryConfig: {
-        mode: "on_new_items",
+      workflowConfig: {
         notifyIfEmpty: false,
+      },
+      deliveryConfig: {
+        notificationMode: "normal",
       },
     };
 
@@ -198,6 +200,7 @@ describe("Routine Engine Upgrades", () => {
         status: "completed",
         scheduledFor: 1000,
         createdAt: 1000,
+        manual: false,
         output: "Searched career portals. No new job openings found matching the criteria today.",
       };
 
@@ -223,6 +226,7 @@ describe("Routine Engine Upgrades", () => {
         status: "completed",
         scheduledFor: 1000,
         createdAt: 1000,
+        manual: false,
         output: `### Found Opportunities:
 1. Senior TypeScript Engineer
 - Company: Acme Corp
@@ -254,12 +258,12 @@ describe("Routine Engine Upgrades", () => {
       // Step 1: Initial user intent
       const q1 = RoutineSetupCoordinator.getNextStep({});
       expect(q1.step).toBe("topic_or_role");
-      expect(q1.question.options.length).toBeGreaterThanOrEqual(4);
+      expect(q1.question?.options.length).toBeGreaterThanOrEqual(4);
 
       // Step 2: Topic answered
       const q2 = RoutineSetupCoordinator.getNextStep({ topicOrRole: "AI and Machine Learning" });
       expect(q2.step).toBe("filters");
-      expect(q2.question.options.length).toBeGreaterThanOrEqual(4);
+      expect(q2.question?.options.length).toBeGreaterThanOrEqual(4);
 
       // Step 3: Filters answered
       const q3 = RoutineSetupCoordinator.getNextStep({
@@ -267,7 +271,7 @@ describe("Routine Engine Upgrades", () => {
         filters: "Research papers and breakthrough models",
       });
       expect(q3.step).toBe("frequency");
-      expect(q3.question.options.map((o: { id: string }) => o.id)).toContain("daily");
+      expect(q3.question?.options.map((o: any) => o.id)).toContain("daily");
 
       // Step 4: Frequency answered
       const q4 = RoutineSetupCoordinator.getNextStep({
@@ -276,7 +280,7 @@ describe("Routine Engine Upgrades", () => {
         frequency: "daily",
       });
       expect(q4.step).toBe("time");
-      expect(q4.question.options.some((o: { id: string }) => o.id.includes(":00"))).toBe(true);
+      expect(q4.question?.options.some((o: any) => o.id?.includes(":00"))).toBe(true);
 
       // Step 5: Time answered
       const q5 = RoutineSetupCoordinator.getNextStep({
