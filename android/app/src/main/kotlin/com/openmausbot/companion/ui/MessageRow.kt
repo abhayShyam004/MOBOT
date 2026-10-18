@@ -209,23 +209,7 @@ fun MessageRow(
         }
 
         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-            Row(modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)) {
-                Reactions.CHOICES.forEach { emoji ->
-                    Text(
-                        text = emoji,
-                        fontSize = 22.sp,
-                        modifier = Modifier
-                            .clickable {
-                                menuOpen = false
-                                haptics.play(TactileAction.TOGGLE_REACTION)
-                                scope.launch { session.react(message, chat.threadId, emoji) }
-                            }
-                            .padding(8.dp),
-                    )
-                }
-            }
             MessageActions.copyableText(message)?.let { text ->
-                HorizontalDivider()
                 DropdownMenuItem(
                     text = { Text("Copy") },
                     onClick = {
@@ -473,32 +457,58 @@ private fun MessageContent(
         Message.Kind.TEXT -> {
             TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
             message.structured?.let { structured ->
-                StructuredResponseView(
-                    chat = chat,
-                    message = message,
-                    structured = structured,
-                    onEvent = { componentId, action, payload ->
-                        if (action == "remix" && onPromptAction != null) {
-                            val targetType = payload["targetType"] ?: "remix"
-                            onPromptAction("Remix the ${targetType.replace('_', ' ')} in section \"$componentId\" while keeping the rest of the response stable.")
-                        }
-                    },
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Start,
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .weight(0.92f, fill = false)
+                            .padding(top = 4.dp),
+                    ) {
+                        StructuredResponseView(
+                            chat = chat,
+                            message = message,
+                            structured = structured,
+                            onEvent = { componentId, action, payload ->
+                                if (action == "remix" && onPromptAction != null) {
+                                    val targetType = payload["targetType"] ?: "remix"
+                                    onPromptAction("Remix the ${targetType.replace('_', ' ')} in section \"$componentId\" while keeping the rest of the response stable.")
+                                } else if ((action == "open_result" || action == "open_link") && openLink != null) {
+                                    payload["url"]?.let { url -> openLink(url, message) }
+                                }
+                            },
+                        )
+                    }
+                }
             }
         }
         // Native structured response system (Phase J)
         Message.Kind.STRUCTURED -> message.structured?.let { structured ->
-            StructuredResponseView(
-                chat = chat,
-                message = message,
-                structured = structured,
-                onEvent = { componentId, action, payload ->
-                    if (action == "remix" && onPromptAction != null) {
-                        val targetType = payload["targetType"] ?: "remix"
-                        onPromptAction("Remix the ${targetType.replace('_', ' ')} in section \"$componentId\" while keeping the rest of the response stable.")
-                    }
-                },
-            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Start,
+            ) {
+                Column(
+                    modifier = Modifier
+                        .weight(0.92f, fill = false)
+                        .padding(top = 4.dp),
+                ) {
+                    StructuredResponseView(
+                        chat = chat,
+                        message = message,
+                        structured = structured,
+                        onEvent = { componentId, action, payload ->
+                            if (action == "remix" && onPromptAction != null) {
+                                val targetType = payload["targetType"] ?: "remix"
+                                onPromptAction("Remix the ${targetType.replace('_', ' ')} in section \"$componentId\" while keeping the rest of the response stable.")
+                            } else if ((action == "open_result" || action == "open_link") && openLink != null) {
+                                payload["url"]?.let { url -> openLink(url, message) }
+                            }
+                        },
+                    )
+                }
+            }
         } ?: if (!message.text.isNullOrEmpty()) {
             TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
         } else Unit
@@ -564,9 +574,42 @@ private fun isUserVisibleAttachment(attachment: MessageAttachment): Boolean {
     return true
 }
 
+internal fun stripEmojis(text: String): String {
+    if (text.isEmpty()) return text
+    val sb = StringBuilder(text.length)
+    var i = 0
+    val len = text.length
+    while (i < len) {
+        val cp = text.codePointAt(i)
+        val charCount = Character.charCount(cp)
+        val isEmoji = when {
+            // Regional indicator flags: 1F1E6 - 1F1FF
+            cp in 0x1F1E6..0x1F1FF -> true
+            // Emoticons, Pictographs, Transport, Misc symbols: 1F300 - 1FAFF
+            cp in 0x1F300..0x1FAFF -> true
+            // Misc symbols & Dingbats: 2600 - 27BF
+            cp in 0x2600..0x27BF -> true
+            // Variation selectors: FE00 - FE0F
+            cp in 0xFE00..0xFE0F -> true
+            // Zero-width joiner
+            cp == 0x200D -> true
+            // Combining enclosing keycap / marks: 20D0 - 20FF
+            cp in 0x20D0..0x20FF -> true
+            // Symbols: 2B50, 2B55, 2300-23FF
+            cp in 0x2300..0x23FF || cp == 0x2B50 || cp == 0x2B55 -> true
+            else -> false
+        }
+        if (!isEmoji) {
+            sb.appendCodePoint(cp)
+        }
+        i += charCount
+    }
+    return sb.toString().replace(Regex(" +"), " ").trim()
+}
+
 private fun cleanAssistantChatText(text: String): String {
     if (text.isEmpty()) return text
-    var cleaned = text
+    var cleaned = stripEmojis(text)
     cleaned = cleaned.replace(Regex("""\[(?:image|file)\s+attached\]""", RegexOption.IGNORE_CASE), "")
     cleaned = cleaned.replace(Regex("""\[image:\s*[^\]]+\]""", RegexOption.IGNORE_CASE), "")
     cleaned = cleaned.replace(Regex("""\[(?:download\s+the\s+[^\]]+|download\s+[^\]]+)\]\((?:attachment:[^\)]+|\/api\/attachments\/[^\)]+)\)""", RegexOption.IGNORE_CASE), "")
@@ -933,8 +976,11 @@ private fun NativeCitationPill(citation: NativeCitation) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "📄",
-            fontSize = 11.sp,
+            text = "REF",
+            fontSize = 9.sp,
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary,
         )
         Text(
             text = citation.label,
@@ -1187,7 +1233,7 @@ private fun AttachmentLoadFailure(label: String, onRetry: () -> Unit) {
 /**
  * A tool execution card adhering to MOBOT's P0 design system:
  * - Collapsed: 44dp minimum height, compact card shape (12.dp radius), elevated surface, 1px border.
- * - Category glyph: terminal (`>_`), file (`📄`), web (`🌐`), or tool (`⚡`).
+ * - Category glyph: terminal (`>_`), file (`FILE`), web (`WEB`), or tool (`RUN`).
  * - Command / action name in monospace code font.
  * - Duration badge (e.g. "1.2s") and status badge ("Running", "Complete", "Failed").
  * - Expandable accordion: output / error inspector, copy button, thread ref button.
@@ -1232,13 +1278,13 @@ fun ToolExecutionCard(
         tool.name.contains("file", ignoreCase = true) ||
             tool.name.contains("read", ignoreCase = true) ||
             tool.name.contains("write", ignoreCase = true) ||
-            tool.name.contains("edit", ignoreCase = true) -> "📄"
+            tool.name.contains("edit", ignoreCase = true) -> "FILE"
         tool.name.contains("web", ignoreCase = true) ||
             tool.name.contains("browser", ignoreCase = true) ||
             tool.name.contains("fetch", ignoreCase = true) ||
             tool.name.contains("http", ignoreCase = true) ||
-            tool.name.contains("url", ignoreCase = true) -> "🌐"
-        else -> "⚡"
+            tool.name.contains("url", ignoreCase = true) -> "WEB"
+        else -> "RUN"
     }
 
     val durationText = tool.durationMs?.let { ms ->

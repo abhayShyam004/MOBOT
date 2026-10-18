@@ -972,6 +972,14 @@ data class Profile(val name: String, val email: String)
 data class OpenAICompatStatus(val configured: Boolean = false, val url: String = "")
 
 @Serializable
+data class AgentPermissions(
+    val terminal: String = "granted",
+    val filesystem: String = "granted",
+    val browser: String = "granted",
+    val composio: String = "granted",
+)
+
+@Serializable
 data class ConfigStatus(
     val composio: ConfigFlag? = null,
     val box: ConfigFlag? = null,
@@ -986,6 +994,7 @@ data class ConfigStatus(
      * opened. Absent on older hosts, so it defaults to the asking behaviour.
      */
     val neverAskPermissions: Boolean = false,
+    val agentPermissions: AgentPermissions? = null,
 ) {
     /**
      * "This engine can speak", not "a key is on file" — under the built-in

@@ -22,10 +22,13 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -92,11 +95,13 @@ import androidx.compose.ui.layout.ContentScale
 import com.openmausbot.companion.core.CompletionCardData
 import com.openmausbot.companion.core.DailyBriefingData
 import com.openmausbot.companion.core.ProductData
+import com.openmausbot.companion.core.ResearchResultData
 import com.openmausbot.companion.core.SmartRecapData
 import com.openmausbot.companion.core.SourcesData
 import com.openmausbot.companion.core.StructuredComponent
 import com.openmausbot.companion.core.StructuredResponseData
 import com.openmausbot.companion.core.TableData
+import com.openmausbot.companion.core.TextComponentData
 import com.openmausbot.companion.core.TimelineData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -129,31 +134,36 @@ fun StructuredResponseView(
         verticalArrangement = Arrangement.spacedBy(AppSpacing.md),
     ) {
         for (component in structured.components) {
-            ComponentContainer(component = component, onEvent = onEvent) {
-                when (component.type) {
-                    "table" -> TableRenderer(component)
-                    "chart" -> ChartRenderer(component)
-                    "timeline" -> TimelineRenderer(component)
-                    "kanban" -> KanbanRenderer(component)
-                    "checklist" -> ChecklistRenderer(component, onEvent)
-                    "comparison" -> ComparisonRenderer(component)
-                    "decision_matrix" -> DecisionMatrixRenderer(component)
-                    "dashboard" -> DashboardRenderer(component)
-                    "card" -> SemanticCardRenderer(component)
-                    "product" -> ProductCardRenderer(component, onEvent)
-                    "sources" -> SourcesRenderer(component)
-                    "code" -> CodeRenderer(component)
-                    "diagram" -> DiagramRenderer(component)
-                    "map" -> MapRenderer(component)
-                    "calendar" -> CalendarRenderer(component)
-                    "gantt" -> GanttRenderer(component)
-                    "artifact" -> ArtifactRenderer(component, onEvent)
-                    "form" -> FormRenderer(component, onEvent)
-                    "media" -> MediaRenderer(component)
-                    "completion" -> CompletionRenderer(component, onEvent)
-                    "smart_recap" -> SmartRecapRenderer(component, onEvent)
-                    "daily_briefing" -> DailyBriefingRenderer(component, onEvent)
-                    else -> FallbackRenderer(component)
+            if (component.type == "text") {
+                TextRenderer(component)
+            } else {
+                ComponentContainer(component = component, onEvent = onEvent) {
+                    when (component.type) {
+                        "table" -> TableRenderer(component)
+                        "chart" -> ChartRenderer(component)
+                        "timeline" -> TimelineRenderer(component)
+                        "kanban" -> KanbanRenderer(component)
+                        "checklist" -> ChecklistRenderer(component, onEvent)
+                        "comparison" -> ComparisonRenderer(component)
+                        "decision_matrix" -> DecisionMatrixRenderer(component)
+                        "dashboard" -> DashboardRenderer(component)
+                        "card" -> SemanticCardRenderer(component)
+                        "product" -> ProductCardRenderer(component, onEvent)
+                        "result" -> ResearchResultCardRenderer(component, onEvent)
+                        "sources" -> SourcesRenderer(component)
+                        "code" -> CodeRenderer(component)
+                        "diagram" -> DiagramRenderer(component)
+                        "map" -> MapRenderer(component)
+                        "calendar" -> CalendarRenderer(component)
+                        "gantt" -> GanttRenderer(component)
+                        "artifact" -> ArtifactRenderer(component, onEvent)
+                        "form" -> FormRenderer(component, onEvent)
+                        "media" -> MediaRenderer(component)
+                        "completion" -> CompletionRenderer(component, onEvent)
+                        "smart_recap" -> SmartRecapRenderer(component, onEvent)
+                        "daily_briefing" -> DailyBriefingRenderer(component, onEvent)
+                        else -> FallbackRenderer(component)
+                    }
                 }
             }
         }
@@ -167,27 +177,31 @@ private fun ComponentContainer(
     content: @Composable () -> Unit,
 ) {
     var remixOpen by remember { mutableStateOf(false) }
+    val isSelfContainedCard = component.type in listOf("result", "product")
+    val title = component.title
+    val subtitle = component.subtitle
+    val showHeader = !isSelfContainedCard && (!title.isNullOrBlank() || !subtitle.isNullOrBlank() || onEvent != null)
+
     AppCard(
         modifier = Modifier.fillMaxWidth(),
         color = AppTheme.colors.surface,
         bordered = true,
-        contentPadding = PaddingValues(AppSpacing.md),
+        contentPadding = PaddingValues(if (isSelfContainedCard) 14.dp else AppSpacing.md),
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
+            verticalArrangement = Arrangement.spacedBy(if (isSelfContainedCard) 10.dp else AppSpacing.sm),
         ) {
-            val title = component.title
-            val subtitle = component.subtitle
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    if (!title.isNullOrBlank()) {
-                        Text(
-                            text = title,
+            if (showHeader) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        if (!title.isNullOrBlank()) {
+                            Text(
+                                text = title,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = AppTheme.colors.textPrimary,
@@ -348,7 +362,8 @@ private fun ComponentContainer(
                     }
                 }
             }
-            content()
+        }
+        content()
 
             val actions = component.actions
             if (!actions.isNullOrEmpty()) {
@@ -970,7 +985,12 @@ private fun ChecklistRenderer(
                     contentAlignment = Alignment.Center,
                 ) {
                     if (isChecked) {
-                        Text("✓", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp),
+                        )
                     }
                 }
 
@@ -1029,7 +1049,7 @@ private fun ComparisonRenderer(component: StructuredComponent) {
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text(
-                        text = "★ Recommendation: $winnerName",
+                        text = "Recommendation: $winnerName",
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF065F46),
@@ -1354,7 +1374,7 @@ private fun SourcesRenderer(component: StructuredComponent) {
                         )
                     }
                 }
-                Text("↗", fontSize = 16.sp, color = AppTheme.colors.textSecondary)
+                Text("Open", fontSize = 12.sp, color = AppTheme.colors.textSecondary)
             }
         }
     }
@@ -1645,7 +1665,7 @@ private fun MapRenderer(component: StructuredComponent) {
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text(
-                    text = "📍 ${map.markers.size} Location${if (map.markers.size > 1) "s" else ""}",
+                    text = "${map.markers.size} Location${if (map.markers.size > 1) "s" else ""}",
                     fontSize = 14.sp,
                     fontWeight = FontWeight.Bold,
                     color = AppTheme.colors.textPrimary,
@@ -1725,7 +1745,7 @@ private fun MapRenderer(component: StructuredComponent) {
                                 )
                             }
                         }
-                        Text("↗", fontSize = 14.sp, color = AppTheme.colors.textSecondary)
+                        Text("Open", fontSize = 12.sp, color = AppTheme.colors.textSecondary)
                     }
                 }
             }
@@ -1858,7 +1878,7 @@ private fun CalendarRenderer(component: StructuredComponent) {
                     val location = event.location
                     if (!location.isNullOrBlank()) {
                         Text(
-                            text = "📍 $location",
+                            text = location,
                             fontSize = 11.sp,
                             color = AppTheme.colors.textSecondary,
                         )
@@ -1997,7 +2017,11 @@ private fun GanttRenderer(component: StructuredComponent) {
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
                     ) {
-                        Text(text = if (m.completed) "🏁" else "🚩", fontSize = 11.sp)
+                        Box(
+                            modifier = Modifier
+                                .size(6.dp)
+                                .background(if (m.completed) AppTheme.colors.positive else AppTheme.colors.caution, CircleShape),
+                        )
                         Text(text = m.name, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = AppTheme.colors.textPrimary)
                         Text(text = "(${m.date})", fontSize = 10.sp, color = AppTheme.colors.textSecondary)
                     }
@@ -2029,18 +2053,18 @@ private fun ArtifactRenderer(
     val uriHandler = LocalUriHandler.current
     var expanded by remember { mutableStateOf(false) }
 
-    val icon = when (artifact.artifactType) {
-        "pdf" -> "📄"
-        "document" -> "📝"
-        "spreadsheet", "csv" -> "📊"
-        "image" -> "🖼️"
-        "video" -> "🎬"
-        "audio" -> "🎵"
-        "code_project" -> "📦"
-        "archive" -> "🗜️"
-        "report" -> "📑"
-        "dataset" -> "💾"
-        else -> "📁"
+    val typeBadge = when (artifact.artifactType) {
+        "pdf" -> "PDF"
+        "document" -> "DOC"
+        "spreadsheet", "csv" -> "CSV"
+        "image" -> "IMG"
+        "video" -> "VID"
+        "audio" -> "AUD"
+        "code_project" -> "CODE"
+        "archive" -> "ZIP"
+        "report" -> "REP"
+        "dataset" -> "DATA"
+        else -> "FILE"
     }
 
     Column(
@@ -2062,7 +2086,13 @@ private fun ArtifactRenderer(
                     .background(AppTheme.colors.accent.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(text = icon, fontSize = 20.sp)
+                Text(
+                    text = typeBadge,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    color = AppTheme.colors.accent,
+                )
             }
 
             Column(modifier = Modifier.weight(1f)) {
@@ -2149,7 +2179,7 @@ private fun ArtifactRenderer(
                         } catch (_: Exception) {}
                     },
                 ) {
-                    Text("Open Artifact ↗", fontSize = 12.sp, color = AppTheme.colors.accent)
+                    Text("Open Artifact", fontSize = 12.sp, color = AppTheme.colors.accent)
                 }
             }
             if (onEvent != null) {
@@ -2356,12 +2386,25 @@ private fun MediaRenderer(component: StructuredComponent) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    val mediaIcon = when (media.mediaType) {
-                        "video" -> "🎬"
-                        "audio" -> "🎵"
-                        else -> "🖼️"
+                    val mediaBadge = when (media.mediaType) {
+                        "video" -> "VID"
+                        "audio" -> "AUD"
+                        else -> "IMG"
                     }
-                    Text(text = mediaIcon, fontSize = 24.sp)
+                    Box(
+                        modifier = Modifier
+                            .size(36.dp)
+                            .background(AppTheme.colors.accent.copy(alpha = 0.12f), RoundedCornerShape(8.dp)),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = mediaBadge,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                            color = AppTheme.colors.accent,
+                        )
+                    }
 
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
@@ -2388,7 +2431,7 @@ private fun MediaRenderer(component: StructuredComponent) {
                         }
                     }
 
-                    Text("↗", fontSize = 14.sp, color = AppTheme.colors.textSecondary)
+                    Text("Open", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.accent)
                 }
             }
         }
@@ -2431,7 +2474,7 @@ private fun CompletionRenderer(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "✨ Task complete",
+                text = "Task complete",
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = AppTheme.colors.textPrimary,
@@ -2578,7 +2621,7 @@ private fun SmartRecapRenderer(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "🔔 " + recap.headline,
+                text = recap.headline,
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = AppTheme.colors.textPrimary,
@@ -2666,7 +2709,7 @@ private fun DailyBriefingRenderer(
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "☀️ ${briefing.greeting}",
+                text = briefing.greeting,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = AppTheme.colors.textPrimary,
@@ -2865,7 +2908,7 @@ private fun ProductCardRenderer(
                     )
                 }
                 if (product.rating != null) {
-                    val ratingStr = "★ %.1f".format(java.util.Locale.US, product.rating) +
+                    val ratingStr = "%.1f / 5.0".format(java.util.Locale.US, product.rating) +
                         (product.reviewsCount?.let { " ($it)" } ?: "")
                     Text(
                         text = ratingStr,
@@ -2946,7 +2989,7 @@ private fun ProductCardRenderer(
             }
         }
 
-        // 8. Native Clickable Action Button ("View product ↗")
+        // 8. Native Clickable Action Button ("View product")
         val destinationUrl = product.sourceUrl
         if (!destinationUrl.isNullOrBlank()) {
             Spacer(modifier = Modifier.height(2.dp))
@@ -2960,18 +3003,319 @@ private fun ProductCardRenderer(
                 modifier = Modifier.fillMaxWidth(),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 8.dp),
             ) {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
+                Text(
+                    text = product.actionLabel ?: "View product",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+// ── Generic Rich Research Result Card Renderer ──
+@Composable
+private fun ResearchResultCardRenderer(
+    component: StructuredComponent,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+) {
+    val result = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<ResearchResultData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (result == null) {
+        FallbackRenderer(component)
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+    val session = LocalCompanion.current.session
+
+    var imageBitmap by remember(result.imageUrl) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(result.imageUrl) {
+        val url = result.imageUrl?.trim()
+        if (url.isNullOrEmpty()) return@LaunchedEffect
+        withContext(Dispatchers.IO) {
+            try {
+                if (url.startsWith("/api/attachments/") || url.startsWith("attachment:")) {
+                    val path = if (url.startsWith("attachment:")) "/api/attachments/" + url.removePrefix("attachment:") else url
+                    val bytes = session.attachmentImage(path)
+                    if (bytes != null) {
+                        imageBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                    }
+                } else if (url.startsWith("http://") || url.startsWith("https://")) {
+                    val conn = (java.net.URI(url).toURL().openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 5000
+                        instanceFollowRedirects = true
+                        setRequestProperty("User-Agent", "Mozilla/5.0 OpenMausBot")
+                    }
+                    if (conn.responseCode in 200..299) {
+                        conn.inputStream.use { stream ->
+                            val bytes = stream.readBytes()
+                            if (bytes.isNotEmpty()) {
+                                imageBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Graceful fallback: do not invent or break if image fails
+            }
+        }
+    }
+
+    val brandColor = AppTheme.colors.accent
+    val priceColor = Color(0xFF10B981)
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // 1. Badge & Source row
+        val badge = result.badge
+        val source = result.source ?: result.sourceDomain
+        if (!badge.isNullOrBlank() || !source.isNullOrBlank()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!badge.isNullOrBlank()) {
                     Text(
-                        text = product.actionLabel ?: "View product",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        text = badge,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = brandColor,
+                        modifier = Modifier
+                            .background(brandColor.copy(alpha = 0.12f), RoundedCornerShape(6.dp))
+                            .border(1.dp, brandColor.copy(alpha = 0.30f), RoundedCornerShape(6.dp))
+                            .padding(horizontal = 8.dp, vertical = 2.dp),
                     )
-                    Text(text = "↗", fontSize = 13.sp)
+                } else {
+                    Spacer(modifier = Modifier.weight(1f))
+                }
+                if (!source.isNullOrBlank()) {
+                    Text(
+                        text = if (source.startsWith("Source:", ignoreCase = true)) source else "Source: $source",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = AppTheme.colors.textSecondary,
+                    )
                 }
             }
+        }
+
+        // 2. Legitimate Image (if available) - renders exactly once, clean fallback if absent
+        imageBitmap?.let { bitmap ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 200.dp)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(AppTheme.colors.surfaceSunken)
+                    .border(1.dp, AppTheme.colors.hairline, RoundedCornerShape(10.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Image(
+                    bitmap = bitmap,
+                    contentDescription = result.title,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxWidth().padding(4.dp),
+                )
+            }
+        }
+
+        // 3. Title & Subtitle / Company / Location
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = result.title,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Bold,
+                color = AppTheme.colors.textPrimary,
+            )
+            val sublineParts = listOfNotNull(
+                result.company,
+                result.location,
+                result.subtitle?.takeIf { it != result.company && it != result.location }
+            )
+            if (sublineParts.isNotEmpty()) {
+                Text(
+                    text = sublineParts.joinToString(" • "),
+                    fontSize = 12.sp,
+                    color = AppTheme.colors.textSecondary,
+                )
+            }
+        }
+
+        // 4. Tags / Pills row (skills, technologies, key specs)
+        val allTags = (result.tags + result.details).distinct().filter { it.isNotBlank() }
+        if (allTags.isNotEmpty()) {
+            @OptIn(ExperimentalLayoutApi::class)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                allTags.take(8).forEach { tag ->
+                    Box(
+                        modifier = Modifier
+                            .background(AppTheme.colors.surfaceSunken, RoundedCornerShape(6.dp))
+                            .border(1.dp, AppTheme.colors.hairline, RoundedCornerShape(6.dp))
+                            .padding(horizontal = 7.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = tag,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = AppTheme.colors.textSecondary,
+                        )
+                    }
+                }
+            }
+        }
+
+        // 5. Price / Salary & Rating row
+        val priceOrSalary = result.salary ?: result.price
+        if (!priceOrSalary.isNullOrBlank() || result.rating != null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                if (!priceOrSalary.isNullOrBlank()) {
+                    Text(
+                        text = priceOrSalary,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = priceColor,
+                    )
+                }
+                if (result.rating != null) {
+                    val ratingStr = "%.1f / 5.0".format(java.util.Locale.US, result.rating) +
+                        (result.reviewsCount?.let { " ($it)" } ?: "")
+                    Text(
+                        text = ratingStr,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = Color(0xFFF59E0B),
+                    )
+                }
+            }
+        }
+
+        // 6. Recommendation Reason / Match Rationale
+        val reason = result.reason
+        if (!reason.isNullOrBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(brandColor.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
+                    .border(1.dp, brandColor.copy(alpha = 0.20f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    text = reason,
+                    fontSize = 12.5.sp,
+                    lineHeight = 17.sp,
+                    color = AppTheme.colors.textPrimary,
+                )
+            }
+        }
+
+        // 7. Description (if different from reason)
+        val desc = result.description
+        if (!desc.isNullOrBlank() && desc != reason) {
+            Text(
+                text = desc,
+                fontSize = 12.sp,
+                lineHeight = 16.sp,
+                color = AppTheme.colors.textSecondary,
+            )
+        }
+
+        // 8. Metadata Key-Value Table (if present)
+        result.metadata?.takeIf { it.isNotEmpty() }?.let { meta ->
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(AppTheme.colors.surfaceSunken.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                    .padding(8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                meta.forEach { (k, v) ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(text = k, fontSize = 11.sp, color = AppTheme.colors.textSecondary)
+                        Text(text = v, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                    }
+                }
+            }
+        }
+
+        // 9. Native Clickable Action Button ("View Job", "View Product", "Book", etc.)
+        val destinationUrl = result.actionUrl ?: result.sourceUrl ?: result.url
+        if (!destinationUrl.isNullOrBlank() && (destinationUrl.startsWith("http://") || destinationUrl.startsWith("https://"))) {
+            val label = result.actionLabel ?: when (result.resultType?.lowercase()) {
+                "job" -> "View Job"
+                "product" -> "View Product"
+                "hotel", "travel" -> "View Hotel"
+                "course" -> "View Course"
+                "event" -> "View Event"
+                else -> "Open Website"
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+            Button(
+                onClick = {
+                    try {
+                        uriHandler.openUri(destinationUrl)
+                    } catch (_: Exception) {}
+                    onEvent?.invoke(component.id, "open_result", mapOf("url" to destinationUrl, "resultType" to (result.resultType ?: "general")))
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(38.dp),
+                shape = RoundedCornerShape(10.dp),
+                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    text = label,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+        }
+    }
+}
+
+// ── Prose / Markdown Text Renderer ──
+@Composable
+private fun TextRenderer(component: StructuredComponent) {
+    val textData = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<TextComponentData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+    val content = textData?.text ?: component.data?.jsonPrimitive?.content ?: component.title ?: ""
+    val sanitized = remember(content) { stripEmojis(content) }
+    if (sanitized.isNotBlank()) {
+        Column(
+            modifier = Modifier
+                .background(BubbleColor.theirs, RoundedCornerShape(18.dp))
+                .padding(horizontal = 16.dp, vertical = 13.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            MarkdownText(
+                source = sanitized,
+            )
         }
     }
 }

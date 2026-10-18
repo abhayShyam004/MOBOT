@@ -78,7 +78,7 @@ function createHtmlTemplate(name: string): TemplateDefinition {
         <h1>${name}</h1>
         <p class="subtitle">Built on Android with MOBOT</p>
       </div>
-      <button id="theme-toggle" class="btn btn-icon" aria-label="Toggle theme">🌓</button>
+      <button id="theme-toggle" class="btn btn-icon" aria-label="Toggle theme">Theme</button>
     </header>
 
     <main class="app-main">

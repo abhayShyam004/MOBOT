@@ -270,4 +270,88 @@ describe("Structured Response Protocol (Phase J)", () => {
     expect(fallback).toContain("Configuration");
     expect(fallback).toContain("Mobile UI");
   });
+
+  it("normalizes product component with resultType and title to rich result component", () => {
+    const input = {
+      version: 1,
+      components: [
+        {
+          id: "res-1",
+          type: "product",
+          data: {
+            resultType: "product",
+            title: "Refurbished MacBook Air 13.6-inch, Apple M2, 8GB/256GB",
+            company: "Best Buy",
+            location: "United States",
+            price: "$749",
+            source: "Best Buy",
+            sourceDomain: "bestbuy.com",
+            sourceUrl: "https://www.bestbuy.com/product/macbook-air-13-6-laptop",
+            actionLabel: "View Product",
+            actionUrl: "https://www.bestbuy.com/product/macbook-air-13-6-laptop",
+            reason: "Best verified match for school, battery life, and your budget.",
+            tags: ["Apple M2", "8GB RAM", "256GB SSD", "Refurbished"],
+            badge: "Top Pick",
+          },
+        },
+      ],
+    };
+
+    const result = validateStructuredResponse(input);
+    expect(result.valid).toBe(true);
+    expect(result.sanitized?.components.length).toBe(1);
+    const comp = result.sanitized?.components[0];
+    expect(comp?.type).toBe("result");
+    expect(comp?.data.resultType).toBe("product");
+    expect(comp?.data.title).toBe("Refurbished MacBook Air 13.6-inch, Apple M2, 8GB/256GB");
+    expect(comp?.data.company).toBe("Best Buy");
+    expect(comp?.data.price).toBe("$749");
+    expect(comp?.data.badge).toBe("Top Pick");
+  });
+
+  it("validates product component with title as name fallback when staying product", () => {
+    const input = {
+      version: 1,
+      components: [
+        {
+          id: "prod-1",
+          type: "product",
+          data: {
+            title: "Logitech MX Master 3S",
+            price: "$99",
+            retailer: "Amazon",
+          },
+        },
+      ],
+    };
+
+    const result = validateStructuredResponse(input);
+    expect(result.valid).toBe(true);
+    const comp = result.sanitized?.components[0];
+    expect(comp?.data.title || comp?.data.name).toBe("Logitech MX Master 3S");
+  });
+
+  it("validates result component with name fallback when title is missing", () => {
+    const input = {
+      version: 1,
+      components: [
+        {
+          id: "res-job",
+          type: "result",
+          data: {
+            name: "Senior Software Engineer",
+            company: "Google",
+            salary: "$180,000 - $220,000",
+          },
+        },
+      ],
+    };
+
+    const result = validateStructuredResponse(input);
+    expect(result.valid).toBe(true);
+    const comp = result.sanitized?.components[0];
+    expect(comp?.type).toBe("result");
+    expect(comp?.data.title).toBe("Senior Software Engineer");
+    expect(comp?.data.company).toBe("Google");
+  });
 });

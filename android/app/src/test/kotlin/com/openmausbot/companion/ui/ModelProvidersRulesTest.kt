@@ -177,4 +177,79 @@ class ModelProvidersRulesTest {
         assertEquals("https://docs.anthropic.com", ModelProvidersRules.docsUrl(claude))
         assertEquals("https://custom.example.com/docs", ModelProvidersRules.docsUrl(custom))
     }
+
+    @Test
+    fun `stateLine and statusTone never produce contradictory states`() {
+        val notSignedIn = instance(
+            "codex",
+            access = "subscription",
+            authentication = InstanceAuthentication(method = "device-code", available = true),
+            runtimeAvailable = true,
+            authenticated = false,
+        )
+        assertEquals("Sign in required", ModelProvidersRules.stateLine(notSignedIn))
+        assertEquals(StatusTone.WARN, ModelProvidersRules.statusTone(notSignedIn))
+
+        val signedIn = notSignedIn.copy(snapshot = notSignedIn.snapshot.copy(authenticated = true))
+        assertEquals("Configured", ModelProvidersRules.stateLine(signedIn))
+        assertEquals(StatusTone.GOOD, ModelProvidersRules.statusTone(signedIn))
+
+        val unconfiguredKey = instance("openaiCompat", access = "custom", driverKind = "openai-compat", runtimeAvailable = false)
+        assertEquals("API key required", ModelProvidersRules.stateLine(unconfiguredKey))
+        assertEquals(StatusTone.WARN, ModelProvidersRules.statusTone(unconfiguredKey))
+
+        val configuredKey = unconfiguredKey.copy(snapshot = unconfiguredKey.snapshot.copy(state = "available"))
+        assertEquals("Configured", ModelProvidersRules.stateLine(configuredKey))
+        assertEquals(StatusTone.GOOD, ModelProvidersRules.statusTone(configuredKey))
+    }
+
+    @Test
+    fun `isSupportedBuiltInProvider keeps only supported providers with real Android auth`() {
+        val codex = instance(
+            "codex",
+            access = "subscription",
+            authentication = InstanceAuthentication(method = "device-code", available = true),
+        )
+        assertTrue(ModelProvidersRules.isSupportedBuiltInProvider(codex), "Codex has native Android device-code auth")
+
+        val claude = instance(
+            "claude",
+            access = "subscription",
+            authentication = InstanceAuthentication(method = "paste-code", available = false),
+            runtimeAvailable = false,
+        )
+        assertFalse(ModelProvidersRules.isSupportedBuiltInProvider(claude), "Claude Code runtime missing on Android must be excluded")
+
+        val antigravity = instance("antigravity", access = "subscription", runtimeAvailable = false)
+        assertFalse(ModelProvidersRules.isSupportedBuiltInProvider(antigravity), "Antigravity CLI missing on Android must be excluded")
+
+        val grok = instance("grok", access = "subscription", runtimeAvailable = false)
+        assertFalse(ModelProvidersRules.isSupportedBuiltInProvider(grok), "Grok CLI missing on Android must be excluded")
+
+        // Local execution engine runtimes must never populate consumer model catalog
+        val runtimes = listOf("cursor", "droid", "hermes", "pi", "opencodeGo", "qwen", "kimi", "computer")
+        for (runtimeId in runtimes) {
+            val runtimeInstance = instance(runtimeId, access = "custom")
+            assertFalse(
+                ModelProvidersRules.isSupportedBuiltInProvider(runtimeInstance),
+                "$runtimeId is a local execution engine runtime, not a consumer model provider",
+            )
+        }
+
+        // Built-in API gateway
+        val openaiCompat = instance("openaiCompat", access = "custom", driverKind = "openai-compat")
+        assertTrue(ModelProvidersRules.isSupportedBuiltInProvider(openaiCompat), "openaiCompat is the built-in API gateway")
+
+        // Custom endpoints are excluded from built-in standard providers section
+        val custom = instance("custom-provider", access = "custom", driverKind = "openai-compat")
+        assertFalse(ModelProvidersRules.isSupportedBuiltInProvider(custom), "Custom endpoints belong in Custom Endpoints section")
+    }
+
+    @Test
+    fun `displayName presents clean OpenAI-compatible name`() {
+        val openaiCompat = instance("openaiCompat", access = "custom", driverKind = "openai-compat").copy(
+            displayName = "OpenAI-compatible (OpenRouter / Groq)",
+        )
+        assertEquals("OpenAI Compatible", ModelProvidersRules.displayName(openaiCompat))
+    }
 }

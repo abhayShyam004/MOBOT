@@ -17,6 +17,7 @@ import { workspaceDir } from "./workspace.ts";
 import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
+import { enforceResponseLength } from "./response-length.ts";
 import { botAvatarProfile } from "../shared/bot-avatar.ts";
 import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
 import type { ProfileRequestChanges } from "../shared/profile-request.ts";
@@ -51,7 +52,7 @@ export const groupWireProjectionIsExact: GroupWireProjectionIsExact = true;
 
 
 // Unicode's complete emoji sequences include flags, skin tones and ZWJ
-// combinations. Also allow unqualified single symbols (e.g. ♥), but not
+// combinations. Also allow unqualified single symbols, but not
 // standalone components such as a digit, skin tone or regional indicator.
 const projectEmojiPattern = new RegExp("^(?!\\p{Emoji_Component}$)(?:\\p{RGI_Emoji}|[\\p{Emoji}--\\p{Emoji_Component}])$", "v");
 export function isProjectEmoji(value: unknown): value is string {
@@ -106,10 +107,10 @@ export type TaskPatch = Partial<Pick<TaskRecord, typeof TASK_PATCH_FIELDS[number
  * is theirs and stays as typed. Stored, not just displayed: the transcript
  * is replayed into every rebuild, and a leaked key would otherwise be
  * permanent. */
-function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number }>(message: T): T {
+function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number }>(message: T, userPrompt?: string): T {
   if (message.role !== "bot") return message;
   const out = { ...message };
-  if (typeof out.text === "string") out.text = redactSecretsInText(out.text);
+  if (typeof out.text === "string") out.text = enforceResponseLength(redactSecretsInText(out.text), { userPrompt });
   if (out.tool?.name) {
     out.tool = { ...out.tool, name: redactSecretsInText(out.tool.name) };
     if (out.tool.summary) out.tool.summary = redactSecretsInText(out.tool.summary);
@@ -251,6 +252,23 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
       label: redactSecretsInText(out.secret.label),
       description: redactSecretsInText(out.secret.description),
       error: out.secret.error ? redactSecretsInText(out.secret.error) : undefined,
+    };
+  }
+  if (out.structured?.components) {
+    out.structured = {
+      ...out.structured,
+      components: out.structured.components.map((c) => {
+        if (c.type === "text" && c.data && typeof (c.data as any).text === "string") {
+          return {
+            ...c,
+            data: {
+              ...c.data,
+              text: enforceResponseLength(redactSecretsInText((c.data as any).text), { userPrompt }),
+            },
+          };
+        }
+        return c;
+      }),
     };
   }
   return out;
@@ -1196,7 +1214,8 @@ export class Store {
 
   appendMessage(threadId: string, message: Omit<Message, "id" | "at"> & { at?: number }): Message {
     const t = this.thread(threadId);
-    const full: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message) };
+    const lastUserPrompt = [...t.messages].reverse().find((m) => m.role === "user" && m.kind === "text")?.text;
+    const full: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message, lastUserPrompt) };
     t.messages.push(full);
     t.activeLeafId = full.id;
     mdb.appendMessage(threadId, full);
@@ -1226,7 +1245,8 @@ export class Store {
     const t = this.thread(threadId);
     const anchorExists = anchorId !== undefined && t.messages.some((m) => m.id === anchorId);
     if (!anchorExists || t.activeLeafId === anchorId) return this.appendMessage(threadId, message);
-    const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message), parentId: anchorId };
+    const lastUserPrompt = [...t.messages].reverse().find((m) => m.role === "user" && m.kind === "text")?.text;
+    const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message, lastUserPrompt), parentId: anchorId };
     const children = t.messages.filter((m) => m.parentId === anchorId);
     t.messages.push(full);
     mdb.appendMessage(threadId, full);

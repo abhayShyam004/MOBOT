@@ -1095,9 +1095,9 @@ export class ConversationalAppBuilder {
 
       return {
         message: `Your first version of "${project.name}" is ready and running locally!\n\n` +
-          `• Build: ✓ Passed\n` +
-          `• Tests: ✓ Passed\n` +
-          `• Server: ✓ Running (PID ${preview.pid})\n` +
+          `• Build: Passed\n` +
+          `• Tests: Passed\n` +
+          `• Server: Running (PID ${preview.pid})\n` +
           `• Local Preview: ${preview.url}\n\n` +
           `Preview: ${preview.url}`,
         status: "preview_ready",

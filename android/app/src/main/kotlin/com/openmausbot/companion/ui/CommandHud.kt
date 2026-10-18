@@ -220,19 +220,19 @@ fun PredictiveChipsRow(
  * because it is literally the same branch, not a copy that agrees today.
  */
 internal fun quickReplyGlyph(icon: String): String = when (icon) {
-    "next" -> "→"
-    "diff" -> "±"
-    "tests" -> "✓"
+    "next" -> "->"
+    "diff" -> "+/-"
+    "tests" -> "OK"
     "explain" -> "?"
-    "build" -> "⌁"
+    "build" -> "BLD"
     "bug" -> "!"
-    "document" -> "▤"
+    "document" -> "DOC"
     "terminal" -> ">_"
-    "send" -> "↑"
-    "search" -> "⌕"
-    "history" -> "↶"
-    "list" -> "☷"
-    else -> "•"
+    "send" -> "^"
+    "search" -> "SRC"
+    "history" -> "HST"
+    "list" -> "LST"
+    else -> "*"
 }
 
 private val HUD_RADIUS = 16.dp

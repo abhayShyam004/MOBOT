@@ -356,9 +356,50 @@ export class ArtifactManager {
   private readonly artifactsBySha = new Map<string, ArtifactRecord>();
   private readonly turnArtifacts = new Map<string, Set<string>>(); // turnId -> Set<artifactId>
   private readonly deliveredFiles = new Set<string>(); // canonical path on disk -> already delivered
+  private readonly registryPath = join(ATTACHMENTS_DIR, ".artifacts-registry.json");
 
   constructor() {
     ensureAttachmentsDir();
+    this.loadRegistry();
+  }
+
+  private loadRegistry(): void {
+    if (!existsSync(this.registryPath)) return;
+    try {
+      const data = JSON.parse(readFileSync(this.registryPath, "utf8"));
+      if (Array.isArray(data.artifacts)) {
+        for (const record of data.artifacts as ArtifactRecord[]) {
+          this.artifacts.set(record.id, record);
+          this.artifactsBySha.set(record.sha256, record);
+          if (record.metadata?.turnId) {
+            const turnId = record.metadata.turnId as string;
+            if (!this.turnArtifacts.has(turnId)) {
+              this.turnArtifacts.set(turnId, new Set());
+            }
+            this.turnArtifacts.get(turnId)!.add(record.id);
+          }
+        }
+      }
+      if (Array.isArray(data.deliveredFiles)) {
+        for (const file of data.deliveredFiles as string[]) {
+          this.deliveredFiles.add(file);
+        }
+      }
+    } catch {
+      // Ignore corrupt registry
+    }
+  }
+
+  private saveRegistry(): void {
+    try {
+      const data = {
+        artifacts: Array.from(this.artifacts.values()),
+        deliveredFiles: Array.from(this.deliveredFiles.values()),
+      };
+      writeFileSync(this.registryPath, JSON.stringify(data, null, 2));
+    } catch {
+      // Best-effort registry save
+    }
   }
 
   /**
@@ -490,7 +531,7 @@ export class ArtifactManager {
     // Exact SHA-256 deduplication: reuse existing registered artifact rather than duplicating files on disk
     const existing = this.artifactsBySha.get(validation.sha256);
     if (existing) {
-      if (options.metadata?.turnId) {
+      if (options.metadata?.turnId && (existing.metadata?.turnId === options.metadata.turnId || options.metadata?.reused)) {
         const turnId = options.metadata.turnId;
         if (!this.turnArtifacts.has(turnId)) {
           this.turnArtifacts.set(turnId, new Set());
@@ -499,6 +540,7 @@ export class ArtifactManager {
       }
       if (fullPath) {
         this.deliveredFiles.add(fullPath);
+        this.saveRegistry();
       }
       return existing;
     }
@@ -546,6 +588,7 @@ export class ArtifactManager {
     } else if (typeof source === "string") {
       this.deliveredFiles.add(source);
     }
+    this.saveRegistry();
 
     return record;
   }
@@ -580,9 +623,13 @@ export class ArtifactManager {
    * Scan designated candidate output folders for new user-facing artifacts created during a turn.
    * Excludes root workspace scripts, internal working files, and duplicates.
    */
-  scanAndRegisterWorkspaceArtifacts(workspaceRoots: string[], options: { turnId?: string; threadId?: string; maxAgeMs?: number } = {}): ArtifactRecord[] {
-    const maxAgeMs = options.maxAgeMs ?? 20 * 60_000;
-    const cutoff = Date.now() - maxAgeMs;
+  scanAndRegisterWorkspaceArtifacts(
+    workspaceRoots: string[],
+    options: { turnId?: string; threadId?: string; maxAgeMs?: number; turnStartTime?: number } = {},
+  ): ArtifactRecord[] {
+    const cutoff = options.turnStartTime
+      ? options.turnStartTime - 1000
+      : Date.now() - (options.maxAgeMs ?? 15_000);
     const discovered: ArtifactRecord[] = [];
 
     // Strictly scan designated artifact/download folders, NEVER root "."
@@ -622,6 +669,19 @@ export class ArtifactManager {
 
           if (!st.isFile() || st.mtimeMs < cutoff || st.size === 0 || st.size > 50 * 1024 * 1024) continue;
 
+          let buffer: Buffer;
+          try {
+            buffer = readFileSync(absolute);
+          } catch {
+            continue;
+          }
+          const hash = createHash("sha256").update(buffer).digest("hex");
+          if (this.artifactsBySha.has(hash)) {
+            this.deliveredFiles.add(absolute);
+            this.saveRegistry();
+            continue;
+          }
+
           try {
             const registered = this.registerArtifact(absolute, {
               name,
@@ -632,6 +692,7 @@ export class ArtifactManager {
               },
             });
             this.deliveredFiles.add(absolute);
+            this.saveRegistry();
             if (isUserFacingArtifact(registered)) {
               discovered.push(registered);
             }

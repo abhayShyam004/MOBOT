@@ -283,7 +283,7 @@ internal fun AgentProfileSheet(
 
                 FormSection(header = null) {
                     ActionRow(
-                        text = "What this bot does",
+                        text = "Bot overview",
                         icon = Icons.Filled.Info,
                         onClick = { onOpenOverview(bot.id) },
                     )

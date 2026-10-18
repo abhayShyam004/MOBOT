@@ -531,7 +531,7 @@ data class SmartLinkResponse(
 // ── 23. Product Card ──
 @Serializable
 data class ProductData(
-    val name: String,
+    val name: String = "",
     val brand: String? = null,
     val price: String? = null,
     val rating: Double? = null,
@@ -544,4 +544,51 @@ data class ProductData(
     val badge: String? = null,
     val metadata: Map<String, String>? = null,
     val actionLabel: String? = "View product",
+)
+
+// ── 24. Generic Rich Research Result Card ──
+@Serializable
+data class ResearchResultProvenance(
+    val sourceUrl: String? = null,
+    val sourceType: String? = null,
+    val retrievalTimestamp: Long? = null,
+    val extractedFields: List<String> = emptyList(),
+    val verified: Boolean = false,
+)
+
+@Serializable
+data class ResearchResultData(
+    val title: String,
+    val subtitle: String? = null,
+    val description: String? = null,
+    val resultType: String? = "general",
+    val company: String? = null,
+    val location: String? = null,
+    val price: String? = null,
+    val currency: String? = null,
+    val salary: String? = null,
+    val rating: Double? = null,
+    val reviewsCount: Int? = null,
+    val imageUrl: String? = null,
+    val source: String? = null,
+    val sourceDomain: String? = null,
+    val sourceUrl: String? = null,
+    val url: String? = null,
+    val actionLabel: String? = null,
+    val actionUrl: String? = null,
+    val reason: String? = null,
+    val matchScore: Double? = null,
+    val tags: List<String> = emptyList(),
+    val details: List<String> = emptyList(),
+    val badge: String? = null,
+    val metadata: Map<String, String>? = null,
+    val provenance: ResearchResultProvenance? = null,
+    val timestamp: Long? = null,
+)
+
+// ── 25. Prose / Markdown Text Section ──
+@Serializable
+data class TextComponentData(
+    val text: String,
+    val format: String = "markdown",
 )

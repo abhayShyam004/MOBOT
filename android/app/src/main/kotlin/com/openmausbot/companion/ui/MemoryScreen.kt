@@ -3,12 +3,14 @@ package com.openmausbot.companion.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -89,81 +91,76 @@ fun MemoryScreen(botId: String, onBack: () -> Unit) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 10.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            HeaderBackButton(onBack)
-            Column {
-                Text("Memory", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                bot?.let { Text(it.name, fontSize = 13.sp, color = secondaryTint) }
-            }
-        }
-
+    SettingsSubPage(
+        title = "Agent Memory",
+        subtitle = bot?.let { "${it.name} • Workspace Memory" } ?: "Persistent Knowledge & Notes",
+        onBack = onBack,
+    ) {
         if (loading) {
             Row(
-                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(24.dp),
                 horizontalArrangement = Arrangement.Center,
-            ) { CircularProgressIndicator() }
-            return@Column
+            ) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(28.dp),
+                    strokeWidth = 3.dp,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            return@SettingsSubPage
         }
 
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            val current = overview
-            if (current == null) {
-                Text(
-                    "This bot's memory isn't available from the computer right now.",
-                    fontSize = 14.sp,
-                    color = secondaryTint,
-                )
-            } else {
-                MemoryCapacityBar(current)
+        val current = overview
+        if (current == null) {
+            SettingsCard(
+                title = "Memory Unavailable",
+                subtitle = "This agent's memory files are not reachable from the host computer right now.",
+            )
+        } else {
+            SettingsSection(title = "Memory Capacity & Index") {
+                Box(modifier = Modifier.padding(16.dp)) {
+                    MemoryCapacityBar(current)
+                }
             }
+        }
 
-            val editing = doc
-            if (editing != null) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = if (editing.path == "MEMORY.md") "Always remembered" else editing.path,
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        color = secondaryTint,
-                    )
+        val editing = doc
+        if (editing != null) {
+            SettingsSection(
+                title = if (editing.path == "MEMORY.md") "Core Memory (MEMORY.md)" else editing.path,
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
                     Text(
                         text = if (editing.path == "MEMORY.md") {
                             "Read back at the start of every session — alone and in any room. Keep it to facts that hold every time."
                         } else {
-                            "A topic the bot reads on demand when it is relevant."
+                            "A topic note the agent reads on demand when it is relevant."
                         },
                         fontSize = 13.sp,
-                        color = secondaryTint,
+                        color = AppTheme.colors.textSecondary,
                     )
                     AppTextField(
                         value = draft,
                         onValueChange = { draft = it },
-                        // A memory is prose, and prose is more than one line:
-                        // this field used to inherit the component's single-line
-                        // default, which drew the whole file inside one line's
-                        // worth of height where nothing past the first line could
-                        // be read or even seen while editing.
                         singleLine = false,
                         minLines = 8,
                         enabled = !saving,
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 180.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 180.dp),
                     )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         Button(
                             enabled = !saving && draft != editing.text,
+                            shape = RoundedCornerShape(12.dp),
                             onClick = {
                                 saving = true
                                 error = null
@@ -173,12 +170,13 @@ fun MemoryScreen(botId: String, onBack: () -> Unit) {
                                     if (ok) reload() else {
                                         error = session.actionError ?: "Couldn't save this memory."
                                         session.actionError = null
-                                        // A hash conflict means the bot wrote in between: show its version.
                                         reload()
                                     }
                                 }
                             },
-                        ) { Text(if (saving) "Saving…" else "Save") }
+                        ) {
+                            Text(if (saving) "Saving…" else "Save Memory")
+                        }
                         if (editing.path != "MEMORY.md") {
                             TextButton(
                                 enabled = !saving,
@@ -196,43 +194,54 @@ fun MemoryScreen(botId: String, onBack: () -> Unit) {
                                         }
                                     }
                                 },
-                            ) { Text("Delete file", color = MaterialTheme.colorScheme.error) }
+                            ) {
+                                Text("Delete File", color = MaterialTheme.colorScheme.error)
+                            }
                         }
                     }
                 }
             }
+        }
 
-            error?.let {
-                Text(it, fontSize = 13.sp, color = MaterialTheme.colorScheme.error)
-            }
-
-            val others = buildList {
-                overview?.topics?.let { addAll(it) }
-                overview?.logs?.let { addAll(it) }
-            }
-            if (others.isNotEmpty()) {
+        val currentError = error
+        if (currentError != null) {
+            Box(modifier = Modifier.padding(horizontal = 20.dp)) {
                 Text(
-                    "Also remembered",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = secondaryTint,
+                    currentError,
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.error,
+                    fontWeight = FontWeight.Medium,
                 )
-                LazyColumn(modifier = Modifier.heightIn(max = 260.dp)) {
-                    items(others, key = { it.path }) { file ->
-                        MemoryFileRow(
-                            file = file,
-                            selected = file.path == doc?.path,
-                            onOpen = { scope.launch { load(file.path) } },
-                        )
+            }
+        }
+
+        val others = buildList {
+            overview?.topics?.let { addAll(it) }
+            overview?.logs?.let { addAll(it) }
+        }
+        if (others.isNotEmpty()) {
+            SettingsSection(title = "Topic & Log Notes (${others.size})") {
+                others.forEachIndexed { index, file ->
+                    SettingsRow(
+                        title = file.name,
+                        subtitle = "${file.bytes} bytes",
+                        selected = file.path == doc?.path,
+                        onClick = { scope.launch { load(file.path) } },
+                    )
+                    if (index < others.lastIndex) {
+                        SettingsDivider()
                     }
                 }
             }
+        }
 
-            overview?.workspacePath?.takeIf { it.isNotBlank() }?.let {
+        val wsPath = overview?.workspacePath
+        if (!wsPath.isNullOrBlank()) {
+            Box(modifier = Modifier.padding(horizontal = 20.dp)) {
                 Text(
-                    "These are plain markdown files on the computer: $it",
+                    text = "Stored as plain Markdown in workspace:\n$wsPath",
                     fontSize = 12.sp,
-                    color = secondaryTint,
+                    color = AppTheme.colors.textTertiary,
                 )
             }
         }

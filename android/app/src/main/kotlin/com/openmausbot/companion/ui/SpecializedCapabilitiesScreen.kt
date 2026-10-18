@@ -67,13 +67,17 @@ object SpecializedCapabilitiesPresentationRules {
         else -> "Multimodal Intelligence"
     }
 
+    fun isConfigured(config: CapabilityConfig): Boolean {
+        return config.hasApiKey == true || config.provider == "android_local"
+    }
+
     fun statusBadge(config: CapabilityConfig): Pair<String, Color> {
         return if (!config.enabled) {
             "Disabled" to Color(0xFF6B7280)
-        } else if (config.hasApiKey == true || config.provider == "android_local") {
-            "Active" to Color(0xFF10B981)
-        } else {
+        } else if (!isConfigured(config)) {
             "Needs API Key" to Color(0xFFF59E0B)
+        } else {
+            "Active" to Color(0xFF10B981)
         }
     }
 }
@@ -89,6 +93,7 @@ fun SpecializedCapabilitiesScreen(onBack: () -> Unit) {
     var capabilities by remember { mutableStateOf<List<CapabilityConfig>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
     var editingCapability by remember { mutableStateOf<CapabilityConfig?>(null) }
+    var unconfiguredPromptCap by remember { mutableStateOf<CapabilityConfig?>(null) }
 
     fun reload() {
         scope.launch {
@@ -102,63 +107,52 @@ fun SpecializedCapabilitiesScreen(onBack: () -> Unit) {
         reload()
     }
 
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .backdrop(motif = BackdropMotif.SETTINGS, band = 180.dp),
+    SettingsSubPage(
+        title = "Specialized Capabilities",
+        subtitle = "Media generation and vision models",
+        onBack = onBack,
     ) {
-        // Header with HeaderBackButton and standard typography
-        Row(
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .padding(start = AppSpacing.xs, end = AppSpacing.gutter, top = AppSpacing.xs, bottom = AppSpacing.md),
-            horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-            verticalAlignment = Alignment.CenterVertically,
+                .padding(horizontal = AppSpacing.gutter)
+                .padding(bottom = 48.dp),
+            verticalArrangement = Arrangement.spacedBy(AppSpacing.lg),
         ) {
-            HeaderBackButton(onBack)
-            Text(
-                text = "Specialized capabilities",
-                style = MaterialTheme.typography.headlineSmall,
-                color = colors.textPrimary,
-            )
-        }
+            if (loading) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = AppSpacing.xxl),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    CircularProgressIndicator(color = colors.accent)
+                }
+            } else {
+                val categories = remember(capabilities) {
+                    capabilities.groupBy { SpecializedCapabilitiesPresentationRules.categoryFor(it.id) }
+                }
 
-        if (loading) {
-            Box(
-                modifier = Modifier.fillMaxSize(),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(color = colors.accent)
-            }
-        } else {
-            val categories = remember(capabilities) {
-                capabilities.groupBy { SpecializedCapabilitiesPresentationRules.categoryFor(it.id) }
-            }
-
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = AppSpacing.gutter)
-                    .padding(bottom = 48.dp),
-                verticalArrangement = Arrangement.spacedBy(AppSpacing.lg),
-            ) {
                 categories.forEach { (catName, items) ->
                     AppSectionHeader(text = catName)
 
                     Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
                         items.forEach { cap ->
+                            val isConfigured = SpecializedCapabilitiesPresentationRules.isConfigured(cap)
                             CapabilityCard(
                                 config = cap,
                                 onToggle = { enabled ->
-                                    scope.launch {
-                                        session.updateCapability(
-                                            id = cap.id,
-                                            enabled = enabled,
-                                            provider = cap.provider,
-                                            model = cap.model,
-                                        )
-                                        reload()
+                                    if (!isConfigured) {
+                                        unconfiguredPromptCap = cap
+                                    } else {
+                                        scope.launch {
+                                            session.updateCapability(
+                                                id = cap.id,
+                                                enabled = enabled,
+                                                provider = cap.provider,
+                                                model = cap.model,
+                                            )
+                                            reload()
+                                        }
                                     }
                                 },
                                 onConfigure = {
@@ -232,9 +226,10 @@ fun SpecializedCapabilitiesScreen(onBack: () -> Unit) {
                             tone = PillTone.Accent,
                             onClick = {
                                 scope.launch {
+                                    val hasKey = keyText.trim().isNotEmpty() || cap.hasApiKey == true || providerText.trim() == "android_local"
                                     session.updateCapability(
                                         id = cap.id,
-                                        enabled = cap.enabled,
+                                        enabled = if (hasKey) true else cap.enabled,
                                         provider = providerText.trim(),
                                         model = modelText.trim(),
                                         apiKey = keyText.trim().ifEmpty { null },
@@ -242,6 +237,53 @@ fun SpecializedCapabilitiesScreen(onBack: () -> Unit) {
                                     editingCapability = null
                                     reload()
                                 }
+                            },
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // Explanation Dialog when tapping an unconfigured capability
+    unconfiguredPromptCap?.let { cap ->
+        BasicAlertDialog(onDismissRequest = { unconfiguredPromptCap = null }) {
+            AppCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = AppSpacing.sm),
+                shape = AppRadii.cardShape,
+                bordered = true,
+                contentPadding = PaddingValues(AppSpacing.lg),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.md)) {
+                    Text(
+                        text = "${SpecializedCapabilitiesPresentationRules.titleFor(cap.id)} Requires Configuration",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                        color = colors.textPrimary,
+                    )
+                    Text(
+                        text = "This capability requires a valid API key or configured provider before it can be enabled. The toggle remains off until configured.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.textSecondary,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TextButton(onClick = { unconfiguredPromptCap = null }) {
+                            Text("Dismiss", color = colors.textSecondary)
+                        }
+                        Spacer(modifier = Modifier.width(AppSpacing.sm))
+                        AppPill(
+                            text = "Configure",
+                            tone = PillTone.Accent,
+                            onClick = {
+                                val target = cap
+                                unconfiguredPromptCap = null
+                                editingCapability = target
                             },
                         )
                     }
@@ -259,6 +301,7 @@ private fun CapabilityCard(
 ) {
     val colors = AppTheme.colors
     val (statusLabel, statusColor) = SpecializedCapabilitiesPresentationRules.statusBadge(config)
+    val isConfigured = SpecializedCapabilitiesPresentationRules.isConfigured(config)
 
     AppCard(
         modifier = Modifier.fillMaxWidth(),
@@ -309,7 +352,7 @@ private fun CapabilityCard(
                 }
 
                 Switch(
-                    checked = config.enabled,
+                    checked = config.enabled && isConfigured,
                     onCheckedChange = onToggle,
                 )
             }

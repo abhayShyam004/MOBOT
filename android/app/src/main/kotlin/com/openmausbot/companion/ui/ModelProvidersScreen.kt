@@ -9,6 +9,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -40,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -51,9 +54,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.ui.graphics.asImageBitmap
 import com.openmausbot.companion.core.Instance
 import com.openmausbot.companion.core.ProviderIconDto
 import com.openmausbot.companion.core.Session
@@ -72,41 +72,35 @@ internal fun decodeCustomIcon(dataUrl: String): androidx.compose.ui.graphics.Ima
 }
 
 /**
- * Every model provider this host runs, as one honest list — the phone-side
- * counterpart of the desktop's provider settings.
+ * Model Providers Screen redesigned to match MOBOT's minimal, premium Settings design system.
  *
- * The rows are the server's own catalog (`/api/instances`): an engine is
- * "Configured" exactly when the server reports it available, and unavailable
- * rows keep the server's reason instead of disappearing. Two kinds of thing
- * live under "provider", and the screen keeps them apart: **API providers**
- * configure with a key this phone can hold; **account sign-in engines** are
- * CLIs on the host that authenticate with the provider's own flow, so their
- * sign-in and switch-account actions are only offered while the engine is
- * actually runnable — an unavailable engine would turn either tap into a
- * guaranteed "not installed on this server" error. API-key engines get a
- * write-only key form. The workspace default selection is patched through
- * `/api/config`, the same write the desktop sends. Nothing here invents a
- * provider the registry does not have.
+ * Information Architecture:
+ * - Active Default Model: Clean summary section showing current workspace model & provider.
+ * - Providers: Grouped SettingsSection with standard rows showing authentic brand logos, status, and chevron.
+ * - Custom Endpoints: Dedicated section for custom API gateways with an Add Endpoint action.
+ * - Provider Detail SubPage: Tapping any provider navigates to its full detail view for credentials,
+ *   sign-in actions, runtime readiness, model selection, and diagnostics.
  */
 @Composable
 fun ModelProvidersScreen(onBack: () -> Unit) {
     val environment = LocalCompanion.current
     val session = environment.session
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     var instances by remember { mutableStateOf<List<Instance>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
-    // The compat engine's base URL is a setting, not a secret; the status read
-    // carries it so the edit form can show what is already there.
     var compatUrl by remember { mutableStateOf("") }
+    var activeDetailInstanceId by remember { mutableStateOf<String?>(null) }
+
     var editingKey by remember { mutableStateOf<Instance?>(null) }
     var signingIn by remember { mutableStateOf<Instance?>(null) }
     var confirmingDefault by remember { mutableStateOf<Instance?>(null) }
     var addingProvider by remember { mutableStateOf(false) }
     var removingProvider by remember { mutableStateOf<Instance?>(null) }
     var setupError by remember { mutableStateOf<String?>(null) }
-
     var loadError by remember { mutableStateOf<String?>(null) }
+    var testingId by remember { mutableStateOf<String?>(null) }
 
     fun reload() {
         scope.launch {
@@ -121,104 +115,325 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
             loading = false
         }
     }
+
     LaunchedEffect(Unit) {
         reload()
         compatUrl = session.readProviderStatus()?.openaiCompat?.url.orEmpty()
     }
 
-    SettingsSubPage(
-        title = "Model Providers",
-        subtitle = "Configure AI models, API keys, and CLI sign-in engines",
-        onBack = onBack,
-    ) {
-        Column(
-            modifier = Modifier
-                .padding(horizontal = AppSpacing.gutter)
-                .padding(bottom = 48.dp),
-            verticalArrangement = Arrangement.spacedBy(AppSpacing.lg),
+    val detailInstance = activeDetailInstanceId?.let { id -> instances.firstOrNull { it.instanceId == id } }
+
+    if (detailInstance != null) {
+        // Dedicated Provider Detail SubPage
+        SettingsSubPage(
+            title = ModelProvidersRules.displayName(detailInstance),
+            subtitle = "Provider details and model configuration",
+            onBack = { activeDetailInstanceId = null },
         ) {
-            if (loading) {
+            // Identity Header Card
+            Column(
+                modifier = Modifier
+                    .padding(horizontal = 20.dp)
+                    .padding(bottom = 8.dp),
+            ) {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(22.dp))
+                        .background(AppTheme.colors.surface)
+                        .border(
+                            width = 1.dp,
+                            color = AppTheme.colors.border.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(22.dp),
+                        )
+                        .padding(20.dp),
                     verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
                 ) {
-                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                    Text("Loading providers", fontSize = 14.sp, color = secondaryTint)
+                    ProviderMark(detailInstance, size = 52.dp)
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(
+                            text = ModelProvidersRules.displayName(detailInstance),
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = AppTheme.colors.textPrimary,
+                            maxLines = 2,
+                        )
+                        Text(
+                            text = ModelProvidersRules.accessLine(detailInstance),
+                            fontSize = 13.5.sp,
+                            color = AppTheme.colors.textSecondary,
+                        )
+                    }
+                    ProviderState(
+                        text = ModelProvidersRules.stateLine(detailInstance),
+                        tone = ModelProvidersRules.statusTone(detailInstance),
+                    )
                 }
-            } else if (instances.isEmpty()) {
-                Text(
-                    loadError ?: "No model providers are configured on this phone's host.",
-                    fontSize = 14.sp,
-                    color = secondaryTint,
-                )
-            } else {
-                // Two different kinds of thing live under "provider": an API
-                // provider is paid with a key this phone can hold; a sign-in
-                // engine is a CLI on the host that authenticates by account.
-                // Mixing them into one list is how a tap that can only fail
-                // ends up sitting next to one that works.
-                //
-                // Each one is a card: an identity tile, the name, its state, and
-                // the one or two things a person can do about it. The state is a
-                // word on the card rather than a row of uppercase labels over a
-                // column of values — a provider is an object with a face and a
-                // status, not a form that has been filled in.
-                val apiProviders = ModelProvidersRules.apiProviders(instances)
-                val signInEngines = ModelProvidersRules.signInEngines(instances)
-                // Where "Configure API access" sends a person whose engine
-                // cannot sign in on this host: the key-based provider's own
-                // form, which is the legitimate alternative that exists here.
-                val apiProvider = apiProviders.firstOrNull()
-                val providerCard: @Composable (Instance) -> Unit = { instance ->
-                    ProviderCard(
-                        instance = instance,
-                        onEditKey = { editingKey = instance },
-                        onRemove = if (ModelProvidersRules.isCustomApiProvider(instance)) {
-                            { removingProvider = instance }
+            }
+
+            // Authentication & Access Section
+            SettingsSection(title = "Access & Authentication") {
+                if (ModelProvidersRules.usesApiKey(detailInstance)) {
+                    if (detailInstance.instanceId == "openaiCompat") {
+                        SettingsRow(
+                            title = "Base URL",
+                            subtitle = if (compatUrl.isNotBlank()) compatUrl else "https://api.openai.com/v1",
+                            trailingValue = "Edit",
+                            showChevron = true,
+                            onClick = { editingKey = detailInstance },
+                        )
+                        SettingsDivider()
+                    }
+                    SettingsRow(
+                        title = "API Key",
+                        subtitle = if (detailInstance.snapshot.isAvailable) {
+                            "Stored on host, never exposed"
                         } else {
-                            null
+                            "API key required to enable models"
                         },
-                        onSignIn = { signingIn = instance },
-                        onSignOut = {
-                            scope.launch {
-                                session.signOutInstance(instance.instanceId)?.let { instances = it }
-                            }
+                        trailingValue = if (detailInstance.snapshot.isAvailable) "Configured" else "Edit key",
+                        showChevron = true,
+                        onClick = { editingKey = detailInstance },
+                    )
+                } else if (detailInstance.authentication != null) {
+                    val email = detailInstance.snapshot.account?.email
+                    SettingsRow(
+                        title = "Account",
+                        subtitle = email ?: ModelProvidersRules.accountLine(detailInstance),
+                        trailingValue = if (detailInstance.snapshot.authenticated == true) "Signed in" else "Not signed in",
+                    )
+                    SettingsDivider()
+                    if (ModelProvidersRules.offersSignIn(detailInstance)) {
+                        SettingsRow(
+                            title = if (ModelProvidersRules.showsSwitchAccount(detailInstance)) "Switch Account" else "Sign In",
+                            subtitle = "Authenticate via provider flow",
+                            trailingValue = "Continue",
+                            showChevron = true,
+                            onClick = { signingIn = detailInstance },
+                        )
+                    } else {
+                        val blockedReason = ModelProvidersRules.signInBlockedReason(detailInstance)
+                            ?: "Account sign-in not available in this build"
+                        SettingsRow(
+                            title = "Sign In",
+                            subtitle = blockedReason,
+                            enabled = false,
+                        )
+                    }
+                    SettingsDivider()
+                    SettingsRow(
+                        title = "Host Runtime",
+                        subtitle = if (detailInstance.snapshot.isAvailable) {
+                            "Runtime ready for turns"
+                        } else {
+                            detailInstance.snapshot.reason ?: "CLI runtime not found on host"
                         },
-                        onTest = {
+                        trailingValue = ModelProvidersRules.runtimeLine(detailInstance),
+                    )
+                } else {
+                    SettingsRow(
+                        title = "Built-in Engine",
+                        subtitle = if (detailInstance.snapshot.isAvailable) {
+                            "Ready on host"
+                        } else {
+                            detailInstance.snapshot.reason ?: "Unavailable"
+                        },
+                        trailingValue = ModelProvidersRules.runtimeLine(detailInstance),
+                    )
+                }
+
+                val docs = ModelProvidersRules.docsUrl(detailInstance)
+                if (docs != null) {
+                    SettingsDivider()
+                    SettingsRow(
+                        title = "Documentation",
+                        subtitle = "Official setup and developer docs",
+                        showChevron = true,
+                        onClick = { openBrowser(context, docs) },
+                    )
+                }
+            }
+
+            // Available Models Section
+            SettingsSection(title = "Available Models") {
+                if (detailInstance.snapshot.isAvailable && detailInstance.models.options.isNotEmpty()) {
+                    detailInstance.models.options.forEachIndexed { idx, opt ->
+                        if (idx > 0) SettingsDivider()
+                        val isDefault = detailInstance.models.defaultModel == opt.id
+                        SettingsRow(
+                            title = opt.label.ifBlank { opt.id },
+                            subtitle = opt.id,
+                            selected = isDefault,
+                            onClick = {
+                                scope.launch {
+                                    session.setDefaultModelSelection(detailInstance.instanceId, opt.id)
+                                    reload()
+                                }
+                            },
+                        )
+                    }
+                } else if (detailInstance.snapshot.isAvailable) {
+                    SettingsRow(
+                        title = "Default Model",
+                        subtitle = detailInstance.models.defaultModel.ifBlank { "No default specified" },
+                        enabled = false,
+                    )
+                } else {
+                    SettingsRow(
+                        title = "No Models Available",
+                        subtitle = "Authenticate or configure credentials to discover models",
+                        enabled = false,
+                    )
+                }
+            }
+
+            // Actions Section
+            SettingsSection(title = "Management") {
+                if (detailInstance.snapshot.isAvailable) {
+                    SettingsRow(
+                        title = "Test Connection",
+                        subtitle = "Verify credentials and refresh model list",
+                        trailingValue = if (testingId == detailInstance.instanceId) "Testing…" else "Test",
+                        busy = (testingId == detailInstance.instanceId),
+                        onClick = {
+                            testingId = detailInstance.instanceId
                             scope.launch {
-                                val refreshed = session.testProviderModels(instance.instanceId)
+                                val refreshed = session.testProviderModels(detailInstance.instanceId)
+                                testingId = null
                                 refreshed?.let { instances = it }
                             }
                         },
-                        onSetDefault = { confirmingDefault = instance },
-                        onConfigureApiAccess = apiProvider?.let { provider -> { editingKey = provider } },
+                    )
+                    SettingsDivider()
+                    SettingsRow(
+                        title = "Set as Workspace Default",
+                        subtitle = "Use ${ModelProvidersRules.displayName(detailInstance)} for new chats",
+                        trailingValue = "Set",
+                        onClick = { confirmingDefault = detailInstance },
                     )
                 }
-                if (apiProviders.isNotEmpty()) {
-                    ProvidersSectionLabel("API providers")
-                    apiProviders.forEach { providerCard(it) }
-                    Footnote("Keys are stored by this phone's host and never leave it.")
-                }
-                ProvidersSectionLabel("Your own endpoints")
-                Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
-                    AppPill(
-                        text = "Add a provider",
-                        onClick = { setupError = null; addingProvider = true },
-                        tone = PillTone.Raised,
+                if (ModelProvidersRules.isCustomApiProvider(detailInstance)) {
+                    if (detailInstance.snapshot.isAvailable) SettingsDivider()
+                    SettingsRow(
+                        title = "Remove Provider",
+                        subtitle = "Delete custom endpoint from host",
+                        destructive = true,
+                        onClick = { removingProvider = detailInstance },
                     )
                 }
-                Footnote(
-                    "Add as many OpenAI- or Anthropic-compatible endpoints as you like, " +
-                        "each with its own name; the name shows everywhere the provider does.",
-                )
-                if (signInEngines.isNotEmpty()) {
-                    ProvidersSectionLabel("Account sign-in engines")
-                    signInEngines.forEach { providerCard(it) }
-                    Footnote(
-                        "These engines run on the host computer and sign in with the " +
-                            "provider's own account flow. When the engine is not installed " +
-                            "on the host, its reason line says what is missing and sign-in " +
-                            "is not offered.",
+            }
+        }
+    } else {
+        // Main Overview Screen
+        SettingsSubPage(
+            title = "Model Providers",
+            subtitle = "Configure AI models, API keys, and CLI sign-in engines",
+            onBack = onBack,
+        ) {
+            if (loading) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = AppSpacing.xxl),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Text("Loading providers…", fontSize = 14.sp, color = AppTheme.colors.textSecondary)
+                    }
+                }
+            } else if (instances.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 24.dp, vertical = 20.dp),
+                ) {
+                    Text(
+                        loadError ?: "No model providers are configured on this host.",
+                        fontSize = 14.sp,
+                        color = AppTheme.colors.textSecondary,
+                    )
+                }
+            } else {
+                // Section 1: Default Model
+                val eligibleInstances = instances.filter {
+                    ModelProvidersRules.isSupportedBuiltInProvider(it) || ModelProvidersRules.isCustomApiProvider(it)
+                }
+                val defaultInstance = eligibleInstances.firstOrNull { it.snapshot.isAvailable && it.models.defaultModel.isNotEmpty() }
+                    ?: eligibleInstances.firstOrNull { it.snapshot.isAvailable }
+
+                SettingsSection(title = "Default Model") {
+                    if (defaultInstance != null) {
+                        val modelName = defaultInstance.models.options
+                            .firstOrNull { it.id == defaultInstance.models.defaultModel }?.label
+                            ?: defaultInstance.models.defaultModel.ifEmpty { "Default Model" }
+
+                        SettingsRow(
+                            leadingIcon = { ProviderMark(defaultInstance, size = 36.dp) },
+                            title = modelName,
+                            subtitle = "Provider: ${ModelProvidersRules.displayName(defaultInstance)}",
+                            trailingValue = "Active",
+                            showChevron = true,
+                            onClick = { activeDetailInstanceId = defaultInstance.instanceId },
+                        )
+                    } else {
+                        SettingsRow(
+                            title = "No Active Provider",
+                            subtitle = "Sign in or configure credentials below to select a model",
+                            trailingValue = "Not configured",
+                            enabled = false,
+                        )
+                    }
+                }
+
+                // Section 2: Standard Providers
+                val standardProviders = instances.filter { ModelProvidersRules.isSupportedBuiltInProvider(it) }
+                if (standardProviders.isNotEmpty()) {
+                    SettingsSection(title = "Providers") {
+                        standardProviders.forEachIndexed { index, instance ->
+                            if (index > 0) SettingsDivider()
+                            SettingsRow(
+                                leadingIcon = { ProviderMark(instance, size = 36.dp) },
+                                title = ModelProvidersRules.displayName(instance),
+                                subtitle = ModelProvidersRules.accessLine(instance),
+                                trailingValue = ModelProvidersRules.stateLine(instance),
+                                showChevron = true,
+                                onClick = { activeDetailInstanceId = instance.instanceId },
+                            )
+                        }
+                    }
+                }
+
+                // Section 3: Custom Endpoints
+                val customProviders = instances.filter { ModelProvidersRules.isCustomApiProvider(it) }
+                SettingsSection(title = "Custom Endpoints") {
+                    customProviders.forEach { instance ->
+                        SettingsRow(
+                            leadingIcon = { ProviderMark(instance, size = 36.dp) },
+                            title = ModelProvidersRules.displayName(instance),
+                            subtitle = ModelProvidersRules.accessLine(instance),
+                            trailingValue = ModelProvidersRules.stateLine(instance),
+                            showChevron = true,
+                            onClick = { activeDetailInstanceId = instance.instanceId },
+                        )
+                        SettingsDivider()
+                    }
+                    SettingsRow(
+                        title = "Add Custom Endpoint",
+                        subtitle = "OpenAI or Anthropic-compatible API gateway",
+                        trailingValue = "+ Add",
+                        showChevron = true,
+                        onClick = {
+                            setupError = null
+                            addingProvider = true
+                        },
                     )
                 }
             }
@@ -246,6 +461,9 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
                     scope.launch {
                         val refreshed = session.removeCustomProvider(instance.instanceId)
                         removingProvider = null
+                        if (activeDetailInstanceId == instance.instanceId) {
+                            activeDetailInstanceId = null
+                        }
                         refreshed?.let { instances = it }
                     }
                 }) { Text("Remove") }
@@ -307,6 +525,7 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
                     scope.launch {
                         if (session.setDefaultModelSelection(instance.instanceId, model)) {
                             confirmingDefault = null
+                            reload()
                         }
                     }
                 }) { Text("Make default") }
@@ -315,176 +534,6 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
                 TextButton(onClick = { confirmingDefault = null }) { Text("Cancel") }
             },
         )
-    }
-}
-
-@Composable
-private fun ProviderCard(
-    instance: Instance,
-    onEditKey: () -> Unit,
-    onRemove: (() -> Unit)?,
-    onSignIn: () -> Unit,
-    onSignOut: () -> Unit,
-    onTest: () -> Unit,
-    onSetDefault: () -> Unit,
-    onConfigureApiAccess: (() -> Unit)?,
-) {
-    val name = ModelProvidersRules.displayName(instance)
-    val auth = instance.authentication
-    val available = instance.snapshot.isAvailable
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(AppRadii.cardShape)
-            .background(AppTheme.colors.surface)
-            .padding(AppSpacing.lg),
-        verticalArrangement = Arrangement.spacedBy(AppSpacing.sm),
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(AppSpacing.md),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            ProviderMark(instance)
-            Column(
-                modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                Text(
-                    text = name,
-                    style = MaterialTheme.typography.titleMedium,
-                    color = AppTheme.colors.textPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-                Text(
-                    text = ModelProvidersRules.accessLine(instance),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = AppTheme.colors.textTertiary,
-                )
-            }
-            ProviderState(
-                text = if (available) "Configured" else "Unavailable",
-                tone = if (available) StatusTone.GOOD else StatusTone.WARN,
-            )
-        }
-        if (auth != null) {
-            // Account and runtime are different facts, and the card keeps
-            // them apart: an engine can be signed in while its runtime is
-            // absent (Codex on this host), or need a runtime to sign in at
-            // all (Claude's own login). Neither is "just unavailable".
-            ProviderCardLabel("Account")
-            Text(
-                text = ModelProvidersRules.accountLine(instance),
-                fontSize = 14.sp,
-                color = if (instance.snapshot.authenticated == true) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    secondaryTint
-                },
-            )
-            instance.snapshot.account?.email?.let { email ->
-                Text(text = email, fontSize = 13.sp, color = secondaryTint)
-            }
-            if (ModelProvidersRules.offersSignIn(instance)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
-                    // "Switch account" only when an account exists to switch;
-                    // a signed-out engine says "Sign in" even though the
-                    // server can remove a stored sign-in. Signing in is the one
-                    // action on the card that is worth the accent: it is what the
-                    // card is for when the account is the thing that is missing.
-                    if (ModelProvidersRules.showsSwitchAccount(instance)) {
-                        AppPill(text = "Switch account", onClick = onSignOut, tone = PillTone.Raised)
-                    } else {
-                        AppPill(text = "Sign in", onClick = onSignIn, tone = PillTone.Accent)
-                    }
-                }
-            } else {
-                ModelProvidersRules.signInBlockedReason(instance)?.let { reason ->
-                    Text(text = reason, fontSize = 13.sp, color = secondaryTint)
-                }
-                if (onConfigureApiAccess != null) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
-                        AppPill(
-                            text = "Configure API access",
-                            onClick = onConfigureApiAccess,
-                            tone = PillTone.Raised,
-                        )
-                    }
-                }
-            }
-            ProviderCardLabel("Runtime")
-            Text(
-                text = ModelProvidersRules.runtimeLine(instance),
-                fontSize = 14.sp,
-                color = if (instance.snapshot.isAvailable) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.error
-                },
-            )
-            instance.snapshot.reason?.takeIf { !instance.snapshot.isAvailable }?.let { reason ->
-                Text(text = reason, fontSize = 13.sp, color = secondaryTint)
-            }
-        } else {
-            Text(
-                text = ModelProvidersRules.stateLine(instance),
-                fontSize = 14.sp,
-                color = if (instance.snapshot.isAvailable) {
-                    MaterialTheme.colorScheme.primary
-                } else {
-                    MaterialTheme.colorScheme.error
-                },
-            )
-            instance.snapshot.reason?.takeIf { !instance.snapshot.isAvailable }?.let { reason ->
-                Text(text = reason, fontSize = 13.sp, color = secondaryTint)
-            }
-            // An engine with no sign-in catalogue entry: its account login
-            // lives in a CLI runtime this build does not carry. Say that
-            // plainly and point at the legitimate alternative — never a dead
-            // Sign in button, never an invented flow.
-            if (!ModelProvidersRules.usesApiKey(instance)) {
-                Text(
-                    text = "Account sign-in isn't available in this build for this engine.",
-                    fontSize = 13.sp,
-                    color = secondaryTint,
-                )
-                if (onConfigureApiAccess != null) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
-                        AppPill(
-                            text = "Configure API access",
-                            onClick = onConfigureApiAccess,
-                            tone = PillTone.Raised,
-                        )
-                    }
-                }
-            }
-        }
-        if (instance.snapshot.isAvailable) {
-            val modelCount = instance.models.options.size
-            Text(
-                text = if (modelCount > 0) "$modelCount models available" else "Available",
-                fontSize = 13.sp,
-                color = secondaryTint,
-            )
-        }
-        val context = LocalContext.current
-        val docs = ModelProvidersRules.docsUrl(instance)
-        Row(horizontalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
-            if (instance.snapshot.isAvailable) {
-                AppPill(text = "Test", onClick = onTest, tone = PillTone.Raised)
-                AppPill(text = "Set as default", onClick = onSetDefault, tone = PillTone.Raised)
-            }
-            if (ModelProvidersRules.usesApiKey(instance)) {
-                AppPill(text = "Edit key", onClick = onEditKey, tone = PillTone.Raised)
-            }
-            if (docs != null) {
-                AppPill(text = "Docs", onClick = { openBrowser(context, docs) }, tone = PillTone.Raised)
-            }
-            if (onRemove != null) {
-                AppPill(text = "Remove", onClick = onRemove, tone = PillTone.Destructive)
-            }
-        }
     }
 }
 
@@ -571,8 +620,6 @@ private fun ProviderAuthDialog(
     var browserOpened by remember { mutableStateOf(false) }
     val context = LocalContext.current
 
-    // Start once; poll while waiting. The flow id is the server's, and every
-    // answer is the server's own safe copy — never CLI output.
     LaunchedEffect(instance.instanceId) {
         val started = session.startInstanceAuth(instance.instanceId)
         if (started == null) {
@@ -581,9 +628,6 @@ private fun ProviderAuthDialog(
         }
         val method = instance.authentication?.method ?: "browser"
         phase = InstanceAuthUi(started.phase, started.flowId, started.authorizationUrl, started.userCode, null, method)
-        // A browser redirect sign-in opens its page by itself: the person
-        // never types a code. A start that answers with a user code is the
-        // headless fallback — no browser to open; the code is shown below.
         val url = started.authorizationUrl
         if (method == "browser" && started.userCode == null && !browserOpened && url != null) {
             browserOpened = true
@@ -655,7 +699,8 @@ private fun ProviderAuthDialog(
         },
         confirmButton = {
             val current = phase
-            when {                    current?.phase == "succeeded" -> TextButton(onClick = onDone) { Text("Done") }
+            when {
+                current?.phase == "succeeded" -> TextButton(onClick = onDone) { Text("Done") }
                 current?.method == "paste-code" && current.waiting -> TextButton(
                     enabled = !completing && code.isNotBlank(),
                     onClick = {
@@ -687,38 +732,54 @@ private data class InstanceAuthUi(
     val authorizationUrl: String?,
     val userCode: String?,
     val message: String?,
-    /** The engine's declared sign-in method: "browser" | "device-code" | "paste-code". */
     val method: String,
 ) {
     val waiting: Boolean get() = phase == "waiting"
 }
 
-/** Provider card decisions, kept out of the composables. */
+/** Provider card and presentation decisions. */
 object ModelProvidersRules {
-    fun displayName(instance: Instance): String =
-        instance.displayName?.trim()?.takeIf { it.isNotEmpty() } ?: instance.instanceId
+    fun displayName(instance: Instance): String {
+        if (instance.instanceId == "openaiCompat") return "OpenAI Compatible"
+        return instance.displayName?.trim()?.takeIf { it.isNotEmpty() } ?: instance.instanceId
+    }
 
-    /**
-     * A provider this phone added itself (POST /api/instances) — the two
-     * custom-API drivers, never the built-in `openaiCompat` entry whose
-     * settings are workspace-wide. Only these can be renamed or removed from
-     * here.
-     */
     fun isCustomApiProvider(instance: Instance): Boolean =
         instance.instanceId != "openaiCompat" &&
             (instance.driverKind == "openai-compat" || instance.driverKind == "anthropic-compat")
 
     /**
-     * The key-and-URL engine: configured entirely from settings, nothing to
-     * install. On the wire the server marks engines "subscription" (account
-     * sign-in CLIs) or "custom" (custom configuration — see EngineAccess in
-     * the server's contracts; "apikey" is an older spelling this host never
-     * sends). Within "custom" the OpenAI-compatible driver is the one whose
-     * whole configuration is a base URL and a key — it is the API provider;
-     * every other engine on the host installs and signs in through a CLI.
-     * Getting this wrong hides the Edit-key form behind an Unavailable card,
-     * which is exactly how adding a provider became impossible.
+     * Built-in supported model providers on Android.
+     *
+     * Invariants:
+     * 1. Exclude internal CLI/agent runtimes (cursor, droid, hermes, pi, opencodeGo, qwen, kimi, computer).
+     *    These are local execution engines, not consumer model providers.
+     * 2. Exclude custom API providers (these belong under Custom Endpoints).
+     * 3. Built-in providers requiring account sign-in (e.g. codex) must have a real, working native auth
+     *    flow on this device (authentication.available != false).
+     * 4. Providers lacking native auth or whose required runtime CLI is not present on Android (claude,
+     *    grok, antigravity) are excluded so users are never shown misleading "Sign in required" or "Unavailable"
+     *    dead ends. Users connect them via Custom Endpoints instead.
      */
+    fun isSupportedBuiltInProvider(instance: Instance): Boolean {
+        val runtimeEngines = setOf("cursor", "droid", "hermes", "pi", "opencodeGo", "qwen", "kimi", "computer")
+        if (instance.instanceId in runtimeEngines) return false
+        if (isCustomApiProvider(instance)) return false
+
+        // Account sign-in engine: must have native auth available on this device
+        val auth = instance.authentication
+        if (auth != null) {
+            return auth.available != false
+        }
+
+        // CLI-dependent engine without API key or native auth: must be actually available
+        if (!usesApiKey(instance) && !instance.snapshot.isAvailable) {
+            return false
+        }
+
+        return true
+    }
+
     fun usesApiKey(instance: Instance): Boolean =
         instance.instanceId == "opencodeGo" ||
             (instance.authentication == null &&
@@ -726,7 +787,6 @@ object ModelProvidersRules {
                     (instance.access == "custom" &&
                         (instance.driverKind == "openai-compat" || instance.driverKind == "anthropic-compat"))))
 
-    /** Documentation link for the provider when available. */
     fun docsUrl(instance: Instance): String? =
         instance.docsUrl ?: instance.instanceId.let { id ->
             when (id) {
@@ -742,41 +802,24 @@ object ModelProvidersRules {
             }
         }
 
-    /** API-key providers configure with a key alone — nothing to install. */
     fun apiProviders(instances: List<Instance>): List<Instance> = instances.filter { usesApiKey(it) }
 
-    /** Account sign-in engines: CLIs on the host, authenticated by account.
-     * The built-in engine lands here too — it exists by being installed. */
     fun signInEngines(instances: List<Instance>): List<Instance> = instances.filter { !usesApiKey(it) }
 
-    /**
-     * Sign-in is offered whenever the server says the flow can run on this
-     * host — which is a fact about authentication, not about the runtime.
-     * The Codex ChatGPT device flow is native (available even with no Codex
-     * runtime installed: sign in first, runtime later), while Claude's
-     * sign-in IS its CLI's login and the server reports it unavailable when
-     * the runtime is absent. An older host that sends no flag reads as
-     * available, preserving its previous behavior.
-     */
     fun offersSignIn(instance: Instance): Boolean {
         val auth = instance.authentication ?: return false
         return auth.available != false
     }
 
-    /** The server's own words for why sign-in is not offered, when it says so. */
     fun signInBlockedReason(instance: Instance): String? =
         instance.authentication?.takeIf { it.available == false }?.reason
 
-    /** "Signed in" / "Not signed in" — the account section's state line. */
     fun accountLine(instance: Instance): String =
         if (instance.snapshot.authenticated == true) "Signed in" else "Not signed in"
 
-    /** True when the account action switches accounts rather than starting
-     * one: switching needs an account to switch from. */
     fun showsSwitchAccount(instance: Instance): Boolean =
         instance.authentication?.signOut == true && instance.snapshot.authenticated == true
 
-    /** The runtime section's state line: can turns run on this host now? */
     fun runtimeLine(instance: Instance): String =
         if (instance.snapshot.isAvailable) "Ready" else "Unavailable"
 
@@ -793,49 +836,25 @@ object ModelProvidersRules {
     }
 
     fun stateLine(instance: Instance): String = when {
+        instance.authentication != null && instance.snapshot.authenticated != true -> "Sign in required"
         instance.snapshot.isAvailable -> "Configured"
+        usesApiKey(instance) -> "API key required"
         else -> "Unavailable"
+    }
+
+    fun statusTone(instance: Instance): StatusTone = when {
+        instance.authentication != null && instance.snapshot.authenticated != true -> StatusTone.WARN
+        instance.snapshot.isAvailable -> StatusTone.GOOD
+        else -> StatusTone.WARN
     }
 }
 
-/** The browser sign-in happens on this device; open the provider's own page
- * with the system browser. Every browser shows its own account picker here. */
 internal fun openBrowser(context: Context, url: String) {
     context.startActivity(
         Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
     )
 }
 
-/** The heading over one kind of provider — see [AppSectionHeader]. */
-@Composable
-private fun ProvidersSectionLabel(text: String) {
-    AppSectionHeader(text)
-}
-
-/** The quieter heading inside one engine card (Account, Runtime). */
-@Composable
-private fun ProviderCardLabel(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.labelSmall,
-        color = AppTheme.colors.textTertiary,
-    )
-}
-
-/**
- * A provider's identity tile: its own logo, on a white square.
- *
- * A mark this app recognises is the fastest thing on the row — OpenAI, Claude,
- * Gemini, Groq are pictures before they are words — so a list of six engines
- * reads as six engines rather than six rows of the same letter. The white
- * square is not decoration: brand marks are drawn for a light ground, and a
- * white chip keeps them correct in either theme instead of needing a second,
- * recoloured copy of every logo.
- *
- * A provider with no bundled mark — a private gateway someone named "home
- * box" — keeps the letter it always had, on a colour picked from its instance
- * id, because inventing a logo for it would say something untrue.
- */
 @Composable
 internal fun ProviderMark(instance: Instance, size: Dp = 42.dp) {
     val customBitmap = remember(instance.icon) {
@@ -887,13 +906,8 @@ internal fun ProviderMark(instance: Instance, size: Dp = 42.dp) {
     }
 }
 
-/** How much of the tile the mark fills; the rest is the white ground it sits on. */
 private const val LOGO_FRACTION: Float = 0.66f
 
-/**
- * The fallback identity tile: one letter of the provider's name on a pastel
- * square, kept for providers no bundled mark covers.
- */
 @Composable
 private fun LetterMark(instance: Instance, size: Dp) {
     val colors = AppTheme.colors
@@ -918,15 +932,6 @@ private fun LetterMark(instance: Instance, size: Dp) {
     }
 }
 
-/**
- * One provider, as a card.
- *
- * The state is a pill beside the name — "Configured", "Unavailable" — and the
- * card's body carries only what is true and useful: which account is signed in,
- * whether the runtime will take a turn right now, and why not when it will not.
- * The actions are soft pills at the foot of the card, quiet by default, with
- * exactly one of them (setting the workspace default) wearing the accent.
- */
 @Composable
 private fun ProviderState(
     text: String,
@@ -951,12 +956,6 @@ private fun ProviderState(
     )
 }
 
-/**
- * The name, protocol, endpoint, key and (optional) model a custom provider
- * needs. The name is not decoration: every list, picker and bot settings
- * screen shows it in place of the driver's own label, so two gateways on the
- * same protocol stay tellable apart.
- */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun AddProviderDialog(
@@ -975,6 +974,7 @@ private fun AddProviderDialog(
     var error by remember { mutableStateOf<String?>(null) }
     val canAdd = !saving && name.isNotBlank() && url.trim().startsWith("http")
     val colors = AppTheme.colors
+
     BasicAlertDialog(
         onDismissRequest = { if (!saving) onDismiss() },
     ) {
@@ -993,7 +993,7 @@ private fun AddProviderDialog(
                 verticalArrangement = Arrangement.spacedBy(AppSpacing.md),
             ) {
                 Text(
-                    text = "Add a provider",
+                    text = "Add custom provider",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
                     color = colors.textPrimary,
@@ -1060,15 +1060,16 @@ private fun AddProviderDialog(
                     Text("Icon branding (optional)", style = MaterialTheme.typography.labelSmall, color = colors.textSecondary)
                     val presetOptions = listOf(
                         null to "None",
-                        "deepseek" to "DeepSeek",
-                        "mistral" to "Mistral",
-                        "groq" to "Groq",
-                        "openrouter" to "OpenRouter",
-                        "perplexity" to "Perplexity",
-                        "ollama" to "Ollama",
                         "openai" to "OpenAI",
                         "anthropic" to "Anthropic",
                         "gemini" to "Gemini",
+                        "grok" to "xAI / Grok",
+                        "openrouter" to "OpenRouter",
+                        "deepseek" to "DeepSeek",
+                        "groq" to "Groq",
+                        "perplexity" to "Perplexity",
+                        "mistral" to "Mistral",
+                        "ollama" to "Ollama",
                         "qwen" to "Qwen",
                     )
                     FlowRow(
@@ -1079,7 +1080,67 @@ private fun AddProviderDialog(
                             val chosen = selectedPreset == preset
                             AppPill(
                                 text = label,
-                                onClick = { selectedPreset = preset },
+                                onClick = {
+                                    selectedPreset = preset
+                                    when (preset) {
+                                        "anthropic" -> {
+                                            protocol = "anthropic-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://api.anthropic.com"
+                                            if (name.isBlank()) name = "Anthropic"
+                                        }
+                                        "openai" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank()) url = "https://api.openai.com/v1"
+                                            if (name.isBlank()) name = "OpenAI"
+                                        }
+                                        "gemini" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+                                            if (name.isBlank()) name = "Google Gemini"
+                                        }
+                                        "grok" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://api.x.ai/v1"
+                                            if (name.isBlank()) name = "xAI Grok"
+                                        }
+                                        "openrouter" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://openrouter.ai/api/v1"
+                                            if (name.isBlank()) name = "OpenRouter"
+                                        }
+                                        "deepseek" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://api.deepseek.com/v1"
+                                            if (name.isBlank()) name = "DeepSeek"
+                                        }
+                                        "groq" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://api.groq.com/openai/v1"
+                                            if (name.isBlank()) name = "Groq"
+                                        }
+                                        "perplexity" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://api.perplexity.ai"
+                                            if (name.isBlank()) name = "Perplexity"
+                                        }
+                                        "mistral" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://api.mistral.ai/v1"
+                                            if (name.isBlank()) name = "Mistral"
+                                        }
+                                        "ollama" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "http://localhost:11434/v1"
+                                            if (name.isBlank()) name = "Ollama"
+                                        }
+                                        "qwen" -> {
+                                            protocol = "openai-compat"
+                                            if (url.isBlank() || url == "https://api.openai.com/v1") url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+                                            if (name.isBlank()) name = "Qwen"
+                                        }
+                                        null -> {}
+                                    }
+                                },
                                 tone = if (chosen) PillTone.Accent else PillTone.Raised,
                             )
                         }

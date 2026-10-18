@@ -1074,23 +1074,38 @@ export async function removeService(cfg: AppConfig, slug: string) {
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     return removalResponseSchema.parse(await response.json());
   }
-  const surface = composioSurface(cfg);
-  if (surface === "connect") return { removed: 1 };
-  const session = await ensureProjectSession(cfg);
-  const params = new URLSearchParams({ limit: "50", toolkits: toolkit });
-  const list = await fetch(
-    `${apiBase()}/tool_router/session/${encodeURIComponent(session.session_id)}/toolkits?${params}`,
-    { headers: projectHeaders(apiKey), signal: AbortSignal.timeout(15_000) },
-  );
-  if (!list.ok) throw new Error(await responseError(list, `Composio toolkits: HTTP ${list.status}`));
-  const body = toolkitPageSchema.parse(await list.json());
-  const id = body.items?.find((item) => item.slug && canonicalToolkitSlug(item.slug) === toolkit)?.connected_account?.id;
-  if (!id) return { removed: 0 };
+  const session = await ensureProjectSession(cfg).catch(() => null);
+  const userId = session?.config?.user_id ?? cfg.composio?.userId;
+  let targetId: string | undefined;
+
+  if (session) {
+    const params = new URLSearchParams({ limit: "50", toolkits: toolkit });
+    const list = await fetch(
+      `${apiBase()}/tool_router/session/${encodeURIComponent(session.session_id)}/toolkits?${params}`,
+      { headers: projectHeaders(apiKey), signal: AbortSignal.timeout(15_000) },
+    ).catch(() => null);
+    if (list?.ok) {
+      const body = toolkitPageSchema.safeParse(await list.json().catch(() => null));
+      if (body.success) {
+        targetId = body.data.items?.find((item) => item.slug && canonicalToolkitSlug(item.slug) === toolkit)?.connected_account?.id;
+      }
+    }
+  }
+
+  if (!targetId && userId) {
+    const accounts = await listConnectedAccounts(apiKey, userId, [toolkit]).catch(() => []);
+    targetId = accounts.find((a) => a.toolkit?.slug && canonicalToolkitSlug(a.toolkit.slug) === toolkit)?.id;
+  }
+
+  if (!targetId) return { removed: 0 };
+
   const removed = await fetch(
-    `${apiBase()}/connected_accounts/${encodeURIComponent(id)}?revoke_on_delete=true`,
+    `${apiBase()}/connected_accounts/${encodeURIComponent(targetId)}?revoke_on_delete=true`,
     { method: "DELETE", headers: projectHeaders(apiKey), signal: AbortSignal.timeout(30_000) },
   );
-  if (!removed.ok) throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
+  if (!removed.ok && removed.status !== 404) {
+    throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
+  }
   return { removed: 1 };
 }
 
@@ -1107,23 +1122,24 @@ export async function removeAccount(cfg: AppConfig, slug: string, accountId: str
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     return removalResponseSchema.parse(await response.json());
   }
-  const surface = composioSurface(cfg);
-  if (surface === "connect") return { removed: 1 };
-  const session = await ensureProjectSession(cfg);
-  const userId = session.config?.user_id ?? cfg.composio?.userId;
-  if (!userId) throw new Error("Composio Session has no user ID");
-  const accounts = await listConnectedAccounts(apiKey, userId, [toolkit]);
-  const owned = accounts.some((account) =>
-    account.id === accountId
-      && account.toolkit?.slug !== undefined
-      && canonicalToolkitSlug(account.toolkit.slug) === toolkit
-  );
-  if (!owned) return { removed: 0 };
+  const session = await ensureProjectSession(cfg).catch(() => null);
+  const userId = session?.config?.user_id ?? cfg.composio?.userId;
+  if (userId) {
+    const accounts = await listConnectedAccounts(apiKey, userId, [toolkit]).catch(() => []);
+    const owned = accounts.some((account) =>
+      account.id === accountId
+        && account.toolkit?.slug !== undefined
+        && canonicalToolkitSlug(account.toolkit.slug) === toolkit
+    );
+    if (!owned && accounts.length > 0) return { removed: 0 };
+  }
   const removed = await fetch(
     `${apiBase()}/connected_accounts/${encodeURIComponent(accountId)}?revoke_on_delete=true`,
     { method: "DELETE", headers: projectHeaders(apiKey), signal: AbortSignal.timeout(30_000) },
   );
-  if (!removed.ok) throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
+  if (!removed.ok && removed.status !== 404) {
+    throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
+  }
   return { removed: 1 };
 }
 

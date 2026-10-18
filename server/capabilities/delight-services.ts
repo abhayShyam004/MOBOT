@@ -649,7 +649,7 @@ export class CompletionCardGenerator {
     const shareText =
       options.shareText ||
       [
-        `✨ Task Complete: ${options.taskTitle}`,
+        `Task Complete: ${options.taskTitle}`,
         `Status: ${status}`,
         durationText,
         "",

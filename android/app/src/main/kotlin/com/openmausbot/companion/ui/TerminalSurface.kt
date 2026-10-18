@@ -328,7 +328,7 @@ fun TerminalSurface(
                 KeyChip("↓") { press("down") }
                 KeyChip("←") { press("left") }
                 KeyChip("→") { press("right") }
-                KeyChip("⌫") { press("backspace") }
+                KeyChip("BKSP") { press("backspace") }
                 KeyChip(if (rawKeys) "raw:on" else "raw:off", active = rawKeys) {
                     rawKeys = !rawKeys
                     field = ""

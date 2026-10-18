@@ -109,3 +109,51 @@ export class DeviceSafetyPolicy {
     return false;
   }
 }
+
+export function checkAgentExecutionPermission(
+  toolOrCapability: string,
+  permissions?: { terminal?: string; filesystem?: string; browser?: string; composio?: string } | null,
+): { allowed: boolean; reason?: string } {
+  if (!permissions) return { allowed: true };
+
+  const terminalTools = new Set([
+    "Bash", "run_command", "run_shell", "open_interactive",
+    "terminal_start", "terminal_write", "terminal_read",
+    "terminal_resize", "terminal_close", "terminal_list",
+  ]);
+  const filesystemTools = new Set([
+    "ReadFile", "WriteFile", "EditFile",
+    "workspace_list", "workspace_read", "workspace_write",
+    "workspace_append", "workspace_mkdir", "workspace_move",
+    "workspace_copy", "workspace_delete", "workspace_stat",
+    "workspace_exists", "device.files",
+  ]);
+  const browserTools = new Set([
+    "http_fetch", "web_search", "resource_inspect",
+    "resource_fetch", "resource_download", "resource_extract_pdf",
+    "resource_extract_html", "resource_artifacts", "browser_open",
+    "browser_click", "browser_screenshot", "browser_navigate",
+  ]);
+
+  if (terminalTools.has(toolOrCapability) || /^(bash|sh|terminal|shell|exec)/i.test(toolOrCapability)) {
+    if (permissions.terminal === "denied") {
+      return { allowed: false, reason: "Permission Denied: Terminal & Shell Execution is disabled in Settings -> Permissions." };
+    }
+  }
+  if (filesystemTools.has(toolOrCapability) || /^(fs_|file_|workspace_)/i.test(toolOrCapability)) {
+    if (permissions.filesystem === "denied") {
+      return { allowed: false, reason: "Permission Denied: Filesystem Read & Write is disabled in Settings -> Permissions." };
+    }
+  }
+  if (browserTools.has(toolOrCapability) || /^(browser_|web_|http_)/i.test(toolOrCapability)) {
+    if (permissions.browser === "denied") {
+      return { allowed: false, reason: "Permission Denied: Browser & Network is disabled in Settings -> Permissions." };
+    }
+  }
+  if (/^composio/i.test(toolOrCapability) || toolOrCapability.startsWith("mcp__composio")) {
+    if (permissions.composio === "denied") {
+      return { allowed: false, reason: "Permission Denied: Connected Apps (Composio) is disabled in Settings -> Permissions." };
+    }
+  }
+  return { allowed: true };
+}

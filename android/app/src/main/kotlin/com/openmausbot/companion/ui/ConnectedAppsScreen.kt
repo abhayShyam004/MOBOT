@@ -172,9 +172,20 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                 alias = ""
                 aliasTarget = AliasTarget(slug = selectedCard.slug, label = selectedCard.label)
             },
+            onDisconnectAccount = { accountId ->
+                scope.launch {
+                    val slug = selectedCard.slug
+                    inventory = ConnectedAppsPolicy.removeAccount(inventory, slug, accountId)
+                    if (session.disconnectConnectorAccount(slug, accountId)) {
+                        refresh(showProgress = true)
+                    }
+                }
+            },
             onDisconnect = {
                 scope.launch {
-                    if (session.disconnectConnector(selectedCard.slug)) {
+                    val slug = selectedCard.slug
+                    inventory = ConnectedAppsPolicy.removeConnector(inventory, slug)
+                    if (session.disconnectConnector(slug)) {
                         refresh(showProgress = true)
                     }
                 }
@@ -220,15 +231,6 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                     filteredCards.filter { it !in connectedCards }
                 }
 
-                val showVercel = query.isBlank() ||
-                    "vercel".contains(query.trim(), ignoreCase = true) ||
-                    "cloud".contains(query.trim(), ignoreCase = true) ||
-                    "deploy".contains(query.trim(), ignoreCase = true)
-                val showRender = query.isBlank() ||
-                    "render".contains(query.trim(), ignoreCase = true) ||
-                    "cloud".contains(query.trim(), ignoreCase = true) ||
-                    "deploy".contains(query.trim(), ignoreCase = true)
-
                 val lazyListState = rememberLazyListState()
 
                 LazyColumn(
@@ -271,85 +273,7 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                         }
                     }
 
-                    // 4. Cloud Deployment Section (Vercel & Render)
-                    if (showVercel || showRender) {
-                        item(key = "cloud_deployment_header") {
-                            Text(
-                                text = "Cloud Deployment",
-                                fontSize = 14.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = AppTheme.colors.textSecondary,
-                                modifier = Modifier.padding(horizontal = 24.dp),
-                            )
-                        }
-
-                        val vercelAccount = deploymentAccounts.find { it.provider == "vercel" } ?: DeploymentAccountInfo(provider = "vercel")
-                        val renderAccount = deploymentAccounts.find { it.provider == "render" } ?: DeploymentAccountInfo(provider = "render")
-
-                        if (showVercel) {
-                            item(key = "cloud_vercel") {
-                                Box(modifier = Modifier.padding(horizontal = 20.dp)) {
-                                    ProviderAccountCard(
-                                        providerId = "vercel",
-                                        providerName = "Vercel",
-                                        providerTagline = "Next.js, React, Node.js & Static Sites",
-                                        tokenPlaceholder = "ver_xxxxxxxxxxxxxxxxxxxx",
-                                        tokenHelpUrl = "vercel.com/account/tokens",
-                                        accountInfo = vercelAccount,
-                                        onConnect = { token ->
-                                            val ok = session.connectDeploymentAccount("vercel", token)
-                                            if (ok) refresh()
-                                            ok
-                                        },
-                                        onTest = {
-                                            val ok = session.testDeploymentAccount("vercel")
-                                            refresh()
-                                            ok
-                                        },
-                                        onDisconnect = {
-                                            scope.launch {
-                                                val ok = session.disconnectDeploymentAccount("vercel")
-                                                if (ok) refresh()
-                                            }
-                                        },
-                                    )
-                                }
-                            }
-                        }
-
-                        if (showRender) {
-                            item(key = "cloud_render") {
-                                Box(modifier = Modifier.padding(horizontal = 20.dp)) {
-                                    ProviderAccountCard(
-                                        providerId = "render",
-                                        providerName = "Render",
-                                        providerTagline = "Web Services & Full-Stack Apps",
-                                        tokenPlaceholder = "rnd_xxxxxxxxxxxxxxxxxxxx",
-                                        tokenHelpUrl = "dashboard.render.com/u/settings#api-keys",
-                                        accountInfo = renderAccount,
-                                        onConnect = { token ->
-                                            val ok = session.connectDeploymentAccount("render", token)
-                                            if (ok) refresh()
-                                            ok
-                                        },
-                                        onTest = {
-                                            val ok = session.testDeploymentAccount("render")
-                                            refresh()
-                                            ok
-                                        },
-                                        onDisconnect = {
-                                            scope.launch {
-                                                val ok = session.disconnectDeploymentAccount("render")
-                                                if (ok) refresh()
-                                            }
-                                        },
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    // 5. Your Apps Section (Connected Services)
+                    // 4. Your Apps Section (Connected Services)
                     if (connectedCards.isNotEmpty()) {
                         item(key = "connected_section_title") {
                             Text(
@@ -737,11 +661,15 @@ fun ConnectedServiceDetailScreen(
     onBack: () -> Unit,
     onConnect: () -> Unit,
     onAddAccount: () -> Unit,
+    onDisconnectAccount: (accountId: String) -> Unit,
     onDisconnect: () -> Unit,
 ) {
     val accounts = status?.accounts.orEmpty()
     val isConnected = status?.connected == true
     val isPending = status?.pending == true
+
+    var confirmDisconnectOpen by remember { mutableStateOf(false) }
+    var pendingDisconnectAccount by remember { mutableStateOf<ConnectorAccount?>(null) }
 
     SettingsSubPage(
         title = card.label,
@@ -867,6 +795,18 @@ fun ConnectedServiceDetailScreen(
                                 color = if (account.isActive) Color(0xFF2E7D32) else Color(0xFFE65100),
                             )
                         }
+
+                        TextButton(
+                            onClick = { pendingDisconnectAccount = account },
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                        ) {
+                            Text(
+                                text = "Remove",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                        }
                     }
 
                     if (index < accounts.lastIndex) {
@@ -897,7 +837,7 @@ fun ConnectedServiceDetailScreen(
                     title = "Disconnect Service",
                     subtitle = "Revoke agent access and delete cached credentials",
                     destructive = true,
-                    onClick = onDisconnect,
+                    onClick = { confirmDisconnectOpen = true },
                 )
             }
         }
@@ -914,6 +854,65 @@ fun ConnectedServiceDetailScreen(
                 subtitle = "Credentials remain securely on your paired computer and are never exposed",
             )
         }
+    }
+
+    if (confirmDisconnectOpen) {
+        AlertDialog(
+            onDismissRequest = { confirmDisconnectOpen = false },
+            title = { Text("Disconnect ${card.label}?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "This will revoke agent access and remove all credentials and accounts associated with ${card.label}.",
+                    fontSize = 13.5.sp,
+                    color = AppTheme.colors.textSecondary,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmDisconnectOpen = false
+                        onDisconnect()
+                    },
+                ) {
+                    Text("Disconnect", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmDisconnectOpen = false }) {
+                    Text("Cancel")
+                }
+            },
+        )
+    }
+
+    pendingDisconnectAccount?.let { acc ->
+        AlertDialog(
+            onDismissRequest = { pendingDisconnectAccount = null },
+            title = { Text("Remove Account?", fontWeight = FontWeight.Bold) },
+            text = {
+                Text(
+                    "Disconnect \"${acc.displayName}\" (${acc.id}) from ${card.label}?",
+                    fontSize = 13.5.sp,
+                    color = AppTheme.colors.textSecondary,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val id = acc.id
+                        pendingDisconnectAccount = null
+                        onDisconnectAccount(id)
+                    },
+                ) {
+                    Text("Remove", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDisconnectAccount = null }) {
+                    Text("Cancel")
+                }
+            },
+        )
     }
 }
 
@@ -1029,16 +1028,42 @@ object ConnectedAppsPolicy {
             previous.copy(credentialStoreUnreadable = true)
         }
 
+    fun removeConnector(previous: ConnectedAppsInventory, slug: String): ConnectedAppsInventory {
+        val current = previous.statuses ?: return previous
+        val next = current.toMutableMap()
+        next.remove(slug)
+        return previous.copy(statuses = next)
+    }
+
+    fun removeAccount(previous: ConnectedAppsInventory, slug: String, accountId: String): ConnectedAppsInventory {
+        val currentStatuses = previous.statuses ?: return previous
+        val currentStatus = currentStatuses[slug] ?: return previous
+        val nextAccounts = currentStatus.accounts?.filter { it.id != accountId } ?: emptyList()
+        val next = currentStatuses.toMutableMap()
+        if (nextAccounts.isEmpty()) {
+            next.remove(slug)
+        } else {
+            next[slug] = currentStatus.copy(accounts = nextAccounts)
+        }
+        return previous.copy(statuses = next)
+    }
+
     /**
-     * The provider's own wire word, made readable —
-     * `status.replacingOccurrences(of: "_", with: " ").capitalized` in
-     * `ios/App/ConnectedAppsView.swift:144`. Case is fixed, not the phone's
-     * locale: these are ASCII protocol words, not prose.
+     * Map connection states to human-facing, truthful status labels.
      */
     fun statusLabel(status: String): String =
-        status.replace('_', ' ').split(' ').joinToString(" ") { word ->
+        status.replace('_', ' ').split(' ').filter { it.isNotBlank() }.joinToString(" ") { word ->
             word.lowercase().replaceFirstChar(Char::uppercaseChar)
         }
+
+    fun statusTone(status: String): StatusTone = when (status.lowercase()) {
+        "connected", "active" -> StatusTone.GOOD
+        "initiated", "pending", "connecting" -> StatusTone.WARN
+        "failed", "error" -> StatusTone.BAD
+        "expired" -> StatusTone.WARN
+        "cancelled", "canceled", "disconnected" -> StatusTone.PLAIN
+        else -> StatusTone.PLAIN
+    }
 
     fun showSetupNotice(catalog: ConnectorCatalog?, credentialStoreUnreadable: Boolean): Boolean =
         catalog?.configured == false && !credentialStoreUnreadable

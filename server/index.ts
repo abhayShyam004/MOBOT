@@ -2,10 +2,11 @@
 // (upstream rule): the React app dispatches typed commands over HTTP and
 // folds one SSE event stream; every provider process runs here.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, rmSync } from "node:fs";
+import { execSync } from "node:child_process";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { basename, extname, join } from "node:path";
+import { extname, join } from "node:path";
 
 import { z } from "zod";
 import { SharedComputers, sharedComputerOperation, sharedComputerRegistration } from "./shared-computers.ts";
@@ -270,7 +271,7 @@ import { narrateTool, toUtterances } from "./tts/speech-text.ts";
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
 import { extractTurnImages } from "./turn-images.ts";
-import { extractTurnFiles, readDocumentPages, resetTurnDocumentRegistry } from "./turn-files.ts";
+import { extractTurnFiles, readDocumentPages } from "./turn-files.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
 import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
 import {
@@ -369,12 +370,24 @@ import { defaultCapabilityRegistry } from "./capabilities/capability-registry.ts
 import { artifactsFromToolOutput, defaultArtifactManager, isUserFacingArtifact } from "./computer-agent/artifact-manager.ts";
 import { readCuaConnection, gatedLocalComputer } from "./local-computer.ts";
 import { extractStructuredContent } from "./structured-extract.ts";
+import { enforceResponseLength } from "./response-length.ts";
 import {
   formatLocationPromptBlock,
   loadUserLocation,
   saveUserLocation,
   disableUserLocation,
 } from "./location-context.ts";
+
+export function stripEmojis(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/\p{Regional_Indicator}{2}/gu, "")
+    .replace(/\p{Extended_Pictographic}/gu, "")
+    .replace(/[\u{1F300}-\u{1F5FF}\u{1F600}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F700}-\u{1F77F}\u{1F780}-\u{1F7FF}\u{1F800}-\u{1F8FF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F1E6}-\u{1F1FF}]/gu, "")
+    .replace(/(?:\u200D|\uFE0E|\uFE0F)/g, "")
+    .replace(/[ ]{2,}/g, " ")
+    .trim();
+}
 
 export function cleanUserFacingText(text: string): string {
   if (!text) return text;
@@ -384,6 +397,7 @@ export function cleanUserFacingText(text: string): string {
   cleaned = cleaned.replace(/\[(?:download\s+the\s+[^\]]+|download\s+[^\]]+)\]\((?:attachment:[^)]+|\/api\/attachments\/[^)]+)\)/gi, "");
   cleaned = cleaned.replace(/!\[[^\]]*\]\(attachment:[a-f0-9-]+\.[a-z0-9]+\)/gi, "");
   cleaned = cleaned.replace(/\s*\*\([^)]*peeking at the filename[^)]*\)\*\s*/gi, "\n");
+  cleaned = stripEmojis(cleaned);
   cleaned = cleaned.replace(/\n{3,}/g, "\n\n").trim();
   return cleaned;
 }
@@ -1884,7 +1898,7 @@ function previewSystemPrompt(bot: BotRecord) {
       computer: previewPlan.computer && previewPlan.computer !== "off" && computerPromptKind ? previewPlan.computer : null,
       browser: previewPlan.computer === undefined ? false : previewPlan.browser,
     }, { note: previewPlan.note }) },
-    { id: "composio", label: "Connected apps", text: caps?.composioMcp && bot.composio !== false && composio.configured(cfg) ? COMPOSIO_PROMPT : "" },
+    { id: "composio", label: "Connected apps", text: caps?.composioMcp && bot.composio !== false && composio.configured(cfg) && cfg.agentPermissions?.composio !== "denied" ? COMPOSIO_PROMPT : "" },
     { id: "mcp", label: "MCP servers", text: caps?.customMcp ? customMcpPrompt(Object.keys(customMcpServers(cfg, bot.mcpServers))) : "" },
     { id: "android-resources", label: "Internet resources", text: caps?.customMcp && customMcpServers(cfg, bot.mcpServers).android_computer ? ANDROID_RESOURCES_PROMPT : "" },
     { id: "android-computer", label: "This phone", text: caps?.customMcp && customMcpServers(cfg, bot.mcpServers).android_computer ? ANDROID_COMPUTER_SYSTEM_PROMPT : "" },
@@ -3767,27 +3781,20 @@ bus.subscribe((event: RuntimeEvent) => {
   }
 });
 
-// A bot that fetched a picture from the web with android_computer's
-// resource_download left an ordinary file in its workspace's downloads/
-// folder. The person sees the transcript, not the bot's disk, so the image
-// arrived as a raw markdown path and never as a picture. Publish anything
-// new that appeared under downloads/ during the turn as a real attachment on
-// the reply — the same shape a generated image uses — so "send me a photo"
-// actually produces one on the phone. Only images, size-capped, and each
-// file published once per process.
-const publishedWorkspaceMedia = new Set<string>();
-const WORKSPACE_MEDIA_WINDOW_MS = 20 * 60_000;
-const WORKSPACE_MEDIA_MAX = 4;
-const WORKSPACE_IMAGE_MIME: Record<string, string> = {
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-};
+// Track when turns start so workspace scans only discover files created
+// during that specific turn, never stale files from earlier turns.
+const turnStartTimes = new Map<string, number>();
+bus.subscribe((event: RuntimeEvent) => {
+  if (event.turnId && (event.type === "item.started" || event.type === "session.started")) {
+    if (!turnStartTimes.has(event.turnId)) turnStartTimes.set(event.turnId, Date.now());
+  }
+});
+
 bus.subscribe((event: RuntimeEvent) => {
   if (shouldIgnoreProviderEvent(event)) return;
   if (event.type !== "turn.completed" || !event.turnId) return;
+  const turnStartTime = turnStartTimes.get(event.turnId);
+  turnStartTimes.delete(event.turnId);
   try {
     const speakerBotId = groupSpeakers.get(event.threadId)?.botId;
     const bot = store.botByThread(event.threadId) ?? (speakerBotId ? store.bot(speakerBotId) : undefined);
@@ -3800,11 +3807,14 @@ bus.subscribe((event: RuntimeEvent) => {
       (message) => message.role === "bot" && message.kind === "text" && message.turnId === event.turnId,
     );
 
-    // Everything this turn already delivered — wherever it was bound — so a
-    // file another route published first is never published a second time.
-    const turnAttached = turnAttachmentKeys(event.threadId, event.turnId);
-    for (const path of turnAttached.paths) seenPaths.add(path);
-    for (const name of turnAttached.names) seenNames.add(name);
+    // Everything this thread already delivered across ANY message or turn, so a
+    // file from Turn N can NEVER be re-published in Turn N+1 unless explicitly reused.
+    for (const msg of store.messagesFor(event.threadId)) {
+      for (const att of msg.attachments ?? []) {
+        if (att.path) seenPaths.add(att.path);
+        if (att.name) seenNames.add(att.name.toLowerCase());
+      }
+    }
     if (response?.attachments) {
       for (const existing of response.attachments) {
         if (existing.path) seenPaths.add(existing.path);
@@ -3838,6 +3848,7 @@ bus.subscribe((event: RuntimeEvent) => {
       const scanned = defaultArtifactManager.scanAndRegisterWorkspaceArtifacts(workspaceRoots, {
         turnId: event.turnId,
         threadId: event.threadId,
+        turnStartTime,
       });
       for (const art of scanned) {
         if (!isUserFacingArtifact(art)) continue;
@@ -3853,51 +3864,6 @@ bus.subscribe((event: RuntimeEvent) => {
           });
         }
       }
-    }
-
-    // 3. Fallback: downloads directory legacy scan for images
-    const roots = [
-      ...(process.env.AC_WORKSPACE ? [join(process.env.AC_WORKSPACE, "downloads")] : []),
-      ...(bot ? [join(workspaceDir(bot.id), "downloads")] : []),
-    ];
-    const cutoff = Date.now() - WORKSPACE_MEDIA_WINDOW_MS;
-    for (const dir of roots) {
-      let names: string[];
-      try {
-        names = readdirSync(dir);
-      } catch {
-        continue;
-      }
-      for (const name of names) {
-        if (published.length >= WORKSPACE_MEDIA_MAX) break;
-        const lowerName = name.toLowerCase();
-        if (seenNames.has(lowerName)) continue;
-
-        const mime = WORKSPACE_IMAGE_MIME[extname(name).toLowerCase()];
-        if (!mime) continue;
-        const absolute = join(dir, name);
-        if (publishedWorkspaceMedia.has(absolute)) continue;
-        publishedWorkspaceMedia.add(absolute);
-        let info;
-        try {
-          info = statSync(absolute);
-        } catch {
-          continue;
-        }
-        if (!info.isFile() || info.mtimeMs < cutoff || info.size > IMAGE_MAX_BYTES) continue;
-        try {
-          const saved = saveImage(readFileSync(absolute), mime);
-          const path = `/api/attachments/${basename(saved.path)}`;
-          if (!seenPaths.has(path) && !seenNames.has(lowerName)) {
-            seenPaths.add(path);
-            seenNames.add(lowerName);
-            published.push({ kind: "image", path, mime: saved.mime, name });
-          }
-        } catch {
-          // one unreadable image never fails a turn
-        }
-      }
-      if (published.length >= WORKSPACE_MEDIA_MAX) break;
     }
 
     if (response) {
@@ -4617,7 +4583,15 @@ bus.subscribe((event: RuntimeEvent) => {
   const speaker = group ? groupSpeakers.get(event.threadId) : undefined;
 
   const pushMessage = (m: Omit<Message, "id" | "at">) => {
-    const message = store.appendMessage(event.threadId, group && m.role === "bot" ? { ...m, from: speaker } : m);
+    let sanitized = m.text ? { ...m, text: stripEmojis(m.text) } : m;
+    if (sanitized.role === "bot" && sanitized.text) {
+      const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
+      sanitized = {
+        ...sanitized,
+        text: enforceResponseLength(sanitized.text, { userPrompt: lastUserPrompt }),
+      };
+    }
+    const message = store.appendMessage(event.threadId, group && m.role === "bot" ? { ...sanitized, from: speaker } : sanitized);
     return message;
   };
 
@@ -4685,16 +4659,18 @@ bus.subscribe((event: RuntimeEvent) => {
           break;
         }
         const { cleanText, structured } = extractStructuredContent(text);
+        const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
+        const boundedText = cleanText ? enforceResponseLength(cleanText, { userPrompt: lastUserPrompt }) : cleanText;
         pushMessage({
           role: "bot",
-          kind: structured && !cleanText ? "structured" : "text",
-          text: cleanText,
+          kind: structured && !boundedText ? "structured" : "text",
+          text: boundedText,
           ...(structured ? { structured } : {}),
           turnId: event.turnId,
         });
         // kept so "finished" can say what it finished with, rather than
         // just that something ended
-        lastReply.set(event.threadId, cleanText);
+        lastReply.set(event.threadId, boundedText);
       } else if (event.itemType === "assistant_image") {
         try {
           const decoded = decodeGeneratedImage(event.data);
@@ -6171,12 +6147,10 @@ async function startTurnAdmission(
     // path-reading drivers retain the attachment tag as their compatibility route.
     // Attached documents (PDF/text) become bounded inline context for every
     // driver: on a phone host nothing can read the attachments dir, so without
-    // this the model saw the tag and never the document.
-    // This message's documents are retrievable by page while its turn runs:
-    // the registry is reset before extraction so stale keys from prior messages
-    // cannot outlive their transcript.
-    resetTurnDocumentRegistry();
-    const resolvedFiles = await extractTurnFiles(text);
+    // Attached documents become bounded inline context for every driver with
+    // cross-turn retention so follow-up messages can refer back to attachments.
+    const priorMessages = store.activePath(threadId);
+    const resolvedFiles = await extractTurnFiles(text, { threadId, priorMessages });
     const resolvedImages = extractTurnImages(resolvedFiles.text);
     return { instance, plan, task, resolvedFiles, resolvedImages, dispatchClaimId, resourceOwner };
   } catch (error) {
@@ -6639,7 +6613,7 @@ async function startTurn(
       // them — a key in the config says the connections exist, not that
       // this engine can reach them — and only to a bot the user has not
       // switched off: the key is workspace-wide, the grant is per bot.
-      if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
+      if (bot.composio !== false && composio.configured(cfg) && cfg.agentPermissions?.composio !== "denied" && instance.adapter.capabilities.composioMcp === true) {
         const connection = await connectedAppsIntegration(bot.id, threadId, dispatchClaimId);
         if (connection) integrations.composio = connection;
       }
@@ -8603,7 +8577,7 @@ async function runGroupMemberTurn(
     integrations.phone = phoneIntegration();
   }
   try {
-    if (bot.composio !== false && composio.configured(cfg) && instance.adapter.capabilities.composioMcp === true) {
+    if (bot.composio !== false && composio.configured(cfg) && cfg.agentPermissions?.composio !== "denied" && instance.adapter.capabilities.composioMcp === true) {
       const connection = await connectedAppsIntegration(bot.id, threadId, internalGeneration);
       if (connection) integrations.composio = connection;
     }
@@ -10878,6 +10852,14 @@ function configStatus() {
     language: cfg.language ?? "",
     // the owner's standing "never stop for approvals" grant, shown as a toggle
     neverAskPermissions: neverAskPermissions(cfg),
+    agentPermissions: {
+      terminal: cfg.agentPermissions?.terminal ?? "granted",
+      filesystem: cfg.agentPermissions?.filesystem ?? "granted",
+      browser: cfg.agentPermissions?.browser ?? "granted",
+      composio: composio.configured(cfg)
+        ? (cfg.agentPermissions?.composio ?? "granted")
+        : "requires_configuration",
+    },
     rooms: { turnTimeoutMinutes: roomTurnTimeoutMinutes(cfg) },
     threads: { maxConcurrentPerBot: maxConcurrentBotThreads(cfg) },
     localVm: {
@@ -13279,7 +13261,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         // Re-read the live bot immediately before relay so turning Connected
         // Apps off wins over a request that authenticated under the old value.
         const currentSender = store.bot(internalCapability.botId);
-        if (!currentSender || currentSender.composio === false || !composio.configured(cfg)) {
+        if (!currentSender || currentSender.composio === false || !composio.configured(cfg) || cfg.agentPermissions?.composio === "denied") {
           return json(res, 403, { error: "connected apps are not enabled for this bot" });
         }
         const upstream = await composio.relayMcp(
@@ -13408,7 +13390,7 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         if (!owner) return json(res, 403, { error: "conversation does not belong to this bot" });
         if (!/^[\w-]{8,100}$/.test(resumeKey)) return json(res, 400, { error: "invalid resume key" });
         if (!items.length || items.length > 12) return json(res, 400, { error: "one to twelve valid connection requests are required" });
-        if (!composio.configured(cfg) || owner.bot.composio === false) {
+        if (!composio.configured(cfg) || owner.bot.composio === false || cfg.agentPermissions?.composio === "denied") {
           return json(res, 409, { error: "connected apps are not enabled for this bot" });
         }
         const connectionState: Record<string, { connected?: boolean }> = await composio.connectionStatus(cfg, slugs).catch(() => ({}));
@@ -18439,6 +18421,30 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const body = await readBody(req);
       const patch = parseConfigPatch(body);
       if (!Object.keys(patch).length) return json(res, 400, { error: "nothing to save" });
+
+      if (patch.agentPermissions) {
+        if (patch.agentPermissions.terminal === "granted") {
+          try {
+            const testCmd = process.platform === "win32" ? "cmd /c echo 1" : "/bin/sh -c 'echo 1'";
+            execSync(testCmd, { timeout: 3000, stdio: "pipe" });
+          } catch (err: any) {
+            return json(res, 400, { error: `Terminal capability cannot be granted: host shell execution failed (${err.message}).` });
+          }
+        }
+        if (patch.agentPermissions.filesystem === "granted") {
+          try {
+            accessSync(DATA_DIR, constants.R_OK | constants.W_OK);
+          } catch (err: any) {
+            return json(res, 400, { error: `Filesystem capability cannot be granted: storage path is not writable (${err.message}).` });
+          }
+        }
+        if (patch.agentPermissions.composio === "granted") {
+          if (!composio.configured(cfg)) {
+            return json(res, 400, { error: "Composio capability cannot be granted without configuration or an API key." });
+          }
+        }
+      }
+
       const changingVoiceProvider = patch.tts?.provider !== undefined
         && patch.tts.provider !== tts.voiceProvider(cfg);
       if (changingVoiceProvider && patch.tts?.voice === undefined) {

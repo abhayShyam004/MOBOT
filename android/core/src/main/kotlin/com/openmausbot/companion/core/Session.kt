@@ -2629,6 +2629,21 @@ class Session(
     }
 
     /**
+     * Update an agent permission state ("granted" or "denied").
+     * Returns the refreshed status on success, null on failure.
+     */
+    suspend fun setAgentPermission(key: String, state: String): ConfigStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.setAgentPermission(key, state)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /**
      * An image a bot attached to its reply, fetched once and cached for the
      * session so a scrolling transcript never re-downloads it. Null when the
      * computer could not be reached — the row simply shows no picture.
@@ -2762,6 +2777,18 @@ class Session(
         val activeClient = client ?: return false
         return try {
             activeClient.removeConnectorService(slug)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
+    suspend fun disconnectConnectorAccount(slug: String, accountId: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.removeConnectorAccount(slug, accountId)
             true
         } catch (error: Throwable) {
             if (error is kotlinx.coroutines.CancellationException) throw error

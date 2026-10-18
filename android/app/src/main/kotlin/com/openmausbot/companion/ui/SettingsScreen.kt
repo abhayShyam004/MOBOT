@@ -159,6 +159,7 @@ fun SettingsScreen(
     var choosingActivity by remember { mutableStateOf(false) }
     var editingQuickReplies by remember { mutableStateOf(false) }
     var neverAskPermissions by remember { mutableStateOf<Boolean?>(null) }
+    var agentPermissions by remember { mutableStateOf<com.openmausbot.companion.core.AgentPermissions?>(null) }
     var savingPermissions by remember { mutableStateOf(false) }
     var cacheClearedMessage by remember { mutableStateOf<String?>(null) }
 
@@ -170,6 +171,7 @@ fun SettingsScreen(
         session.mcp.refresh()
         val config = session.configStatus()
         neverAskPermissions = config?.neverAskPermissions
+        agentPermissions = config?.agentPermissions
         config?.profile?.let { prof ->
             if (prof.name.isNotBlank()) profileName = prof.name
             if (prof.email.isNotBlank()) profileEmail = prof.email
@@ -178,9 +180,10 @@ fun SettingsScreen(
 
     val paired = connection
 
-    if (activeSubPage != null) {
+    val currentSubPage = activeSubPage
+    if (currentSubPage != null) {
         BackHandler { activeSubPage = null }
-        when (activeSubPage) {
+        when (currentSubPage) {
             SettingsSubDestination.APPEARANCE -> {
                 SettingsSubPage(
                     title = "Appearance",
@@ -380,30 +383,92 @@ fun SettingsScreen(
                         )
                     }
 
-                    SettingsSection(title = "Active Capabilities") {
+                    val perms = agentPermissions ?: com.openmausbot.companion.core.AgentPermissions()
+                    fun formatPermissionState(state: String): String = when (state.lowercase()) {
+                        "granted" -> "Granted"
+                        "denied" -> "Denied"
+                        "restricted" -> "Restricted"
+                        "requires_configuration" -> "Requires configuration"
+                        else -> state.replaceFirstChar { it.uppercase() }
+                    }
+
+                    SettingsSection(title = "Core Capabilities & Permissions") {
+                        val terminalState = perms.terminal
                         SettingsRow(
                             title = "Terminal & Shell Execution",
                             subtitle = "Sandboxed command-line operations on paired host",
-                            trailingValue = "Granted",
+                            trailingValue = formatPermissionState(terminalState),
+                            checked = terminalState == "granted",
+                            onCheckedChange = { isGranted ->
+                                val next = if (isGranted) "granted" else "denied"
+                                scope.launch {
+                                    session.setAgentPermission("terminal", next)?.let {
+                                        agentPermissions = it.agentPermissions
+                                    }
+                                }
+                            },
                         )
                         SettingsDivider()
+                        val filesystemState = perms.filesystem
                         SettingsRow(
                             title = "Filesystem Read & Write",
                             subtitle = "Access workspace files, codebases, and assets",
-                            trailingValue = "Granted",
+                            trailingValue = formatPermissionState(filesystemState),
+                            checked = filesystemState == "granted",
+                            onCheckedChange = { isGranted ->
+                                val next = if (isGranted) "granted" else "denied"
+                                scope.launch {
+                                    session.setAgentPermission("filesystem", next)?.let {
+                                        agentPermissions = it.agentPermissions
+                                    }
+                                }
+                            },
                         )
                         SettingsDivider()
+                        val browserState = perms.browser
                         SettingsRow(
                             title = "Browser & Network",
                             subtitle = "Inspect URLs, search web, and fetch REST endpoints",
-                            trailingValue = "Granted",
+                            trailingValue = formatPermissionState(browserState),
+                            checked = browserState == "granted",
+                            onCheckedChange = { isGranted ->
+                                val next = if (isGranted) "granted" else "denied"
+                                scope.launch {
+                                    session.setAgentPermission("browser", next)?.let {
+                                        agentPermissions = it.agentPermissions
+                                    }
+                                }
+                            },
                         )
                         SettingsDivider()
-                        SettingsRow(
-                            title = "Composio Integrations",
-                            subtitle = "Automate connected services and cloud APIs",
-                            trailingValue = "Granted",
-                        )
+                        val composioState = perms.composio
+                        if (composioState == "requires_configuration") {
+                            SettingsRow(
+                                title = "Composio Integrations",
+                                subtitle = "Automate connected services (API key required)",
+                                trailingValue = "Requires configuration",
+                                showChevron = true,
+                                onClick = {
+                                    activeSubPage = null
+                                    onOpenConnectedApps?.invoke()
+                                },
+                            )
+                        } else {
+                            SettingsRow(
+                                title = "Composio Integrations",
+                                subtitle = "Automate connected services and cloud APIs",
+                                trailingValue = formatPermissionState(composioState),
+                                checked = composioState == "granted",
+                                onCheckedChange = { isGranted ->
+                                    val next = if (isGranted) "granted" else "denied"
+                                    scope.launch {
+                                        session.setAgentPermission("composio", next)?.let {
+                                            agentPermissions = it.agentPermissions
+                                        }
+                                    }
+                                },
+                            )
+                        }
                     }
 
                     if (onOpenSpecializedCapabilities != null) {
@@ -623,7 +688,6 @@ fun SettingsScreen(
                     }
                 }
             }
-            null -> Unit
         }
     } else {
         Column(
@@ -752,8 +816,8 @@ fun SettingsScreen(
                 )
             }
 
-            // Section 2: Agents
-            SettingsGroupContainer(title = "Agents") {
+            // Section 2: AI & Agents
+            SettingsGroupContainer(title = "AI & Agents") {
                 SettingsItemRow(
                     iconType = SettingsMascotIconType.MANAGE_AGENTS,
                     title = "Manage Agents",
@@ -763,10 +827,17 @@ fun SettingsScreen(
                 SettingsRowDivider()
                 SettingsItemRow(
                     iconType = SettingsMascotIconType.DEFAULT_AGENT,
-                    title = "Default Agent",
-                    subtitle = "Choose which agent opens by default",
-                    trailingValue = "Grok",
+                    title = "Model Providers",
+                    subtitle = "Claude, OpenAI, Gemini, Grok, and local models",
+                    trailingValue = null,
                     onClick = { onOpenModelProviders?.invoke() },
+                )
+                SettingsRowDivider()
+                SettingsItemRow(
+                    iconType = SettingsMascotIconType.SPECIALIZED_CAPABILITIES,
+                    title = "Specialized Capabilities",
+                    subtitle = "Image, video, audio, and multimodal intelligence",
+                    onClick = { onOpenSpecializedCapabilities?.invoke() },
                 )
                 SettingsRowDivider()
                 SettingsItemRow(
@@ -1234,6 +1305,7 @@ enum class SettingsMascotIconType {
     DATA_STORAGE,
     MANAGE_AGENTS,
     DEFAULT_AGENT,
+    SPECIALIZED_CAPABILITIES,
     AGENT_PERMISSIONS,
     ACCOUNT,
     CONNECTED_SERVICES,
@@ -1362,6 +1434,16 @@ internal fun SettingsMascotIcon(
                     strokeWidth = w * 0.12f,
                     cap = StrokeCap.Round,
                 )
+            }
+            SettingsMascotIconType.SPECIALIZED_CAPABILITIES -> {
+                val bg = Color(0xFFFF8F00)
+                drawRoundRect(
+                    color = bg,
+                    cornerRadius = CornerRadius(w * 0.28f, w * 0.28f),
+                )
+                val eyeR = w * 0.08f
+                drawCircle(color = Color.White, radius = eyeR, center = Offset(w * 0.38f, h * 0.5f))
+                drawCircle(color = Color.White, radius = eyeR, center = Offset(w * 0.62f, h * 0.5f))
             }
             SettingsMascotIconType.AGENT_PERMISSIONS -> {
                 val bg = Color(0xFF5E35B1)

@@ -1042,11 +1042,13 @@ private fun LoadedChat(
                 }
 
                 val currentMood = remember(chat.busy, pendingApproval, reasoning, rawTranscript) {
+                    val lastMsg = rawTranscript.lastOrNull()
                     BotMoodRules.resolve(
                         busy = chat.busy,
                         hasPendingApproval = pendingApproval,
                         hasReasoning = !reasoning.isNullOrBlank(),
-                        lastMessage = rawTranscript.lastOrNull(),
+                        toolName = lastMsg?.tool?.name,
+                        lastMessage = lastMsg,
                     )
                 }
 
@@ -1368,11 +1370,7 @@ private fun ChatEmptyState(
             fontWeight = FontWeight.Bold,
             color = AppTheme.colors.textPrimary,
         )
-        val tagline = if (chat.subtitle.isNotBlank()) {
-            chat.subtitle
-        } else {
-            "Ready to assist with code, tasks, and system automation"
-        }
+        val tagline = chat.subtitle.ifBlank { "Standing by" }
         Spacer(Modifier.height(6.dp))
         Text(
             text = tagline,
@@ -1383,9 +1381,9 @@ private fun ChatEmptyState(
         )
         Spacer(Modifier.height(28.dp))
         val starters = listOf(
-            "What can you do?",
-            "Explain how this project works",
-            "Show recent changes",
+            "Inspect workspace status",
+            "Review recent changes",
+            "Search documentation",
         )
         Column(
             modifier = Modifier.fillMaxWidth(),
@@ -1612,8 +1610,14 @@ private fun ChatIdentity(
         }
     }
     val subtitleText = when {
-        chat.busy -> "Thinking…"
+        chat.busy -> when (mood) {
+            BotMood.RESEARCHING -> "Searching…"
+            BotMood.WORKING -> "Working…"
+            else -> "Thinking…"
+        }
         hasThreads && (chat as? Chat.BotChat)?.bot?.tasks?.isNotEmpty() == true -> chat.threadTitle
+        chat.subtitle.isNotBlank() -> chat.subtitle
+        (chat as? Chat.BotChat)?.bot?.title?.isNotBlank() == true -> (chat as Chat.BotChat).bot.title
         timeStamp.isNotEmpty() -> timeStamp
         else -> "Active"
     }
@@ -2198,7 +2202,7 @@ private fun ActionableComposerErrorCard(
                     contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
                 ) {
                     Text(
-                        text = "View Remedies & Details ➔",
+                        text = "View Remedies & Details",
                         fontSize = 12.sp,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.primary,

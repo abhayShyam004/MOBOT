@@ -379,6 +379,16 @@ class CompanionClient(
         ),
     )
 
+    suspend fun setAgentPermission(key: String, state: String): ConfigStatus = send(
+        makeRequest(
+            "PATCH",
+            "/api/config",
+            body = buildJsonObject {
+                put("agentPermissions", buildJsonObject { put(key, state) })
+            },
+        ),
+    )
+
     /**
      * Save the workspace OpenAI-compatible endpoint and key. The key is
      * write-only: every read reports configured-or-not, never the secret.
@@ -712,6 +722,12 @@ class CompanionClient(
     suspend fun removeConnectorService(slug: String) {
         if (!validConnectorSlug(slug)) throw APIError.BadUrl
         sendUnit(makeRequest("DELETE", "/api/connectors/$slug"))
+    }
+
+    /** Disconnect a specific account alias or ID for [slug]. */
+    suspend fun removeConnectorAccount(slug: String, accountId: String) {
+        if (!validConnectorSlug(slug)) throw APIError.BadUrl
+        sendUnit(makeRequest("DELETE", "/api/connectors/$slug/accounts/${segment(accountId)}"))
     }
 
     suspend fun image(threadId: String, messageId: String): ByteArray {

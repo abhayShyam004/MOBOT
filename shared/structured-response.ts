@@ -34,7 +34,9 @@ export type StructuredComponentType =
   | "media"
   | "card"
   | "sources"
-  | "product";
+  | "product"
+  | "result"
+  | "text";
 
 export interface ComponentAction {
   id: string;
@@ -449,6 +451,63 @@ export interface ProductComponentData {
   actionLabel?: string;
 }
 
+// ── Research Result Card ──
+export type ResearchResultType =
+  | "job"
+  | "product"
+  | "service"
+  | "hotel"
+  | "restaurant"
+  | "software"
+  | "course"
+  | "event"
+  | "travel"
+  | "company"
+  | "general";
+
+export interface ResearchResultProvenance {
+  sourceUrl?: string;
+  sourceType?: string;
+  retrievalTimestamp?: number;
+  extractedFields?: string[];
+  verified?: boolean;
+}
+
+export interface ResearchResultComponentData {
+  resultType?: ResearchResultType | string;
+  title: string;
+  subtitle?: string;
+  description?: string;
+  imageUrl?: string;
+  source?: string;
+  sourceDomain?: string;
+  sourceUrl?: string;
+  url?: string;
+  actionLabel?: string;
+  actionUrl?: string;
+  price?: string;
+  currency?: string;
+  salary?: string;
+  location?: string;
+  company?: string;
+  rating?: number;
+  reviewsCount?: number;
+  metadata?: Record<string, string>;
+  reason?: string;
+  matchScore?: number;
+  tags?: string[];
+  details?: string[];
+  badge?: string;
+  provenance?: ResearchResultProvenance;
+  timestamp?: number;
+}
+
+// ── Prose / Text Section ──
+export interface TextComponentData {
+  text: string;
+  format?: "markdown" | "plain";
+}
+
 // ── Structured Component Envelope ──
 export interface StructuredComponent {
   id: string;
@@ -631,6 +690,21 @@ export const STRUCTURED_COMPONENT_REGISTRY: Record<StructuredComponentType, Comp
     schemaVersion: 1,
     semanticPurpose: "Rich product cards with image, price, specs, rating, retailer, and direct action link.",
     supportedInteractions: ["open_product", "view_details"],
+    mobileLayout: "compact",
+  },
+  result: {
+    type: "result",
+    schemaVersion: 1,
+    semanticPurpose: "Generic rich research result cards (jobs, products, services, hotels, courses, software, events) with metadata, specs, verified action button, and match rationale.",
+    supportedInteractions: ["open_action", "view_details"],
+    mobileLayout: "compact",
+    viewSwitchableTo: ["card", "comparison"],
+  },
+  text: {
+    type: "text",
+    schemaVersion: 1,
+    semanticPurpose: "Interleaved prose and markdown sections flowing between structured components.",
+    supportedInteractions: [],
     mobileLayout: "compact",
   },
 };
@@ -1151,27 +1225,139 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
       }
 
       case "product": {
-        const prod = comp.data as ProductComponentData | undefined;
-        if (!prod || !prod.name) {
-          errors.push(`Component '${compId}' (product) missing product name.`);
+        const prod = comp.data as (ProductComponentData & Record<string, unknown>) | undefined;
+        const resData = comp.data as (ResearchResultComponentData & Record<string, unknown>) | undefined;
+        const prodTitle = sanitizeString(prod?.name || resData?.title || comp.title);
+        if (!prodTitle) {
+          errors.push(`Component '${compId}' (product) missing product name or title.`);
           break;
         }
+
+        // If data aligns with rich research result shape (has resultType, company, tags, or used title instead of name)
+        if (resData?.resultType || resData?.company || resData?.tags || (!prod?.name && resData?.title)) {
+          sanitizedComp.type = "result";
+          const actionUrl = sanitizeUrl(resData?.actionUrl || resData?.sourceUrl || resData?.url || prod?.sourceUrl);
+          const sourceUrl = sanitizeUrl(resData?.sourceUrl || resData?.url || resData?.actionUrl || prod?.sourceUrl);
+          const source = sanitizeString(resData?.source || prod?.retailer || prod?.brand || resData?.company);
+          let sourceDomain = sanitizeString(resData?.sourceDomain);
+          if (!sourceDomain && sourceUrl) {
+            try {
+              sourceDomain = new URL(sourceUrl, "https://example.com").hostname.replace(/^www\./, "");
+            } catch {
+              // Keep empty if invalid URL
+            }
+          }
+
+          sanitizedComp.data = {
+            resultType: sanitizeString(resData?.resultType) || "product",
+            title: prodTitle,
+            subtitle: sanitizeString(resData?.subtitle || comp.subtitle || prod?.brand),
+            description: sanitizeString(resData?.description || comp.description),
+            imageUrl: sanitizeUrl(resData?.imageUrl || prod?.imageUrl),
+            source,
+            sourceDomain,
+            sourceUrl,
+            actionLabel: sanitizeString(resData?.actionLabel || prod?.actionLabel) || "View product",
+            actionUrl,
+            price: sanitizeString(resData?.price || prod?.price),
+            currency: sanitizeString(resData?.currency),
+            location: sanitizeString(resData?.location),
+            company: sanitizeString(resData?.company || prod?.retailer || prod?.brand),
+            rating: typeof (resData?.rating ?? prod?.rating) === "number" ? Math.min(5, Math.max(0, (resData?.rating ?? prod?.rating)!)) : undefined,
+            reviewsCount: typeof (resData?.reviewsCount ?? prod?.reviewsCount) === "number" ? Math.max(0, Math.floor((resData?.reviewsCount ?? prod?.reviewsCount)!)) : undefined,
+            metadata: (resData?.metadata || prod?.metadata) as Record<string, string> | undefined,
+            reason: sanitizeString(resData?.reason || prod?.reason),
+            matchScore: typeof resData?.matchScore === "number" ? resData.matchScore : undefined,
+            tags: Array.isArray(resData?.tags) ? resData.tags.slice(0, 15).map(t => sanitizeString(t) || "").filter(Boolean) : (Array.isArray(prod?.details) ? prod.details.slice(0, 15).map(d => sanitizeString(d) || "").filter(Boolean) : undefined),
+            details: Array.isArray(resData?.details) ? resData.details.slice(0, 15).map(d => sanitizeString(d) || "").filter(Boolean) : (Array.isArray(prod?.details) ? prod.details.slice(0, 15).map(d => sanitizeString(d) || "").filter(Boolean) : undefined),
+            badge: sanitizeString(resData?.badge || prod?.badge),
+          };
+          sanitizedComponents.push(sanitizedComp);
+          break;
+        }
+
         sanitizedComp.data = {
-          name: sanitizeString(prod.name) || "Product",
-          brand: sanitizeString(prod.brand),
-          price: sanitizeString(prod.price),
-          rating: typeof prod.rating === "number" ? Math.min(5, Math.max(0, prod.rating)) : undefined,
-          reviewsCount: typeof prod.reviewsCount === "number" ? prod.reviewsCount : undefined,
-          retailer: sanitizeString(prod.retailer),
-          sourceUrl: sanitizeUrl(prod.sourceUrl),
-          imageUrl: sanitizeUrl(prod.imageUrl),
-          reason: sanitizeString(prod.reason),
-          details: Array.isArray(prod.details)
+          name: prodTitle,
+          brand: sanitizeString(prod?.brand),
+          price: sanitizeString(prod?.price),
+          rating: typeof prod?.rating === "number" ? Math.min(5, Math.max(0, prod.rating)) : undefined,
+          reviewsCount: typeof prod?.reviewsCount === "number" ? prod.reviewsCount : undefined,
+          retailer: sanitizeString(prod?.retailer),
+          sourceUrl: sanitizeUrl(prod?.sourceUrl),
+          imageUrl: sanitizeUrl(prod?.imageUrl),
+          reason: sanitizeString(prod?.reason),
+          details: Array.isArray(prod?.details)
             ? prod.details.slice(0, 10).map((d) => sanitizeString(d) || "").filter(Boolean)
             : undefined,
-          badge: sanitizeString(prod.badge),
-          metadata: prod.metadata,
-          actionLabel: sanitizeString(prod.actionLabel) || "View product",
+          badge: sanitizeString(prod?.badge),
+          metadata: prod?.metadata,
+          actionLabel: sanitizeString(prod?.actionLabel) || "View product",
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
+      case "result": {
+        const res = comp.data as (ResearchResultComponentData & Record<string, unknown>) | undefined;
+        const resTitle = sanitizeString(res?.title || res?.name || comp.title);
+        if (!resTitle) {
+          errors.push(`Component '${compId}' (result) missing title.`);
+          break;
+        }
+        const actionUrl = sanitizeUrl(res?.actionUrl || res?.sourceUrl || res?.url);
+        const sourceUrl = sanitizeUrl(res?.sourceUrl || res?.url || res?.actionUrl);
+        const source = sanitizeString(res?.source || res?.company || res?.retailer || res?.brand);
+        let sourceDomain = sanitizeString(res?.sourceDomain);
+        if (!sourceDomain && sourceUrl) {
+          try {
+            sourceDomain = new URL(sourceUrl, "https://example.com").hostname.replace(/^www\./, "");
+          } catch {
+            // Keep empty if invalid URL
+          }
+        }
+
+        sanitizedComp.data = {
+          resultType: sanitizeString(res?.resultType) || "general",
+          title: resTitle,
+          subtitle: sanitizeString(res?.subtitle || comp.subtitle || res?.brand),
+          description: sanitizeString(res?.description || comp.description),
+          imageUrl: sanitizeUrl(res?.imageUrl),
+          source,
+          sourceDomain,
+          sourceUrl,
+          actionLabel: sanitizeString(res?.actionLabel) || (actionUrl ? "View" : undefined),
+          actionUrl,
+          price: sanitizeString(res?.price),
+          currency: sanitizeString(res?.currency),
+          salary: sanitizeString(res?.salary),
+          location: sanitizeString(res?.location),
+          company: sanitizeString(res?.company || res?.retailer || res?.brand),
+          rating: typeof res?.rating === "number" && !isNaN(res.rating) ? Math.min(5, Math.max(0, res.rating)) : undefined,
+          reviewsCount: typeof res?.reviewsCount === "number" && !isNaN(res.reviewsCount) ? Math.max(0, Math.floor(res.reviewsCount)) : undefined,
+          metadata: res?.metadata && typeof res.metadata === "object" ? res.metadata : undefined,
+          reason: sanitizeString(res?.reason),
+          matchScore: typeof res?.matchScore === "number" && !isNaN(res.matchScore) ? res.matchScore : undefined,
+          tags: Array.isArray(res?.tags) ? res.tags.slice(0, 15).map(t => sanitizeString(t) || "").filter(Boolean) : undefined,
+          details: Array.isArray(res?.details) ? res.details.slice(0, 15).map(d => sanitizeString(d) || "").filter(Boolean) : undefined,
+          badge: sanitizeString(res?.badge),
+          provenance: res?.provenance && typeof res.provenance === "object" ? {
+            sourceUrl: sanitizeUrl(res.provenance.sourceUrl),
+            sourceType: sanitizeString(res.provenance.sourceType),
+            retrievalTimestamp: typeof res.provenance.retrievalTimestamp === "number" ? res.provenance.retrievalTimestamp : undefined,
+            verified: Boolean(res.provenance.verified),
+          } : undefined,
+          timestamp: typeof res?.timestamp === "number" ? res.timestamp : undefined,
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
+      case "text": {
+        const txt = comp.data as TextComponentData | undefined;
+        const bodyText = typeof txt?.text === "string" ? txt.text : typeof comp.data === "string" ? comp.data : "";
+        sanitizedComp.data = {
+          text: sanitizeString(bodyText) || "",
+          format: txt?.format === "plain" ? "plain" : "markdown",
         };
         sanitizedComponents.push(sanitizedComp);
         break;

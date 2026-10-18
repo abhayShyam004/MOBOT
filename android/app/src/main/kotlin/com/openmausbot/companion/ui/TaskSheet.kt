@@ -199,7 +199,7 @@ fun TaskSheet(chat: Chat, onDismiss: () -> Unit, onSelectTask: (ChatTarget) -> U
                         group.project?.let { project ->
                             item(key = group.id) {
                                 Text(
-                                    "${project.emoji ?: "📁"} ${project.name}", color = secondaryTint,
+                                    project.name, color = secondaryTint,
                                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 8.dp),
                                 )
                             }

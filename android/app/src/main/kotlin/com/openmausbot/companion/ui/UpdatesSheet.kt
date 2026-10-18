@@ -198,7 +198,7 @@ internal fun UpdatesSheet(
                             }
                             .padding(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Text("⚡ Smart Recap", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                        Text("Smart Recap", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
                     }
 
                     Box(
@@ -212,7 +212,7 @@ internal fun UpdatesSheet(
                             }
                             .padding(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Text("☀️ Daily Briefing", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                        Text("Daily Briefing", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
                     }
 
                     Box(
@@ -226,7 +226,7 @@ internal fun UpdatesSheet(
                             }
                             .padding(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Text("🔍 Search", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                        Text("Search", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
                     }
 
                     Box(
@@ -240,7 +240,7 @@ internal fun UpdatesSheet(
                             }
                             .padding(horizontal = 12.dp, vertical = 6.dp),
                     ) {
-                        Text("📥 Capture", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                        Text("Capture", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
                     }
                 }
             }

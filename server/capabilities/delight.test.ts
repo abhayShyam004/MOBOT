@@ -279,7 +279,7 @@ describe("Phase V: Delight Features & Contextual Surfaces", () => {
       ]);
 
       // Verify shareText
-      expect(result.shareText).toContain("✨ Task Complete: Build E-Commerce Web App");
+      expect(result.shareText).toContain("Task Complete: Build E-Commerce Web App");
       expect(result.shareText).toContain("Files created");
       expect(result.shareText).toContain("14.8s");
 

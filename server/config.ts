@@ -321,6 +321,18 @@ const defaultModelSelectionSchema = z.object({
   variant: z.string().refine(isModelVariant, "invalid model variant").optional(),
 }).refine((selection) => selection.variant === undefined || selection.effort === undefined,
   "choose either a model variant or an effort level");
+
+export const AGENT_PERMISSION_STATES = ["granted", "denied", "restricted", "requires_configuration"] as const;
+export type AgentPermissionState = (typeof AGENT_PERMISSION_STATES)[number];
+
+export const agentPermissionsSchema = z.object({
+  terminal: z.enum(AGENT_PERMISSION_STATES).optional(),
+  filesystem: z.enum(AGENT_PERMISSION_STATES).optional(),
+  browser: z.enum(AGENT_PERMISSION_STATES).optional(),
+  composio: z.enum(AGENT_PERMISSION_STATES).optional(),
+});
+export type AgentPermissionsConfig = z.infer<typeof agentPermissionsSchema>;
+
 const appConfigSchema = z.object({
   /** Verified by the dedicated domain endpoint, never a generic config patch. */
   customDomain: z.string().optional(),
@@ -460,6 +472,7 @@ const appConfigSchema = z.object({
   /** CDP attach target for a bot's browser; see browserEngineConfigSchema. */
   browserEngine: browserEngineConfigSchema.optional(),
   browserProfiles: browserProfilesSchema.optional(),
+  agentPermissions: agentPermissionsSchema.optional(),
   instances: instanceConfigMapSchema.optional(),
   /** User-configured MCP servers, mounted into every capable engine. Kept
    * loosely typed HERE on purpose: parseStoredConfig throws away the whole
@@ -515,6 +528,7 @@ export interface AppConfig {
    * e.g. "9333", or an http(s)/ws(s) URL). When set, a bot's browser
    * attaches to it instead of agent-browser spawning its own (#1396). */
   browserEngine?: { attachCdpUrl?: string };
+  agentPermissions?: AgentPermissionsConfig;
   instances?: InstanceConfigMap;
 }
 export type BrowserProfile = z.output<typeof browserProfileSchema> & {
@@ -963,7 +977,7 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   // back after we have successfully recognized the legacy list.
   const storedProfiles = storedBrowserProfilesSchema.safeParse(disk.browserProfiles);
   if (storedProfiles.success) disk.browserProfiles = storedProfiles.data;
-  for (const key of ["xai", "anthropic", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "localVm", "features", "budgets", "billing", "onboarding", "browserEngine"] as const) {
+  for (const key of ["xai", "anthropic", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "localVm", "features", "budgets", "billing", "onboarding", "browserEngine", "agentPermissions"] as const) {
     const section = checkedPatch[key];
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);

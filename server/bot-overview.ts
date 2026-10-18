@@ -577,6 +577,42 @@ function buildAutomations(facts: OverviewFacts): AutomationOverview[] {
   return automations;
 }
 
+function humanizeServiceName(raw: string): string {
+  const norm = raw.toLowerCase().trim();
+  switch (norm) {
+    case "google_maps":
+    case "google-maps":
+      return "Google Maps";
+    case "googledrive":
+    case "google_drive":
+    case "google-drive":
+      return "Google Drive";
+    case "gmail":
+      return "Gmail";
+    case "neon_mcp":
+    case "neon":
+      return "Neon";
+    case "supabase":
+      return "Supabase";
+    case "firecrawl":
+      return "Firecrawl";
+    case "github":
+      return "GitHub";
+    case "slack":
+      return "Slack";
+    case "notion":
+      return "Notion";
+    default: {
+      const stripped = norm.replace(/_mcp$/i, "");
+      return stripped
+        .split(/[_-]+/)
+        .filter(Boolean)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+        .join(" ");
+    }
+  }
+}
+
 function buildAbilities(facts: OverviewFacts): AbilityOverview[] {
   const abilities: AbilityOverview[] = [
     {
@@ -620,7 +656,7 @@ function buildAbilities(facts: OverviewFacts): AbilityOverview[] {
     for (const service of facts.connectedApps.services) {
       abilities.push({
         id: `connected_${service}`,
-        name: service.charAt(0).toUpperCase() + service.slice(1),
+        name: humanizeServiceName(service),
         description: `Connected third-party service integration via Composio`,
         available: true,
         category: "connected",

@@ -388,7 +388,7 @@ fun QuickCaptureSheet(
                 ) {
                     Column {
                         Text(
-                            text = "✓ Context Captured Successfully",
+                            text = "Context Captured Successfully",
                             fontSize = 15.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color(0xFF10B981),

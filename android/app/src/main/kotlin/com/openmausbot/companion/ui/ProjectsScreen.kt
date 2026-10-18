@@ -695,7 +695,7 @@ fun DeployProjectDialog(
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         AppPill(
-                            text = "Connect in Connected Apps ➔",
+                            text = "Connect in Connected Apps",
                             tone = PillTone.Raised,
                             onClick = onOpenAccounts,
                         )
@@ -1017,8 +1017,8 @@ fun ProjectLogsDialog(
 @Composable
 private fun EmptyProjectsView(modifier: Modifier = Modifier) {
     AppEmptyState(
-        title = "No Applications Built Yet",
-        message = "Ask MOBOT to build an app for you in any chat! Supported stacks include React, Next.js, Node.js, and HTML.",
+        title = "No projects yet",
+        message = "Projects generated or running on this device will appear here.",
         modifier = modifier,
     )
 }

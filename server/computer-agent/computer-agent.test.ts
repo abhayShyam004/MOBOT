@@ -7,7 +7,7 @@ import { SystemVerifier } from "./verification.ts";
 import { TaskOrchestrator } from "./orchestrator.ts";
 import { COMPUTER_AGENT_TOOLS } from "./agent-tools.ts";
 import http from "node:http";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deflateSync } from "node:zlib";
@@ -576,6 +576,34 @@ describe("General-Purpose Computer Agent Layer", () => {
       expect(discovered.length).toBe(2);
       expect(discovered.some((d: any) => d.kind === "image")).toBe(true);
       expect(discovered.some((d: any) => d.kind === "pdf")).toBe(true);
+    });
+
+    it("never rediscovers already delivered artifacts on subsequent turns", () => {
+      const tempDir = join(tmpdir(), `omb-artifact-turn-isolation-${Date.now()}-${Math.random()}`);
+      mkdirSync(tempDir, { recursive: true });
+      const { ArtifactManager } = require("./artifact-manager.ts");
+      const manager = new ArtifactManager();
+
+      const downloadsDir = join(tempDir, "downloads");
+      mkdirSync(downloadsDir, { recursive: true });
+
+      const imgPath = join(downloadsDir, "guess.png");
+      writeFileSync(imgPath, createTestPng(320, 240));
+
+      // Turn 1 discovers the file
+      const turn1Discovered = manager.scanAndRegisterWorkspaceArtifacts([tempDir], {
+        turnId: "turn-1",
+        threadId: "thread-1",
+      });
+      expect(turn1Discovered.length).toBe(1);
+
+      // Turn 2 (e.g. user says "hello" or another turn with no new files)
+      const turn2Discovered = manager.scanAndRegisterWorkspaceArtifacts([tempDir], {
+        turnId: "turn-2",
+        threadId: "thread-1",
+      });
+      expect(turn2Discovered.length).toBe(0);
+      expect(manager.getArtifactsForTurn("turn-2")).toEqual([]);
     });
 
     it("binds artifact_register results to the turn that produced them", () => {

@@ -33,7 +33,7 @@ class BotThreadTreeTest {
 
     private val fixture = bot().copy(
         threadId = "main",
-        projects = listOf(BotProject(id = "launch", name = "Launch", emoji = "🚀")),
+        projects = listOf(BotProject(id = "launch", name = "Launch", emoji = null)),
         tasks = listOf(
             BotTask(threadId = "second", title = "Release notes", createdAt = 0.0, projectId = "launch"),
             BotTask(

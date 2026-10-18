@@ -100,10 +100,19 @@ class AlwaysOnConnectionService : Service() {
 
         /** Idempotent: `ContextCompat.startForegroundService` is safe to call while already running. */
         fun start(context: Context) {
-            androidx.core.content.ContextCompat.startForegroundService(
-                context,
-                Intent(context, AlwaysOnConnectionService::class.java),
-            )
+            try {
+                androidx.core.content.ContextCompat.startForegroundService(
+                    context,
+                    Intent(context, AlwaysOnConnectionService::class.java),
+                )
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "Could not start as foreground service directly: ${e.message}")
+                try {
+                    context.startService(Intent(context, AlwaysOnConnectionService::class.java))
+                } catch (e2: Exception) {
+                    android.util.Log.e(TAG, "Failed to start AlwaysOnConnectionService: ${e2.message}")
+                }
+            }
         }
 
         fun stop(context: Context) {

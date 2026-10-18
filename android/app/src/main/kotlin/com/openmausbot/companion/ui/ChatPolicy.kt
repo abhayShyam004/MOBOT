@@ -503,8 +503,30 @@ object MessageActions {
         // A connection card has its own buttons; what it says is not text
         // worth copying to the clipboard.
         Message.Kind.CONNECTOR -> null
-        Message.Kind.STRUCTURED -> message.text
-            ?: message.structured?.components?.joinToString("\n\n") { it.title ?: it.type }
+        Message.Kind.STRUCTURED -> message.text?.takeIf { it.isNotBlank() }
+            ?: message.structured?.components?.mapNotNull { comp ->
+                when (comp.type) {
+                    "text" -> {
+                        val json = comp.data as? kotlinx.serialization.json.JsonObject
+                        (json?.get("text") as? kotlinx.serialization.json.JsonPrimitive)?.content
+                            ?: comp.title
+                    }
+                    "result" -> {
+                        val json = comp.data as? kotlinx.serialization.json.JsonObject
+                        if (json != null) {
+                            val title = (json["title"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                            val company = (json["company"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                            val cost = (json["salary"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                                ?: (json["price"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                            val url = (json["actionUrl"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                            listOfNotNull(title, company, cost, url).joinToString(" · ").takeIf { it.isNotBlank() }
+                        } else {
+                            comp.title ?: "Result"
+                        }
+                    }
+                    else -> comp.title ?: comp.type
+                }
+            }?.joinToString("\n\n")?.takeIf { it.isNotBlank() }
     }
 
     /**
@@ -524,7 +546,7 @@ object MessageActions {
 data class ReactionGroup(val emoji: String, val count: Int, val mine: Boolean)
 
 object Reactions {
-    val CHOICES: List<String> = listOf("👍", "❤️", "😂", "🎉", "👀")
+    val CHOICES: List<String> = emptyList()
 
     fun group(reactions: List<Reaction>): List<ReactionGroup> =
         reactions.groupBy { it.emoji }
@@ -736,3 +758,42 @@ object ComposerAccessories {
         else -> ComposerAccessory.NONE
     }
 }
+
+/**
+ * Global Response Length Invariant for MOBOT.
+ *
+ * Every bot in MOBOT must keep normal conversational responses under 100 words (0-99 words).
+ * Exceptions apply only when:
+ * 1. The user explicitly asks for a detailed/longer answer.
+ * 2. The response genuinely contains code, reports, tables, or document artifacts.
+ * Structured UI components (result cards, option cards, attachments) are excluded from the word count.
+ */
+object ResponseLengthPolicy {
+    const val DEFAULT_MAX_WORDS: Int = 99
+
+    fun countWords(text: String): Int {
+        if (text.isBlank()) return 0
+        val stripped = text.replace(Regex("```(?:structured|json:structured)[\\s\\S]*?```"), "").trim()
+        if (stripped.isBlank()) return 0
+        return stripped.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+    }
+
+    fun isDetailedException(userPrompt: String?): Boolean {
+        if (userPrompt.isNullOrBlank()) return false
+        val pattern = Regex(
+            "\\b(explain in detail|in-depth|in depth|full explanation|comprehensive|detailed|deep dive|elaborate|thoroughly|don't keep it short|dont keep it short|give me everything|all details|step by step|complete guide|write a (report|doc|document|code|script|essay|story|article|poem|summary report|table)|generate code|write code|show code|show me the code|full code|table of|markdown table|transcript)\\b",
+            RegexOption.IGNORE_CASE
+        )
+        return pattern.containsMatchIn(userPrompt)
+    }
+
+    fun isContentException(responseContent: String?): Boolean {
+        if (responseContent.isNullOrBlank()) return false
+        return responseContent.contains("```") || Regex("\\|[\\s-:]+\\|[\\s-:]+\\|").containsMatchIn(responseContent)
+    }
+
+    fun isException(userPrompt: String?, responseContent: String?): Boolean {
+        return isDetailedException(userPrompt) || isContentException(responseContent)
+    }
+}
+

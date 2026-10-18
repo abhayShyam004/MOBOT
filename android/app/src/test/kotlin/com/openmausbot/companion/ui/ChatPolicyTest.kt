@@ -442,24 +442,26 @@ class ApprovalChoicesTest {
 
 class ReactionsTest {
     @Test
-    fun `reactions group by emoji, sorted, with yours flagged`() {
+    fun `reactions group by tag, sorted, with yours flagged`() {
         val grouped = Reactions.group(
             listOf(
-                Reaction("👍", "user"),
-                Reaction("👍", "bot-1"),
-                Reaction("🎉", "bot-1"),
+                Reaction("star", "user"),
+                Reaction("star", "bot-1"),
+                Reaction("pin", "bot-1"),
             ),
         )
         assertEquals(2, grouped.size)
-        val thumbs = grouped.first { it.emoji == "👍" }
-        assertEquals(2, thumbs.count)
-        assertTrue(thumbs.mine)
-        assertFalse(grouped.first { it.emoji == "🎉" }.mine)
+        val stars = grouped.first { it.emoji == "pin" }
+        assertEquals(1, stars.count)
+        val userItem = grouped.first { it.emoji == "star" }
+        assertEquals(2, userItem.count)
+        assertTrue(userItem.mine)
+        assertFalse(stars.mine)
     }
 
     @Test
-    fun `the five choices match the desktop`() {
-        assertEquals(listOf("👍", "❤️", "😂", "🎉", "👀"), Reactions.CHOICES)
+    fun `emoji choices are empty by zero-emoji policy`() {
+        assertEquals(emptyList<String>(), Reactions.CHOICES)
     }
 }
 

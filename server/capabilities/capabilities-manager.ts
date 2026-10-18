@@ -7,6 +7,7 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { DATA_DIR, loadConfig } from "../config.ts";
 import {
   type CapabilityConfig,
   type CapabilityExecutionRequest,
@@ -21,7 +22,7 @@ export class CapabilitiesManager {
   private configs = new Map<SpecializedCapabilityId, CapabilityConfig>();
 
   constructor(storageDir?: string) {
-    const baseDir = storageDir || process.env.DATA_DIR || join(process.cwd(), "data");
+    const baseDir = storageDir || process.env.OMB_DATA_DIR || process.env.DATA_DIR || DATA_DIR;
     this.storagePath = join(baseDir, "capabilities.json");
     this.initDefaults();
     this.load();
@@ -71,24 +72,48 @@ export class CapabilitiesManager {
     }
   }
 
+  private resolveApiKey(cfg: CapabilityConfig): string | undefined {
+    if (cfg.apiKey && cfg.apiKey.trim().length > 0) return cfg.apiKey.trim();
+    if (cfg.provider === "android_local") return undefined;
+    try {
+      const appCfg = loadConfig();
+      if (cfg.provider === "openai") {
+        return process.env.OPENAI_API_KEY || (appCfg.openaiCompat?.url?.includes("openai.com") ? appCfg.openaiCompat?.key : undefined);
+      }
+      if (cfg.provider === "xai") {
+        return process.env.XAI_API_KEY || appCfg.xai?.key;
+      }
+      if (cfg.provider === "anthropic") {
+        return process.env.ANTHROPIC_API_KEY || appCfg.anthropic?.key;
+      }
+    } catch {}
+    return undefined;
+  }
+
   /**
-   * List all capabilities with masked API keys.
+   * List all capabilities with masked API keys and truthful configuration status.
    */
   listCapabilities(): CapabilityConfig[] {
-    return Array.from(this.configs.values()).map((cfg) => ({
-      ...cfg,
-      hasApiKey: Boolean(cfg.apiKey && cfg.apiKey.trim().length > 0),
-      apiKey: cfg.apiKey ? maskApiKey(cfg.apiKey) : undefined,
-    }));
+    return Array.from(this.configs.values()).map((cfg) => {
+      const effectiveKey = this.resolveApiKey(cfg);
+      const isConfigured = Boolean(effectiveKey) || cfg.provider === "android_local";
+      return {
+        ...cfg,
+        hasApiKey: isConfigured,
+        apiKey: cfg.apiKey ? maskApiKey(cfg.apiKey) : (effectiveKey ? maskApiKey(effectiveKey) : undefined),
+      };
+    });
   }
 
   getCapability(id: SpecializedCapabilityId): CapabilityConfig | undefined {
     const cfg = this.configs.get(id);
     if (!cfg) return undefined;
+    const effectiveKey = this.resolveApiKey(cfg);
+    const isConfigured = Boolean(effectiveKey) || cfg.provider === "android_local";
     return {
       ...cfg,
-      hasApiKey: Boolean(cfg.apiKey && cfg.apiKey.trim().length > 0),
-      apiKey: cfg.apiKey ? maskApiKey(cfg.apiKey) : undefined,
+      hasApiKey: isConfigured,
+      apiKey: cfg.apiKey ? maskApiKey(cfg.apiKey) : (effectiveKey ? maskApiKey(effectiveKey) : undefined),
     };
   }
 
@@ -141,7 +166,8 @@ export class CapabilitiesManager {
       };
     }
 
-    if (!config.apiKey && config.provider !== "android_local") {
+    const effectiveKey = this.resolveApiKey(config);
+    if (!effectiveKey && config.provider !== "android_local") {
       return {
         ok: false,
         capabilityId: request.capabilityId,
@@ -158,7 +184,7 @@ export class CapabilitiesManager {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            Authorization: `Bearer ${config.apiKey}`,
+            Authorization: `Bearer ${effectiveKey}`,
           },
           body: JSON.stringify({
             model: config.model || "dall-e-3",

@@ -249,7 +249,7 @@ private fun DiffLine(line: String) {
  * `VStack` of `HStack`s. This used to be the transpose of that, a `Row` of
  * self-measuring `Column`s, and on an API 34 emulator TalkBack duly announced
  * *"LANGUAGE, Python, Java, Rust, YEAR, 1991, 1995, 2010"*: every value of the
- * first column before the second, so `Python`↔`1991` was not a row at all for
+ * first column before the second, so `Python`<->`1991` was not a row at all for
  * a reader who cannot see the screen. The composition decided that order, and
  * it built it the wrong way round.
  *

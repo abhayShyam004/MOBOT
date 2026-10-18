@@ -11,7 +11,7 @@ package com.openmausbot.companion.ui
  * with nothing under it, on both phones.
  */
 object OverviewRules {
-    fun title(name: String): String = "What $name does"
+    fun title(name: String): String = name.ifBlank { "Overview" }
 
     const val EMPTY_DOES: String = "Nothing scheduled or learned yet."
     const val EMPTY_RECENT: String = "No changes recorded yet."

@@ -154,7 +154,6 @@ internal fun BotThreadTree(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         DisclosureIcon(folderExpanded)
-                        Text(folder.emoji?.takeIf { it.isNotBlank() } ?: "📁", fontSize = 13.sp)
                         Text(
                             folder.name,
                             fontSize = 13.sp,

@@ -277,7 +277,7 @@ fun RosterScreen(navigator: CompanionNavigator) {
                         AppEmptyState(
                             title = if (query.isEmpty()) "Your workspace is empty" else "Nothing matches",
                             message = if (query.isEmpty()) {
-                                "Your local computer agent is ready to help you work."
+                                "Create a bot to get started."
                             } else {
                                 "No bot or thread matches “$query”."
                             },
@@ -602,35 +602,35 @@ private fun RosterHeader(
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("🎭 Mascot Studio") },
+                        text = { Text("Mascot Studio") },
                         onClick = {
                             menuOpen = false
                             onOpenMascotStudio()
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("🔍 Universal Search") },
+                        text = { Text("Universal Search") },
                         onClick = {
                             menuOpen = false
                             onOpenUniversalSearch()
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("📥 Quick Capture") },
+                        text = { Text("Quick Capture") },
                         onClick = {
                             menuOpen = false
                             onOpenQuickCapture()
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("⚡ Smart Recap") },
+                        text = { Text("Smart Recap") },
                         onClick = {
                             menuOpen = false
                             onOpenSmartRecap()
                         },
                     )
                     DropdownMenuItem(
-                        text = { Text("☀️ Daily Briefing") },
+                        text = { Text("Daily Briefing") },
                         onClick = {
                             menuOpen = false
                             onOpenDailyBriefing()
@@ -699,35 +699,35 @@ private fun RosterOverflowMenu(
         )
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
             DropdownMenuItem(
-                text = { Text("🎭 Mascot Studio") },
+                text = { Text("Mascot Studio") },
                 onClick = {
                     open = false
                     onOpenMascotStudio()
                 },
             )
             DropdownMenuItem(
-                text = { Text("🔍 Universal Search") },
+                text = { Text("Universal Search") },
                 onClick = {
                     open = false
                     onOpenUniversalSearch()
                 },
             )
             DropdownMenuItem(
-                text = { Text("📥 Quick Capture") },
+                text = { Text("Quick Capture") },
                 onClick = {
                     open = false
                     onOpenQuickCapture()
                 },
             )
             DropdownMenuItem(
-                text = { Text("⚡ Smart Recap") },
+                text = { Text("Smart Recap") },
                 onClick = {
                     open = false
                     onOpenSmartRecap()
                 },
             )
             DropdownMenuItem(
-                text = { Text("☀️ Daily Briefing") },
+                text = { Text("Daily Briefing") },
                 onClick = {
                     open = false
                     onOpenDailyBriefing()
@@ -749,7 +749,7 @@ private fun RosterOverflowMenu(
                 enabled = enabled,
             )
             DropdownMenuItem(
-                text = { Text("⚙️ Settings") },
+                text = { Text("Settings") },
                 onClick = {
                     open = false
                     onSettings()

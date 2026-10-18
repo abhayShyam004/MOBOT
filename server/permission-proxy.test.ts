@@ -12,7 +12,7 @@
 // ("The user did not answer the questions.").
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer, type Server, type Socket } from "node:net";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,6 +100,7 @@ describe("permission proxy", () => {
 
     proxy = spawn(process.execPath, ["--experimental-strip-types", PROXY, socketPath], {
       stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, OMB_DATA_DIR: scratch },
     });
     let out = "";
     proxy.stdout!.on("data", (chunk) => {
@@ -354,5 +355,22 @@ describe("permission proxy", () => {
     for (const conn of conns) conn.destroy();
     const res = await waitFor(2);
     expect(resultJson(res)).toMatchObject({ behavior: "deny" });
+  });
+
+  it("immediately denies terminal execution when terminal permission is denied in settings", async () => {
+    writeFileSync(join(scratch, "config.json"), JSON.stringify({ agentPermissions: { terminal: "denied" } }));
+    rpc({
+      jsonrpc: "2.0",
+      id: 99,
+      method: "tools/call",
+      params: { name: "approve", arguments: { tool_name: "Bash", input: { command: "ls -la" } } },
+    });
+    const res = await waitFor(99);
+    expect(resultJson(res)).toMatchObject({
+      behavior: "deny",
+      message: expect.stringContaining("Terminal & Shell Execution is disabled"),
+    });
+    // Never reached the broker
+    expect(asks.length).toBe(0);
   });
 });
