@@ -406,9 +406,14 @@ data class CompanionState(
             return next.clearSettledTaskStreams(bot)
         }
 
+        val current = transcript(bot.threadId)
+        val byId = current.associateByTo(linkedMapOf(), Message::id)
+        bot.messages.forEach { byId[it.id] = it }
+        val mergedMessages = byId.values.sortedWith(compareBy<Message> { it.at }.thenBy { it.id })
+
         val result = copy(
-            bots = bots.replacing(index, bot.copy(messages = bot.messages)),
-            messages = messages + (bot.threadId to bot.messages),
+            bots = bots.replacing(index, bot.copy(messages = mergedMessages)),
+            messages = messages + (bot.threadId to mergedMessages),
             hasMore = hasMore + (bot.threadId to (bot.hasMore ?: false)),
             activeLeafIds = activeLeafIds + (bot.threadId to bot.activeLeafId),
         ).clearSettledTaskStreams(bot)
@@ -497,7 +502,37 @@ data class CompanionState(
                     }
                 }
             }
-            "turn.completed", "turn.failed", "turn.aborted" -> clearStream(event.threadId)
+            "turn.started" -> copy(
+                bots = bots.map { bot ->
+                    if (bot.threadId == event.threadId || bot.tasks.orEmpty().any { it.threadId == event.threadId }) {
+                        bot.copy(
+                            busy = if (bot.threadId == event.threadId) true else bot.busy,
+                            tasks = bot.tasks?.map { task ->
+                                if (task.threadId == event.threadId) task.copy(busy = true) else task
+                            },
+                        )
+                    } else {
+                        bot
+                    }
+                },
+            )
+            "turn.completed", "turn.failed", "turn.aborted" -> {
+                val cleared = clearStream(event.threadId)
+                cleared.copy(
+                    bots = cleared.bots.map { bot ->
+                        if (bot.threadId == event.threadId || bot.tasks.orEmpty().any { it.threadId == event.threadId }) {
+                            bot.copy(
+                                busy = if (bot.threadId == event.threadId) false else bot.busy,
+                                tasks = bot.tasks?.map { task ->
+                                    if (task.threadId == event.threadId) task.copy(busy = false) else task
+                                },
+                            )
+                        } else {
+                            bot
+                        }
+                    },
+                )
+            }
             else -> this
         }
     }

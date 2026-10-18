@@ -535,9 +535,25 @@ private fun LoadedChat(
     }
     val streaming = state.streaming[threadId]
     val reasoning = state.reasoning[threadId]
+    var inFlightSend by remember(threadId) { mutableStateOf(false) }
+
+    LaunchedEffect(inFlightSend) {
+        if (inFlightSend) {
+            delay(45_000)
+            inFlightSend = false
+        }
+    }
+
+    LaunchedEffect(streaming, chat.busy, rawTranscript.lastOrNull()?.id) {
+        if (!streaming.isNullOrEmpty() || chat.busy || rawTranscript.lastOrNull()?.role == Message.Role.BOT) {
+            inFlightSend = false
+        }
+    }
+
+    val isProcessing = inFlightSend || chat.busy
     // Stream, then reasoning, then the bare fact of being busy — the order in
     // `ChatView.swift`, and the reason it is a rule rather than three `if`s here.
-    val tail = LiveTail.of(streaming = streaming, reasoning = reasoning, busy = chat.busy)
+    val tail = LiveTail.of(streaming = streaming, reasoning = reasoning, busy = isProcessing)
     val liveText = streaming?.takeIf { tail == TranscriptTail.STREAM }
     val liveReasoning = reasoning?.takeIf { tail == TranscriptTail.REASONING }
     val hasMore = state.hasMore[threadId] == true
@@ -677,7 +693,11 @@ private fun LoadedChat(
     // about.
     LaunchedEffect(threadId, tail, liveText?.length ?: 0) {
         if (liveCount == 0 || itemCount == 0) return@LaunchedEffect
-        listState.scrollToItem(itemCount - 1)
+        if (tail == TranscriptTail.WORKING) {
+            listState.animateScrollToItem(itemCount - 1)
+        } else {
+            listState.scrollToItem(itemCount - 1)
+        }
     }
     // A search hit lands on its message.
     LaunchedEffect(focusedMessageId, visibleConversationRows.size) {
@@ -774,6 +794,7 @@ private fun LoadedChat(
             // Same arming as a text-only send: what fails now belongs here.
             sendBaseline = transcriptIds(rawTranscript)
             dismissedTurnIssue = null
+            inFlightSend = true
             scope.launch {
                 val sent = try {
                     session.send(text, outgoing, chat)
@@ -783,6 +804,7 @@ private fun LoadedChat(
                 if (!sent) {
                     attachmentError = session.actionError ?: "Couldn't send this message. Try again."
                     session.actionError = null
+                    inFlightSend = false
                     return@launch
                 }
                 // Compare with what was in the field at tap time, so a newer
@@ -812,6 +834,7 @@ private fun LoadedChat(
         // Deliberately not disabled while the bot is busy: the harness answers
         // 409 and Session surfaces "The bot is busy — stop it first." That is a
         // clearer answer than a dead button.
+        inFlightSend = true
         scope.launch {
             session.actionError = null
             session.send(text, chat)
@@ -822,6 +845,7 @@ private fun LoadedChat(
                 // global dialog the chat can't act on.
                 attachmentError = message
                 session.actionError = null
+                inFlightSend = false
             }
         }
     }
@@ -1016,10 +1040,10 @@ private fun LoadedChat(
 
                     if (liveCount == 1) {
                         item(key = LIVE_BUBBLE_KEY) {
-                            if (tail == TranscriptTail.WORKING) {
+                            if (tail == TranscriptTail.WORKING || (tail == TranscriptTail.REASONING && liveText.isNullOrEmpty())) {
                                 WorkingBubble(name = chat.name, color = chat.color)
                             } else {
-                                StreamingBubble(text = liveText, reasoning = liveReasoning)
+                                StreamingBubble(text = liveText, reasoning = null)
                             }
                         }
                     }
@@ -1041,10 +1065,10 @@ private fun LoadedChat(
                     )
                 }
 
-                val currentMood = remember(chat.busy, pendingApproval, reasoning, rawTranscript) {
+                val currentMood = remember(isProcessing, pendingApproval, reasoning, rawTranscript) {
                     val lastMsg = rawTranscript.lastOrNull()
                     BotMoodRules.resolve(
-                        busy = chat.busy,
+                        busy = isProcessing,
                         hasPendingApproval = pendingApproval,
                         hasReasoning = !reasoning.isNullOrBlank(),
                         toolName = lastMsg?.tool?.name,
@@ -1154,7 +1178,7 @@ private fun LoadedChat(
                 accessory = ComposerAccessories.accessory(
                     hudOpen = hudOpen,
                     draft = draft,
-                    busy = chat.busy,
+                    busy = isProcessing,
                     pendingApproval = pendingApproval,
                     hasQuickReplies = false,
                     hasAttachments = attachments.isNotEmpty(),
@@ -1168,8 +1192,13 @@ private fun LoadedChat(
                 attachments = attachments,
                 sending = sendingMessage,
                 preparing = preparingAttachments,
-                busy = chat.busy,
-                onInterrupt = if (chat.busy) { { if (bot != null) scope.launch { session.interrupt(bot) } } } else null,
+                busy = isProcessing,
+                onInterrupt = if (isProcessing) {
+                    {
+                        inFlightSend = false
+                        if (bot != null) scope.launch { session.interrupt(bot) }
+                    }
+                } else null,
                 engineCanSteer = engineCanSteer,
                 queuedSends = queuedSends,
                 steering = steering,
@@ -1610,7 +1639,7 @@ private fun ChatIdentity(
         }
     }
     val subtitleText = when {
-        chat.busy -> when (mood) {
+        chat.busy || mood == BotMood.THINKING || mood == BotMood.WORKING || mood == BotMood.RESEARCHING -> when (mood) {
             BotMood.RESEARCHING -> "Searching…"
             BotMood.WORKING -> "Working…"
             else -> "Thinking…"

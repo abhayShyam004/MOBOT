@@ -96,6 +96,13 @@ class LiveTailTest {
         assertEquals("Maus is working", LiveTail.workingLabel("Maus"))
         assertEquals("Scout is working", LiveTail.workingLabel("Scout"))
     }
+
+    @Test
+    fun `streaming or busy yields live tail, idle yields none`() {
+        assertEquals(TranscriptTail.WORKING, LiveTail.of(streaming = null, reasoning = null, busy = true))
+        assertEquals(TranscriptTail.STREAM, LiveTail.of(streaming = "Hello", reasoning = null, busy = true))
+        assertEquals(TranscriptTail.NONE, LiveTail.of(streaming = null, reasoning = null, busy = false))
+    }
 }
 
 class WorkingDotsTest {

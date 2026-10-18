@@ -381,6 +381,44 @@ class StoreTest {
         state = state.apply(Frame.Unknown("routine.run"))
         assertEquals(before, state.bots.size)
     }
+
+    @Test
+    fun turnLifecycleUpdatesBusyStatus() {
+        val baseBot = hydrated().bots.first()
+        val bot = baseBot.copy(
+            threadId = "t1",
+            busy = false,
+            tasks = listOf(BotTask("t1", "Task 1", 1.0, busy = false)),
+        )
+        val initial = CompanionState(bots = listOf(bot))
+        val started = initial.apply(Frame.Runtime(RuntimeEvent("turn.started", "t1")))
+        assertEquals(true, started.bots.first().busy)
+        assertEquals(true, started.bots.first().tasks?.first()?.busy)
+
+        val completed = started.apply(Frame.Runtime(RuntimeEvent("turn.completed", "t1")))
+        assertEquals(false, completed.bots.first().busy)
+        assertEquals(false, completed.bots.first().tasks?.first()?.busy)
+
+        val failed = started.apply(Frame.Runtime(RuntimeEvent("turn.failed", "t1")))
+        assertEquals(false, failed.bots.first().busy)
+        assertEquals(false, failed.bots.first().tasks?.first()?.busy)
+
+        val aborted = started.apply(Frame.Runtime(RuntimeEvent("turn.aborted", "t1")))
+        assertEquals(false, aborted.bots.first().busy)
+        assertEquals(false, aborted.bots.first().tasks?.first()?.busy)
+    }
+
+    @Test
+    fun applyBotMergesWithExistingMessages() {
+        val bot = hydrated().bots.first().copy(threadId = "t1")
+        val msg1 = Message("m1", Message.Role.BOT, Message.Kind.TEXT, 100.0, text = "First")
+        val msgUser = Message("m2", Message.Role.USER, Message.Kind.TEXT, 200.0, text = "User hi")
+        val initial = CompanionState(bots = listOf(bot), messages = mapOf("t1" to listOf(msg1, msgUser)))
+
+        val incomingBot = bot.copy(messages = listOf(msg1))
+        val updated = initial.apply(Frame.Bot(incomingBot))
+        assertEquals(listOf("m1", "m2"), updated.transcript("t1").map { it.id })
+    }
 }
 
 class StreamingTest {

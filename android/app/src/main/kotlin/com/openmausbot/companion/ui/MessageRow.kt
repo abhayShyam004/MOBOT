@@ -1958,15 +1958,23 @@ fun StreamingBubble(text: String?, reasoning: String?) {
                 .padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            if (!reasoning.isNullOrEmpty() && text.isNullOrEmpty()) {
-                // Folded away by default, because reasoning is not the answer.
-                // Tail-limited: it runs to thousands of words and the part worth
-                // reading is always the end. Plain lines, unlike the answer: the
-                // tail cut lands wherever it lands, and rendering markdown that
-                // starts mid-syntax invents structure the model did not write.
-                ThoughtChamber(reasoning = reasoning)
-            }
-            if (!text.isNullOrEmpty()) {
+            if (text.isNullOrEmpty()) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(14.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        text = "Thinking…",
+                        style = AppType.metadata,
+                        color = AppTheme.colors.textSecondary,
+                    )
+                }
+            } else {
                 // Same renderer as the settled bubble: a live reply showing
                 // `**bold**` that snaps to bold on arrival is the message
                 // jumping, just in a different dimension.
@@ -2016,7 +2024,7 @@ fun WorkingBubble(name: String, color: String) {
                 color = tint,
             )
             Text(
-                text = "Planning…",
+                text = "Thinking…",
                 style = AppType.metadata,
                 color = colors.textSecondary,
             )
