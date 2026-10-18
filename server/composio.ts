@@ -859,10 +859,63 @@ function serviceStateFromAccounts(
 ): ConnectorServiceState {
   const active = accounts.find((account) => /^active$/i.test(account.status));
   const pending = accounts.find((account) => /^(initiated|initializing|pending)$/i.test(account.status));
-  const selected = active ?? pending ?? accounts[0];
+  const expired = accounts.find((account) => /^expired/i.test(account.status));
+  const failed = accounts.find((account) => /^(failed|error)/i.test(account.status));
+  const cancelled = accounts.find((account) => /^cancel/i.test(account.status));
+  const disconnected = accounts.find((account) => /^disconnect/i.test(account.status));
+
+  if (active) {
+    return {
+      connected: true,
+      pending: false,
+      status: active.status || "ACTIVE",
+      accounts: accounts.map(publicAccount),
+    };
+  }
+  if (pending) {
+    return {
+      connected: false,
+      pending: true,
+      status: pending.status || "PENDING",
+      accounts: accounts.map(publicAccount),
+    };
+  }
+  if (expired) {
+    return {
+      connected: false,
+      pending: false,
+      status: expired.status || "EXPIRED",
+      accounts: accounts.map(publicAccount),
+    };
+  }
+  if (failed) {
+    return {
+      connected: false,
+      pending: false,
+      status: failed.status || "FAILED",
+      accounts: accounts.map(publicAccount),
+    };
+  }
+  if (cancelled) {
+    return {
+      connected: false,
+      pending: false,
+      status: cancelled.status || "CANCELLED",
+      accounts: accounts.map(publicAccount),
+    };
+  }
+  if (disconnected) {
+    return {
+      connected: false,
+      pending: false,
+      status: disconnected.status || "DISCONNECTED",
+      accounts: accounts.map(publicAccount),
+    };
+  }
+  const selected = accounts[0];
   return {
-    connected: Boolean(active),
-    pending: Boolean(pending),
+    connected: false,
+    pending: false,
     status: selected?.status ?? "not_connected",
     accounts: accounts.map(publicAccount),
   };
@@ -886,11 +939,17 @@ function allServiceStates(
       accounts.push({ id: selectedId, status: selected?.status ?? "ACTIVE" });
     }
     const accountState = serviceStateFromAccounts(accounts);
-    const status = toolkit.is_no_auth ? "ACTIVE" : selected?.status ?? accountState.status;
+    const isNoAuth = toolkit.is_no_auth === true;
+    const rawStatus = isNoAuth ? "ACTIVE" : (selected?.status ?? accountState.status);
+    const isConnected = isNoAuth || accountState.connected || /^active$/i.test(rawStatus);
+    const isPending = !isConnected && (accountState.pending || /^(initiated|initializing|pending)$/i.test(rawStatus));
+    const finalStatus = isConnected
+      ? (isNoAuth ? "ACTIVE" : (accountState.connected ? accountState.status : rawStatus))
+      : (isPending ? (accountState.pending ? accountState.status : rawStatus) : rawStatus);
     services.set(slug, {
-      connected: toolkit.is_no_auth === true || accountState.connected || /^active$/i.test(status),
-      pending: accountState.pending || /^(initiated|initializing|pending)$/i.test(status),
-      status,
+      connected: isConnected,
+      pending: isPending,
+      status: finalStatus,
       accounts: accountState.accounts,
     });
   }
@@ -1053,30 +1112,42 @@ export async function connectionStatus(cfg: AppConfig, slugs: string[]) {
         ? [...serviceAccounts, { id: selectedId, status: selected?.status ?? "ACTIVE" }]
         : serviceAccounts;
       const accountState = serviceStateFromAccounts(withSelected);
-      const state = item?.connected_account?.status
-        ?? (item?.is_no_auth ? "ACTIVE" : accountState.status);
+      const isNoAuth = item?.is_no_auth === true;
+      const rawState = item?.connected_account?.status
+        ?? (isNoAuth ? "ACTIVE" : accountState.status);
+      const isConnected = isNoAuth || accountState.connected || /^active$/i.test(rawState);
+      const isPending = !isConnected && (accountState.pending || /^(initiated|initializing|pending)$/i.test(rawState));
+      const finalStatus = isConnected
+        ? (isNoAuth ? "ACTIVE" : (accountState.connected ? accountState.status : rawState))
+        : (isPending ? (accountState.pending ? accountState.status : rawState) : rawState);
       return [slug, {
-        connected: item?.is_no_auth === true || accountState.connected || /^active$/i.test(state),
-        pending: accountState.pending || /^(initiated|initializing|pending)$/i.test(state),
-        status: state,
+        connected: isConnected,
+        pending: isPending,
+        status: finalStatus,
         accounts: accountState.accounts,
       }];
     }),
   );
 }
 
-/** Backward-compatible service disconnect: removes the Session-selected account. */
+/** Backward-compatible service disconnect: removes all accounts associated with the toolkit. */
 export async function removeService(cfg: AppConfig, slug: string) {
   const toolkit = canonicalToolkitSlug(slug);
   const apiKey = projectApiKey(cfg);
   if (!apiKey) {
     const response = await brokerRequest(`/v1/connectors/${encodeURIComponent(toolkit)}`, { method: "DELETE" });
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
+    transportSessionBackends.clear();
     return removalResponseSchema.parse(await response.json());
+  }
+  const surface = composioSurface(cfg);
+  if (surface === "connect") {
+    transportSessionBackends.clear();
+    return { removed: 1 };
   }
   const session = await ensureProjectSession(cfg).catch(() => null);
   const userId = session?.config?.user_id ?? cfg.composio?.userId;
-  let targetId: string | undefined;
+  const targetIds = new Set<string>();
 
   if (session) {
     const params = new URLSearchParams({ limit: "50", toolkits: toolkit });
@@ -1087,25 +1158,35 @@ export async function removeService(cfg: AppConfig, slug: string) {
     if (list?.ok) {
       const body = toolkitPageSchema.safeParse(await list.json().catch(() => null));
       if (body.success) {
-        targetId = body.data.items?.find((item) => item.slug && canonicalToolkitSlug(item.slug) === toolkit)?.connected_account?.id;
+        const item = body.data.items?.find((i) => i.slug && canonicalToolkitSlug(i.slug) === toolkit);
+        if (validAccountId(item?.connected_account?.id)) {
+          targetIds.add(item.connected_account.id);
+        }
       }
     }
   }
 
-  if (!targetId && userId) {
+  if (userId) {
     const accounts = await listConnectedAccounts(apiKey, userId, [toolkit]).catch(() => []);
-    targetId = accounts.find((a) => a.toolkit?.slug && canonicalToolkitSlug(a.toolkit.slug) === toolkit)?.id;
+    for (const a of accounts) {
+      if (a.toolkit?.slug && canonicalToolkitSlug(a.toolkit.slug) === toolkit && validAccountId(a.id)) {
+        targetIds.add(a.id);
+      }
+    }
   }
 
-  if (!targetId) return { removed: 0 };
+  if (targetIds.size === 0) return { removed: 0 };
 
-  const removed = await fetch(
-    `${apiBase()}/connected_accounts/${encodeURIComponent(targetId)}?revoke_on_delete=true`,
-    { method: "DELETE", headers: projectHeaders(apiKey), signal: AbortSignal.timeout(30_000) },
-  );
-  if (!removed.ok && removed.status !== 404) {
-    throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
+  for (const id of targetIds) {
+    const removed = await fetch(
+      `${apiBase()}/connected_accounts/${encodeURIComponent(id)}?revoke_on_delete=true`,
+      { method: "DELETE", headers: projectHeaders(apiKey), signal: AbortSignal.timeout(30_000) },
+    );
+    if (!removed.ok && removed.status !== 404) {
+      throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
+    }
   }
+  transportSessionBackends.clear();
   return { removed: 1 };
 }
 
@@ -1120,6 +1201,7 @@ export async function removeAccount(cfg: AppConfig, slug: string, accountId: str
       { method: "DELETE" },
     );
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
+    transportSessionBackends.clear();
     return removalResponseSchema.parse(await response.json());
   }
   const session = await ensureProjectSession(cfg).catch(() => null);
@@ -1140,6 +1222,7 @@ export async function removeAccount(cfg: AppConfig, slug: string, accountId: str
   if (!removed.ok && removed.status !== 404) {
     throw new Error(await responseError(removed, `Composio disconnect: HTTP ${removed.status}`));
   }
+  transportSessionBackends.clear();
   return { removed: 1 };
 }
 

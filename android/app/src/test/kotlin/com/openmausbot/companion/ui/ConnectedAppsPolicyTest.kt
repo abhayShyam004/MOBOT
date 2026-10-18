@@ -81,11 +81,75 @@ class ConnectedAppsPolicyTest {
     @Test
     fun `search matches label and slug without changing order`() {
         val gmail = ConnectorCard("gmail", "Gmail", "Mail")
-        val calendar = ConnectorCard("google-calendar", "Calendar", "Events")
-        val slack = ConnectorCard("slack", "Slack", "Messages")
+        val calendar = ConnectorCard("googlecalendar", "Google Calendar", "Events", domain = "calendar.google.com")
+        val slack = ConnectorCard("slack", "Slack", "Messages", domain = "slack.com")
 
         assertEquals(listOf(calendar), ConnectedAppsPolicy.filterCards(listOf(gmail, calendar, slack), "GOOGLE"))
         assertEquals(listOf(slack), ConnectedAppsPolicy.filterCards(listOf(gmail, calendar, slack), "sla"))
         assertEquals(listOf(gmail, calendar, slack), ConnectedAppsPolicy.filterCards(listOf(gmail, calendar, slack), "  "))
+        assertEquals(listOf(calendar), ConnectedAppsPolicy.filterCards(listOf(gmail, calendar, slack), "google calendar"))
+        assertEquals(listOf(slack), ConnectedAppsPolicy.filterCards(listOf(gmail, calendar, slack), "slack.com"))
+    }
+
+    @Test
+    fun `resolveState resolves deterministic, mutually exclusive states`() {
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.NOT_CONNECTED, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(null))
+
+        val connectedStatus = ConnectorStatus(connected = true)
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.CONNECTED, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(connectedStatus))
+
+        val pendingStatus = ConnectorStatus(connected = false, pending = true)
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.PENDING, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(pendingStatus))
+
+        val connectingStatus = ConnectorStatus(connected = false, pending = true, status = "connecting")
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.CONNECTING, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(connectingStatus))
+
+        val activeAccountStatus = ConnectorStatus(
+            connected = false,
+            accounts = listOf(com.openmausbot.companion.core.ConnectorAccount("ca_1", "Work", "ACTIVE")),
+        )
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.CONNECTED, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(activeAccountStatus))
+
+        val expiredAccountStatus = ConnectorStatus(
+            connected = false,
+            accounts = listOf(com.openmausbot.companion.core.ConnectorAccount("ca_2", "Personal", "EXPIRED")),
+        )
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.EXPIRED, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(expiredAccountStatus))
+
+        val failedAccountStatus = ConnectorStatus(
+            connected = false,
+            accounts = listOf(com.openmausbot.companion.core.ConnectorAccount("ca_3", "Client", "FAILED")),
+        )
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.FAILED, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(failedAccountStatus))
+
+        val cancelledAccountStatus = ConnectorStatus(
+            connected = false,
+            accounts = listOf(com.openmausbot.companion.core.ConnectorAccount("ca_4", "Client", "CANCELLED")),
+        )
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.CANCELLED, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(cancelledAccountStatus))
+
+        val disconnectedAccountStatus = ConnectorStatus(
+            connected = false,
+            accounts = listOf(com.openmausbot.companion.core.ConnectorAccount("ca_5", "Client", "DISCONNECTED")),
+        )
+        assertEquals(com.openmausbot.companion.core.ServiceConnectionState.DISCONNECTED, com.openmausbot.companion.core.ConnectedAppsRules.resolveState(disconnectedAccountStatus))
+    }
+
+    @Test
+    fun `statusTone matches expected visual hierarchy for states and statuses`() {
+        assertEquals(StatusTone.GOOD, ConnectedAppsPolicy.statusTone(com.openmausbot.companion.core.ServiceConnectionState.CONNECTED))
+        assertEquals(StatusTone.WARN, ConnectedAppsPolicy.statusTone(com.openmausbot.companion.core.ServiceConnectionState.CONNECTING))
+        assertEquals(StatusTone.WARN, ConnectedAppsPolicy.statusTone(com.openmausbot.companion.core.ServiceConnectionState.PENDING))
+        assertEquals(StatusTone.WARN, ConnectedAppsPolicy.statusTone(com.openmausbot.companion.core.ServiceConnectionState.EXPIRED))
+        assertEquals(StatusTone.BAD, ConnectedAppsPolicy.statusTone(com.openmausbot.companion.core.ServiceConnectionState.FAILED))
+        assertEquals(StatusTone.PLAIN, ConnectedAppsPolicy.statusTone(com.openmausbot.companion.core.ServiceConnectionState.NOT_CONNECTED))
+        assertEquals(StatusTone.PLAIN, ConnectedAppsPolicy.statusTone(com.openmausbot.companion.core.ServiceConnectionState.CANCELLED))
+        assertEquals(StatusTone.PLAIN, ConnectedAppsPolicy.statusTone(com.openmausbot.companion.core.ServiceConnectionState.DISCONNECTED))
+
+        assertEquals(StatusTone.GOOD, ConnectedAppsPolicy.statusTone("ACTIVE"))
+        assertEquals(StatusTone.WARN, ConnectedAppsPolicy.statusTone("INITIATED"))
+        assertEquals(StatusTone.BAD, ConnectedAppsPolicy.statusTone("ERROR"))
+        assertEquals(StatusTone.WARN, ConnectedAppsPolicy.statusTone("EXPIRED"))
+        assertEquals(StatusTone.PLAIN, ConnectedAppsPolicy.statusTone("NOT_CONNECTED"))
     }
 }

@@ -1002,4 +1002,39 @@ describe.sequential("Composio Sessions", () => {
       emptyConnectedAccounts = false;
     }
   });
+
+  it("enforces deterministic, mutually exclusive states without contradictions", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    const statuses = await connectionStatus(cfg, ["github", "linear", "notion"]);
+    // Active accounts win and force pending = false
+    expect(statuses.github.connected).toBe(true);
+    expect(statuses.github.pending).toBe(false);
+    expect(statuses.github.status).toBe("ACTIVE");
+
+    // Expired account is neither connected nor pending
+    expect(statuses.linear.connected).toBe(false);
+    expect(statuses.linear.pending).toBe(false);
+    expect(statuses.linear.status).toBe("EXPIRED");
+
+    // Initiated/pending account is pending = true, connected = false
+    expect(statuses.notion.connected).toBe(false);
+    expect(statuses.notion.pending).toBe(true);
+    expect(statuses.notion.status).toBe("INITIATED");
+  });
+
+  it("removes all accounts associated with a toolkit during service disconnect", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    const before = calls.length;
+    await expect(removeService(cfg, "github")).resolves.toEqual({ removed: 1 });
+    const deleteCalls = calls.slice(before).filter(
+      (c) => c.method === "DELETE" && c.path.includes("/connected_accounts/ca_github"),
+    );
+    // Deleted both session-selected ca_github and inventory accounts ca_github_work, ca_github_personal
+    expect(deleteCalls.length).toBeGreaterThanOrEqual(2);
+  });
 });
+

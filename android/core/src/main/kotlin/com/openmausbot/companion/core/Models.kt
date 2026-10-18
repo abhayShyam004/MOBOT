@@ -1020,6 +1020,22 @@ data class ConfigStatus(
         get() = VoiceProvider.fromWire(tts?.provider)
 }
 
+enum class ServiceConnectionState(
+    val wireName: String,
+    val label: String,
+) {
+    NOT_CONNECTED("not_connected", "Not Connected"),
+    CONNECTING("connecting", "Connecting…"),
+    PENDING("pending", "Pending"),
+    CONNECTED("connected", "Connected"),
+    FAILED("failed", "Failed"),
+    CANCELLED("cancelled", "Cancelled"),
+    EXPIRED("expired", "Expired"),
+    DISCONNECTED("disconnected", "Disconnected");
+
+    val isUsable: Boolean get() = this == CONNECTED
+}
+
 object ConnectedAppsRules {
     const val MAX_ACCOUNT_ALIAS_LENGTH = 64
     const val MAX_ACCOUNTS_PER_CONNECTOR = 5
@@ -1032,6 +1048,48 @@ object ConnectedAppsRules {
 
     fun canAddAnotherAccount(accounts: List<ConnectorAccount>): Boolean =
         accounts.size < MAX_ACCOUNTS_PER_CONNECTOR
+
+    fun resolveState(status: ConnectorStatus?): ServiceConnectionState {
+        if (status == null) return ServiceConnectionState.NOT_CONNECTED
+
+        if (status.connected) return ServiceConnectionState.CONNECTED
+
+        val rawStatus = status.status?.trim()?.lowercase().orEmpty()
+        val accounts = status.accounts.orEmpty()
+
+        if (accounts.any { it.isActive }) return ServiceConnectionState.CONNECTED
+        if (accounts.any { it.status.lowercase().let { s -> s == "initiated" || s == "initializing" || s == "pending" } }) {
+            return ServiceConnectionState.PENDING
+        }
+        if (accounts.any { it.status.lowercase().startsWith("expired") }) {
+            return ServiceConnectionState.EXPIRED
+        }
+        if (accounts.any { it.status.lowercase().let { s -> s.startsWith("fail") || s.startsWith("error") } }) {
+            return ServiceConnectionState.FAILED
+        }
+        if (accounts.any { it.status.lowercase().startsWith("cancel") }) {
+            return ServiceConnectionState.CANCELLED
+        }
+        if (accounts.any { it.status.lowercase().startsWith("disconnect") }) {
+            return ServiceConnectionState.DISCONNECTED
+        }
+
+        if (status.pending == true) {
+            return if (rawStatus.startsWith("connect")) ServiceConnectionState.CONNECTING else ServiceConnectionState.PENDING
+        }
+
+        return when {
+            rawStatus == "active" || rawStatus == "connected" -> ServiceConnectionState.CONNECTED
+            rawStatus.startsWith("connect") -> ServiceConnectionState.CONNECTING
+            rawStatus == "pending" || rawStatus == "initiated" || rawStatus == "initializing" -> ServiceConnectionState.PENDING
+            rawStatus.startsWith("expired") -> ServiceConnectionState.EXPIRED
+            rawStatus.startsWith("fail") || rawStatus.startsWith("error") -> ServiceConnectionState.FAILED
+            rawStatus.startsWith("cancel") -> ServiceConnectionState.CANCELLED
+            rawStatus.startsWith("disconnect") -> ServiceConnectionState.DISCONNECTED
+            rawStatus == "not_connected" || rawStatus.isEmpty() -> ServiceConnectionState.NOT_CONNECTED
+            else -> ServiceConnectionState.NOT_CONNECTED
+        }
+    }
 
     internal fun trimmedAlias(input: String?): String? =
         input?.trim { it.isWhitespace() }?.takeIf { it.isNotEmpty() }

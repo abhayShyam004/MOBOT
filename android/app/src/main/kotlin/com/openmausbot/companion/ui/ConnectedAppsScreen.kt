@@ -76,7 +76,7 @@ import com.openmausbot.companion.core.ConnectorCard
 import com.openmausbot.companion.core.ConnectorCatalog
 import com.openmausbot.companion.core.ConnectorStatus
 import com.openmausbot.companion.core.ConnectorStatuses
-import com.openmausbot.companion.core.DeploymentAccountInfo
+import com.openmausbot.companion.core.ServiceConnectionState
 import kotlinx.coroutines.launch
 
 /**
@@ -88,6 +88,12 @@ import kotlinx.coroutines.launch
  * - Split between "Your Connected Apps" and "Available Services".
  * - Dedicated detail screen for inspection, account management, and connection.
  */
+enum class ServiceFilterTab(val label: String) {
+    ALL("All"),
+    CONNECTED("Connected"),
+    AVAILABLE("Available"),
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ConnectedAppsScreen(onBack: () -> Unit) {
@@ -98,8 +104,8 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
 
     var catalog by remember { mutableStateOf<ConnectorCatalog?>(null) }
     var inventory by remember { mutableStateOf(ConnectedAppsInventory()) }
-    var deploymentAccounts by remember { mutableStateOf<List<DeploymentAccountInfo>>(emptyList()) }
     var query by rememberSaveable { mutableStateOf("") }
+    var filterTab by rememberSaveable { mutableStateOf(ServiceFilterTab.ALL) }
     var loading by remember { mutableStateOf(true) }
     var refreshing by remember { mutableStateOf(false) }
 
@@ -123,7 +129,6 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
             session.loadAllConnectorStatuses()?.let { response ->
                 inventory = ConnectedAppsPolicy.accept(inventory, response)
             }
-            deploymentAccounts = session.deploymentAccounts()
         } finally {
             if (showProgress) refreshing = false
         }
@@ -140,7 +145,6 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
         loading = true
         try {
             catalog = session.loadConnectorCatalog()
-            deploymentAccounts = session.deploymentAccounts()
             refresh()
         } finally {
             loading = false
@@ -224,7 +228,7 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                 val connectedCards = remember(filteredCards, inventory.statuses) {
                     filteredCards.filter { card ->
                         val st = inventory.statuses?.get(card.slug)
-                        st?.connected == true || !st?.accounts.isNullOrEmpty()
+                        ConnectedAppsRules.resolveState(st) == ServiceConnectionState.CONNECTED
                     }
                 }
                 val availableCards = remember(filteredCards, connectedCards) {
@@ -250,7 +254,38 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                         }
                     }
 
-                    // 2. Credential store warning
+                    // 2. Filter Tabs
+                    item(key = "filter_tabs") {
+                        SingleChoiceSegmentedButtonRow(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 20.dp),
+                        ) {
+                            ServiceFilterTab.entries.forEachIndexed { index, tab ->
+                                SegmentedButton(
+                                    selected = filterTab == tab,
+                                    onClick = { filterTab = tab },
+                                    shape = SegmentedButtonDefaults.itemShape(index = index, count = ServiceFilterTab.entries.size),
+                                    icon = {},
+                                    label = {
+                                        val countText = when (tab) {
+                                            ServiceFilterTab.ALL -> " (${filteredCards.size})"
+                                            ServiceFilterTab.CONNECTED -> " (${connectedCards.size})"
+                                            ServiceFilterTab.AVAILABLE -> " (${availableCards.size})"
+                                        }
+                                        Text(
+                                            text = tab.label + countText,
+                                            fontSize = 12.sp,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                        )
+                                    }
+                                )
+                            }
+                        }
+                    }
+
+                    // 3. Credential store warning
                     if (inventory.credentialStoreUnreadable) {
                         item(key = "credential_warning") {
                             Box(modifier = Modifier.padding(horizontal = 20.dp)) {
@@ -259,7 +294,7 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                         }
                     }
 
-                    // 3. Setup notice for Composio
+                    // 4. Setup notice for Composio
                     if (ConnectedAppsPolicy.showSetupNotice(catalog, inventory.credentialStoreUnreadable)) {
                         item(key = "setup_notice") {
                             Box(modifier = Modifier.padding(horizontal = 20.dp)) {
@@ -273,11 +308,70 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                         }
                     }
 
-                    // 4. Your Apps Section (Connected Services)
-                    if (connectedCards.isNotEmpty()) {
-                        item(key = "connected_section_title") {
+                    // 5. Connected Section
+                    if (filterTab != ServiceFilterTab.AVAILABLE) {
+                        if (connectedCards.isNotEmpty()) {
+                            item(key = "connected_section_title") {
+                                Text(
+                                    text = "Your Connected Apps (${connectedCards.size})",
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = AppTheme.colors.textSecondary,
+                                    modifier = Modifier.padding(horizontal = 24.dp),
+                                )
+                            }
+
+                            item(key = "connected_container") {
+                                SettingsSection {
+                                    connectedCards.forEachIndexed { index, card ->
+                                        val status = inventory.statuses?.get(card.slug)
+                                        val activeAccounts = status?.accounts?.filter { it.isActive }.orEmpty()
+                                        val accountCount = activeAccounts.size
+                                        val accountText = when {
+                                            accountCount > 1 -> "$accountCount accounts connected"
+                                            accountCount == 1 -> activeAccounts.first().displayName
+                                            else -> "Connected"
+                                        }
+
+                                        SettingsRow(
+                                            title = card.label,
+                                            subtitle = accountText,
+                                            leadingIcon = {
+                                                ConnectedAppIcon(card = card, size = 38.dp)
+                                            },
+                                            trailingValue = null,
+                                            showChevron = true,
+                                            onClick = { selectedSlug = card.slug },
+                                        )
+
+                                        if (index < connectedCards.lastIndex) {
+                                            SettingsDivider()
+                                        }
+                                    }
+                                }
+                            }
+                        } else if (filterTab == ServiceFilterTab.CONNECTED && !loading) {
+                            item(key = "empty_connected") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 24.dp, vertical = 12.dp),
+                                ) {
+                                    Text(
+                                        text = if (query.isNotBlank()) "No services found." else "No connected services.",
+                                        color = AppTheme.colors.textSecondary,
+                                        fontSize = 14.sp,
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // 6. Available Section
+                    if (filterTab != ServiceFilterTab.CONNECTED) {
+                        item(key = "available_section_title") {
                             Text(
-                                text = "Your Connected Apps (${connectedCards.size})",
+                                text = if (query.isNotBlank()) "Search Results (${availableCards.size})" else "Available Services (${availableCards.size})",
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = AppTheme.colors.textSecondary,
@@ -285,56 +379,50 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                             )
                         }
 
-                        item(key = "connected_container") {
-                            SettingsSection {
-                                connectedCards.forEachIndexed { index, card ->
-                                    val status = inventory.statuses?.get(card.slug)
-                                    val accountCount = status?.accounts?.size ?: 0
-                                    val accountText = when {
-                                        accountCount > 1 -> "$accountCount accounts connected"
-                                        accountCount == 1 -> status?.accounts?.firstOrNull()?.displayName ?: "Connected"
-                                        else -> "Connected"
-                                    }
-
-                                    SettingsRow(
-                                        title = card.label,
-                                        subtitle = accountText,
-                                        leadingIcon = {
-                                            ConnectedAppIcon(card = card, size = 38.dp)
-                                        },
-                                        trailingValue = null,
-                                        showChevron = true,
-                                        onClick = { selectedSlug = card.slug },
+                        if (availableCards.isEmpty() && !loading) {
+                            item(key = "empty_available") {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 24.dp, vertical = 12.dp),
+                                ) {
+                                    Text(
+                                        text = if (query.isNotBlank()) "No services found." else "No services available.",
+                                        color = AppTheme.colors.textSecondary,
+                                        fontSize = 14.sp,
                                     )
-
-                                    if (index < connectedCards.lastIndex) {
-                                        SettingsDivider()
-                                    }
                                 }
+                            }
+                        }
+
+                        // Individual virtualized rows for available apps
+                        items(
+                            items = availableCards,
+                            key = { it.slug },
+                            contentType = { "service_card" },
+                        ) { card ->
+                            Box(modifier = Modifier.padding(horizontal = 20.dp)) {
+                                AvailableConnectorCard(
+                                    card = card,
+                                    onClick = { selectedSlug = card.slug },
+                                    onConnectQuick = {
+                                        authorize(card.slug, ConnectedAppsRules.firstAccountAlias)
+                                    },
+                                )
                             }
                         }
                     }
 
-                    // 6. Available Services Section
-                    item(key = "available_section_title") {
-                        Text(
-                            text = if (query.isNotBlank()) "Search Results (${availableCards.size})" else "Available Services (${availableCards.size})",
-                            fontSize = 14.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = AppTheme.colors.textSecondary,
-                            modifier = Modifier.padding(horizontal = 24.dp),
-                        )
-                    }
-
-                    if (availableCards.isEmpty() && !loading) {
-                        item(key = "empty_available") {
+                    // 7. Overall Empty State if filtering returned nothing
+                    if (filterTab == ServiceFilterTab.ALL && filteredCards.isEmpty() && !loading) {
+                        item(key = "empty_all") {
                             Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 24.dp, vertical = 12.dp),
                             ) {
                                 Text(
-                                    text = if (query.isNotBlank()) "No services matching \"$query\"" else "No services available.",
+                                    text = if (query.isNotBlank()) "No services found." else "No services available.",
                                     color = AppTheme.colors.textSecondary,
                                     fontSize = 14.sp,
                                 )
@@ -342,24 +430,7 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                         }
                     }
 
-                    // Individual virtualized rows for available apps
-                    items(
-                        items = availableCards,
-                        key = { it.slug },
-                        contentType = { "service_card" },
-                    ) { card ->
-                        Box(modifier = Modifier.padding(horizontal = 20.dp)) {
-                            AvailableConnectorCard(
-                                card = card,
-                                onClick = { selectedSlug = card.slug },
-                                onConnectQuick = {
-                                    authorize(card.slug, ConnectedAppsRules.firstAccountAlias)
-                                },
-                            )
-                        }
-                    }
-
-                    // 7. Composio Connection Status Footer
+                    // 8. Composio Connection Status Footer
                     if (catalog?.configured == true) {
                         item(key = "composio_footer") {
                             Box(modifier = Modifier.padding(horizontal = 20.dp)) {
@@ -665,8 +736,7 @@ fun ConnectedServiceDetailScreen(
     onDisconnect: () -> Unit,
 ) {
     val accounts = status?.accounts.orEmpty()
-    val isConnected = status?.connected == true
-    val isPending = status?.pending == true
+    val state = ConnectedAppsRules.resolveState(status)
 
     var confirmDisconnectOpen by remember { mutableStateOf(false) }
     var pendingDisconnectAccount by remember { mutableStateOf<ConnectorAccount?>(null) }
@@ -705,10 +775,11 @@ fun ConnectedServiceDetailScreen(
                 )
 
                 // Status pill
-                val (pillText, pillBg, pillFg) = when {
-                    isPending -> Triple("Connecting…", Color(0xFFFFF3E0), Color(0xFFE65100))
-                    isConnected || accounts.isNotEmpty() -> Triple("Connected", Color(0xFFE8F5E9), Color(0xFF2E7D32))
-                    else -> Triple("Not Connected", AppTheme.colors.surfaceRaised, AppTheme.colors.textSecondary)
+                val (pillBg, pillFg) = when (ConnectedAppsPolicy.statusTone(state)) {
+                    StatusTone.GOOD -> Pair(Color(0xFFE8F5E9), Color(0xFF2E7D32))
+                    StatusTone.WARN -> Pair(Color(0xFFFFF3E0), Color(0xFFE65100))
+                    StatusTone.BAD -> Pair(Color(0xFFFFEBEE), Color(0xFFC62828))
+                    StatusTone.PLAIN -> Pair(AppTheme.colors.surfaceRaised, AppTheme.colors.textSecondary)
                 }
 
                 Box(
@@ -718,7 +789,7 @@ fun ConnectedServiceDetailScreen(
                         .padding(horizontal = 12.dp, vertical = 5.dp),
                 ) {
                     Text(
-                        text = pillText,
+                        text = state.label,
                         fontSize = 12.5.sp,
                         fontWeight = FontWeight.Bold,
                         color = pillFg,
@@ -735,7 +806,7 @@ fun ConnectedServiceDetailScreen(
             }
         }
 
-        // 2. Accounts Section (if connected)
+        // 2. Accounts Section (if accounts exist)
         if (accounts.isNotEmpty()) {
             SettingsSection(title = "Connected Accounts (${accounts.size})") {
                 accounts.forEachIndexed { index, account ->
@@ -782,17 +853,33 @@ fun ConnectedServiceDetailScreen(
                             }
                         }
 
+                        val accountLabel = when {
+                            account.isActive -> "Active"
+                            account.status.lowercase().startsWith("expired") -> "Expired"
+                            account.status.lowercase().let { s -> s.startsWith("fail") || s.startsWith("error") } -> "Failed"
+                            account.status.lowercase().let { s -> s == "initiated" || s == "initializing" || s == "pending" } -> "Pending"
+                            account.status.lowercase().startsWith("cancel") -> "Cancelled"
+                            account.status.lowercase().startsWith("disconnect") -> "Disconnected"
+                            else -> ConnectedAppsPolicy.statusLabel(account.status)
+                        }
+                        val (accountBg, accountFg) = when (ConnectedAppsPolicy.statusTone(account.status)) {
+                            StatusTone.GOOD -> Pair(Color(0xFFE8F5E9), Color(0xFF2E7D32))
+                            StatusTone.WARN -> Pair(Color(0xFFFFF3E0), Color(0xFFE65100))
+                            StatusTone.BAD -> Pair(Color(0xFFFFEBEE), Color(0xFFC62828))
+                            StatusTone.PLAIN -> Pair(AppTheme.colors.surfaceRaised, AppTheme.colors.textSecondary)
+                        }
+
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(if (account.isActive) Color(0xFFE8F5E9) else Color(0xFFFFF3E0))
+                                .background(accountBg)
                                 .padding(horizontal = 8.dp, vertical = 3.dp),
                         ) {
                             Text(
-                                text = if (account.isActive) "Active" else "Pending",
+                                text = accountLabel,
                                 fontSize = 11.sp,
                                 fontWeight = FontWeight.Bold,
-                                color = if (account.isActive) Color(0xFF2E7D32) else Color(0xFFE65100),
+                                color = accountFg,
                             )
                         }
 
@@ -818,27 +905,79 @@ fun ConnectedServiceDetailScreen(
 
         // 3. Actions Section
         SettingsSection(title = "Actions") {
-            if (!isConnected && accounts.isEmpty()) {
-                SettingsRow(
-                    title = "Connect ${card.label}",
-                    subtitle = if (!configured) "Requires Composio key setup first" else "Start authorization in browser",
-                    enabled = configured,
-                    onClick = onConnect,
-                )
-            } else {
-                SettingsRow(
-                    title = "Add Another Account",
-                    subtitle = "Connect a work, personal, or client account",
-                    enabled = ConnectedAppsRules.canAddAnotherAccount(accounts),
-                    onClick = onAddAccount,
-                )
-                SettingsDivider()
-                SettingsRow(
-                    title = "Disconnect Service",
-                    subtitle = "Revoke agent access and delete cached credentials",
-                    destructive = true,
-                    onClick = { confirmDisconnectOpen = true },
-                )
+            when (state) {
+                ServiceConnectionState.CONNECTED -> {
+                    SettingsRow(
+                        title = "Add Another Account",
+                        subtitle = "Connect a work, personal, or client account",
+                        enabled = ConnectedAppsRules.canAddAnotherAccount(accounts),
+                        onClick = onAddAccount,
+                    )
+                    SettingsDivider()
+                    SettingsRow(
+                        title = "Disconnect Service",
+                        subtitle = "Revoke agent access and delete cached credentials",
+                        destructive = true,
+                        onClick = { confirmDisconnectOpen = true },
+                    )
+                }
+                ServiceConnectionState.EXPIRED -> {
+                    SettingsRow(
+                        title = "Reconnect ${card.label}",
+                        subtitle = if (!configured) "Requires Composio key setup first" else "Renew expired credentials in browser",
+                        enabled = configured,
+                        onClick = onConnect,
+                    )
+                    SettingsDivider()
+                    SettingsRow(
+                        title = "Disconnect Service",
+                        subtitle = "Remove expired credentials and accounts",
+                        destructive = true,
+                        onClick = { confirmDisconnectOpen = true },
+                    )
+                }
+                ServiceConnectionState.FAILED -> {
+                    SettingsRow(
+                        title = "Try Again",
+                        subtitle = if (!configured) "Requires Composio key setup first" else "Restart authorization in browser",
+                        enabled = configured,
+                        onClick = onConnect,
+                    )
+                    if (accounts.isNotEmpty()) {
+                        SettingsDivider()
+                        SettingsRow(
+                            title = "Disconnect Service",
+                            subtitle = "Clear failed credentials and accounts",
+                            destructive = true,
+                            onClick = { confirmDisconnectOpen = true },
+                        )
+                    }
+                }
+                ServiceConnectionState.CONNECTING, ServiceConnectionState.PENDING -> {
+                    SettingsRow(
+                        title = "Continue Sign-In",
+                        subtitle = "Complete authorization in your browser",
+                        enabled = configured,
+                        onClick = onConnect,
+                    )
+                    SettingsDivider()
+                    SettingsRow(
+                        title = "Cancel Connection",
+                        subtitle = "Abort sign-in and remove pending connection",
+                        destructive = true,
+                        onClick = { confirmDisconnectOpen = true },
+                    )
+                }
+                ServiceConnectionState.NOT_CONNECTED,
+                ServiceConnectionState.CANCELLED,
+                ServiceConnectionState.DISCONNECTED -> {
+                    SettingsRow(
+                        title = "Connect ${card.label}",
+                        subtitle = if (!configured) "Requires Composio key setup first" else "Start authorization in browser",
+                        enabled = configured,
+                        onClick = onConnect,
+                    )
+                }
             }
         }
 
@@ -1056,6 +1195,13 @@ object ConnectedAppsPolicy {
             word.lowercase().replaceFirstChar(Char::uppercaseChar)
         }
 
+    fun statusTone(state: ServiceConnectionState): StatusTone = when (state) {
+        ServiceConnectionState.CONNECTED -> StatusTone.GOOD
+        ServiceConnectionState.CONNECTING, ServiceConnectionState.PENDING, ServiceConnectionState.EXPIRED -> StatusTone.WARN
+        ServiceConnectionState.FAILED -> StatusTone.BAD
+        ServiceConnectionState.CANCELLED, ServiceConnectionState.DISCONNECTED, ServiceConnectionState.NOT_CONNECTED -> StatusTone.PLAIN
+    }
+
     fun statusTone(status: String): StatusTone = when (status.lowercase()) {
         "connected", "active" -> StatusTone.GOOD
         "initiated", "pending", "connecting" -> StatusTone.WARN
@@ -1071,8 +1217,16 @@ object ConnectedAppsPolicy {
     fun filterCards(cards: List<ConnectorCard>, query: String): List<ConnectorCard> {
         val needle = query.trim()
         if (needle.isEmpty()) return cards
+        val normalizedNeedle = needle.lowercase().replace("[^a-z0-9]".toRegex(), "")
         return cards.filter { card ->
-            card.label.contains(needle, ignoreCase = true) || card.slug.contains(needle, ignoreCase = true)
+            card.label.contains(needle, ignoreCase = true) ||
+                card.slug.contains(needle, ignoreCase = true) ||
+                card.domain?.contains(needle, ignoreCase = true) == true ||
+                card.blurb.contains(needle, ignoreCase = true) ||
+                (normalizedNeedle.isNotEmpty() && (
+                    card.slug.lowercase().replace("[^a-z0-9]".toRegex(), "").contains(normalizedNeedle) ||
+                    card.label.lowercase().replace("[^a-z0-9]".toRegex(), "").contains(normalizedNeedle)
+                ))
         }
     }
 }
