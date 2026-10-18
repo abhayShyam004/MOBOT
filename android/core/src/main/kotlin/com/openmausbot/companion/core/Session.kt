@@ -2997,6 +2997,66 @@ class Session(
         }
     }
 
+    suspend fun getUpdaterStatus(): UpdaterStatusResponse? {
+        val activeClient = readyClient() ?: return null
+        return try {
+            activeClient.updaterStatus()
+        } catch (error: Throwable) {
+            null
+        }
+    }
+
+    suspend fun checkUpdates(force: Boolean = false): UpdaterStatusResponse? {
+        val activeClient = readyClient() ?: return null
+        return try {
+            activeClient.updaterCheck(force)
+        } catch (error: Throwable) {
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun downloadUpdate(): UpdaterStatusResponse? {
+        val activeClient = readyClient() ?: return null
+        return try {
+            activeClient.updaterDownload()
+        } catch (error: Throwable) {
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun prepareUpdateInstall(): UpdaterPrepareInstallResponse? {
+        val activeClient = readyClient() ?: return null
+        return try {
+            activeClient.updaterPrepareInstall()
+        } catch (error: Throwable) {
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun completeUpdateValidation(): StateValidation? {
+        val activeClient = readyClient() ?: return null
+        return try {
+            activeClient.updaterCompleteValidation()
+        } catch (error: Throwable) {
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun rollbackUpdate(): Boolean {
+        val activeClient = readyClient() ?: return false
+        return try {
+            activeClient.updaterRollback()
+            true
+        } catch (error: Throwable) {
+            _actionError.value = error.message
+            false
+        }
+    }
+
     private suspend fun perform(quietly: Boolean = false, body: suspend (CompanionClient) -> Unit) {
         val activeClient = readyClient() ?: return
         val connectionId = _connection.value?.id

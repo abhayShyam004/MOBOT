@@ -16,4 +16,10 @@
     <cache-path
         name="file-previews"
         path="file-previews/" />
+    <!--
+      In-app updater: downloaded APK packages for PackageInstaller handoff.
+    -->
+    <cache-path
+        name="updates"
+        path="updates/" />
 </paths>

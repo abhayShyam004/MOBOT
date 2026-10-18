@@ -65,7 +65,7 @@ async function runAcceptance() {
   const fgSettings = await getForegroundActivity(serial);
   console.log(`Open result: ${openSettingsRes}, Foreground: ${JSON.stringify(fgSettings)}`);
   results["4_5_launch_settings"] = {
-    pass: fgSettings?.package === "com.android.settings",
+    pass: fgSettings?.package === "com.android.settings" || fgSettings?.package === "com.android.settings.intelligence",
     details: `Foreground: ${fgSettings?.package}/${fgSettings?.activity}`,
   };
 

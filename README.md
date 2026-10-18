@@ -29,6 +29,7 @@ Agents run directly on-device or against configured model providers. When given 
 - Multi-Provider Catalog: First-class support for OpenAI, Anthropic Claude, Google Gemini, xAI Grok, Codex, and custom OpenAI-compatible endpoints with local model discovery.
 - Structured Interactive Cards: Autonomous selection chips (single-select and multi-select MCQs), product discovery cards, and job research surfaces embedded directly in chat.
 - Native Document Pipeline: Embedded rendering for PDFs, Markdown documents, structured JSON, and image artifacts.
+- Safe In-App Updates: In-app GitHub release verification, SemVer comparison, SHA-256 integrity checks, pre-update safety backups, automated schema migrations, and zero data loss.
 
 ---
 
@@ -52,11 +53,11 @@ Agents run directly on-device or against configured model providers. When given 
 | :---: | :---: | :---: |
 | <img src="docs/screenshots/android/mobot_mcq.png" width="240" alt="Interactive MCQ" /> | <img src="docs/screenshots/android/mobot_product_research.png" width="240" alt="Product Research" /> | <img src="docs/screenshots/android/mobot_pdf_viewer.png" width="240" alt="Native PDF Viewer" /> |
 
-### Android Computer Use
+### Device Control and Updates
 
-| Device Control |
-| :---: |
-| <img src="docs/screenshots/android/mobot_computer_use.png" width="240" alt="Android Computer Use" /> |
+| Device Control | In-App Updates |
+| :---: | :---: |
+| <img src="docs/screenshots/android/mobot_computer_use.png" width="240" alt="Android Computer Use" /> | <img src="docs/screenshots/android/mobot_updates.png" width="240" alt="In-App Updates" /> |
 
 ---
 
@@ -160,6 +161,20 @@ MOBOT features a hardened, physical Android automation substrate:
 
 ---
 
+## Updates and Lifecycle Management
+
+MOBOT features an autonomous in-app update engine tracking official GitHub releases:
+
+- Official Release Channel: Polls the repository (`abhayShyam004/MOBOT`) releases via GitHub REST API with rate-limit and offline resilience.
+- Semantic Version Comparator: Strict SemVer comparison recognizing major, minor, patch, and prerelease versions without string-comparison flaws (e.g., `1.10.0` is strictly newer than `1.9.0`).
+- Integrity Verification: Downloads release APK artifacts directly into the internal cache, verifying streaming SHA-256 digests against release manifests and checking zip/APK headers prior to dispatch.
+- Pre-Update Safety Snapshots: Automatically creates point-in-time snapshots of application databases, configuration files, and agent workspaces in `backups/snapshot-<timestamp>-v<version>/` before initiating installation, retaining up to two snapshots to optimize device storage.
+- Schema Migrations: Sequential migration runner validates and upgrades persistent data schemas post-update with automatic recovery and rollback if migrations fail.
+- Zero Data Loss: Application data directory (`OMB_DATA_DIR`) resides in protected internal storage (`files/host/data`) decoupled from the APK bundle, ensuring agent memories, SQLite databases, and connection tokens persist seamlessly across updates.
+- Package Installer Integration: Uses `FileProvider` and `Intent.ACTION_VIEW` with standard Android package installation handoff, requiring explicit user confirmation.
+
+---
+
 ## Building
 
 ### Prerequisites
@@ -215,6 +230,11 @@ MOBOT includes comprehensive automated unit, integration, and on-device acceptan
 - Phone Proxy and App Discovery:
   ```bash
   npx vitest run server/drivers/phone-proxy.test.ts
+  ```
+
+- In-App Updater and Schema Migrations:
+  ```bash
+  npx vitest run server/updater.test.ts
   ```
 
 - Permission Policy and Execution Boundaries:

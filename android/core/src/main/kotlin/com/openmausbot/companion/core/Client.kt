@@ -358,6 +358,34 @@ class CompanionClient(
         ),
     )
 
+    suspend fun updaterStatus(): UpdaterStatusResponse = send(
+        makeRequest("GET", "/api/updater/status"),
+    )
+
+    suspend fun updaterCheck(force: Boolean = false): UpdaterStatusResponse = send(
+        makeRequest(
+            "POST",
+            "/api/updater/check",
+            body = buildJsonObject { put("force", force) },
+        ),
+    )
+
+    suspend fun updaterDownload(): UpdaterStatusResponse = send(
+        makeRequest("POST", "/api/updater/download"),
+    )
+
+    suspend fun updaterPrepareInstall(): UpdaterPrepareInstallResponse = send(
+        makeRequest("POST", "/api/updater/prepare-install"),
+    )
+
+    suspend fun updaterCompleteValidation(): StateValidation = send(
+        makeRequest("POST", "/api/updater/complete-validation"),
+    )
+
+    suspend fun updaterRollback(): JsonObject = send(
+        makeRequest("POST", "/api/updater/rollback"),
+    )
+
     /** Missing capability data fails closed: image prompts must be readable by the selected model. */
     suspend fun imageCapableInstanceIds(): Set<String> = instances()
         .filter { it.capabilities?.images == true }

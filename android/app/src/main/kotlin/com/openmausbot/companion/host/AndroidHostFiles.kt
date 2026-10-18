@@ -37,5 +37,9 @@ class AndroidHostFiles(private val context: Context) : HarnessHost.Files {
     /** Phase 7: per-bot browser session state root (profile dirs live here). */
     override fun browserSessionsDir(): File = File(root, "browser-sessions").apply { mkdirs() }
 
+    override fun appVersion(): String = runCatching {
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.0"
+    }.getOrDefault("1.0.0")
+
     fun serverEntry(): File = File(serverRoot, HostFiles.SERVER_ENTRY)
 }

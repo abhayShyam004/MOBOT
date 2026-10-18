@@ -72,6 +72,16 @@ import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontFamily
+import android.content.Intent
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
+import com.openmausbot.companion.core.UpdaterStatusResponse
+import java.io.File
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -101,6 +111,7 @@ enum class SettingsSubDestination {
     SUBSCRIPTION,
     HELP_FEEDBACK,
     ABOUT,
+    UPDATES,
 }
 
 /**
@@ -165,8 +176,8 @@ fun SettingsScreen(
     var cacheClearedMessage by remember { mutableStateOf<String?>(null) }
 
     // User profile information
-    var profileName by remember { mutableStateOf("Abhay Shyam") }
-    var profileEmail by remember { mutableStateOf("abhay315204@gmail.com") }
+    var profileName by remember { mutableStateOf("User") }
+    var profileEmail by remember { mutableStateOf("") }
 
     LaunchedEffect(Unit) {
         session.mcp.refresh()
@@ -673,6 +684,12 @@ fun SettingsScreen(
                     }
                 }
             }
+            SettingsSubDestination.UPDATES -> {
+                UpdatesSubPage(
+                    session = session,
+                    onBack = { activeSubPage = null },
+                )
+            }
         }
     } else {
         Column(
@@ -883,6 +900,13 @@ fun SettingsScreen(
                     title = "Help & Feedback",
                     subtitle = "Get help or send feedback",
                     onClick = { activeSubPage = SettingsSubDestination.HELP_FEEDBACK },
+                )
+                SettingsRowDivider()
+                SettingsItemRow(
+                    iconType = SettingsMascotIconType.UPDATES,
+                    title = "Updates",
+                    subtitle = "Release channel and in-app updates",
+                    onClick = { activeSubPage = SettingsSubDestination.UPDATES },
                 )
                 SettingsRowDivider()
                 SettingsItemRow(
@@ -1298,6 +1322,7 @@ enum class SettingsMascotIconType {
     RECONNECT,
     HELP,
     ABOUT,
+    UPDATES,
 }
 
 /**
@@ -1540,6 +1565,24 @@ internal fun SettingsMascotIcon(
                     radius = w * 0.085f,
                     center = Offset(w * 0.5f, h * 0.62f),
                 )
+            }
+            SettingsMascotIconType.UPDATES -> {
+                val bg = Color(0xFF00B0FF)
+                drawRoundRect(
+                    color = bg,
+                    cornerRadius = CornerRadius(w * 0.28f, w * 0.28f),
+                )
+                val path = Path().apply {
+                    moveTo(w * 0.5f, h * 0.24f)
+                    lineTo(w * 0.72f, h * 0.46f)
+                    lineTo(w * 0.58f, h * 0.46f)
+                    lineTo(w * 0.58f, h * 0.74f)
+                    lineTo(w * 0.42f, h * 0.74f)
+                    lineTo(w * 0.42f, h * 0.46f)
+                    lineTo(w * 0.28f, h * 0.46f)
+                    close()
+                }
+                drawPath(path = path, color = Color.White)
             }
         }
     }
@@ -1897,4 +1940,306 @@ internal fun shortenedAddress(address: String): String {
     if (address.length <= 14) return address
     val leading = minOf(20, maxOf(8, address.length - 8))
     return address.take(leading) + "…" + address.takeLast(6)
+}
+
+@Composable
+internal fun UpdatesSubPage(
+    session: Session,
+    onBack: () -> Unit,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var status by remember { mutableStateOf<UpdaterStatusResponse?>(null) }
+    var checking by remember { mutableStateOf(false) }
+    var downloading by remember { mutableStateOf(false) }
+    var installing by remember { mutableStateOf(false) }
+    var successNotice by remember { mutableStateOf<String?>(null) }
+    var errorNotice by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(Unit) {
+        try {
+            status = session.getUpdaterStatus()
+            if (status?.status == "complete") {
+                successNotice = "Update complete. All persistent state preserved."
+            }
+        } catch (e: Exception) {
+            // initial probe failure handled gracefully
+        }
+    }
+
+    SettingsSubPage(
+        title = "Updates",
+        subtitle = "Official GitHub releases and system updates",
+        onBack = onBack,
+    ) {
+        successNotice?.let { notice ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF1B5E20).copy(alpha = 0.25f))
+                    .border(1.dp, Color(0xFF2E7D32).copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = notice,
+                    fontSize = 13.5.sp,
+                    color = Color(0xFF81C784),
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+
+        errorNotice?.let { err ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 6.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFFB71C1C).copy(alpha = 0.25f))
+                    .border(1.dp, Color(0xFFD32F2F).copy(alpha = 0.6f), RoundedCornerShape(12.dp))
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = err,
+                    fontSize = 13.5.sp,
+                    color = Color(0xFFEF9A9A),
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+        }
+
+        SettingsSection(title = "Installed Version") {
+            SettingsRow(
+                title = "Application",
+                trailingValue = "MOBOT",
+            )
+            SettingsDivider()
+            SettingsRow(
+                title = "Current Version",
+                trailingValue = status?.currentVersion ?: "1.0.0",
+            )
+            SettingsDivider()
+            SettingsRow(
+                title = "Release Channel",
+                trailingValue = "Official Stable",
+            )
+            SettingsDivider()
+            SettingsRow(
+                title = "Persistent Storage",
+                subtitle = "SQLite, configs, bots, memory & workspaces",
+                trailingValue = if (status?.validation?.healthy == true) "Protected" else "Active",
+            )
+        }
+
+        val hasUpdate = status?.status == "available" || status?.status == "ready_to_install" || status?.status == "downloading"
+        val release = status?.release
+
+        if (hasUpdate && release != null) {
+            SettingsSection(title = "Available Update") {
+                SettingsRow(
+                    title = "Version",
+                    trailingValue = release.version,
+                )
+                SettingsDivider()
+                SettingsRow(
+                    title = "Package Size",
+                    trailingValue = "${release.fileSizeBytes / (1024 * 1024)} MB",
+                )
+                if (release.checksumSha256.isNotEmpty() && !release.checksumSha256.startsWith("url:")) {
+                    SettingsDivider()
+                    SettingsRow(
+                        title = "SHA-256 Checksum",
+                        subtitle = release.checksumSha256.take(16) + "...",
+                        trailingValue = if (status?.status == "ready_to_install") "Verified" else "Pending",
+                    )
+                }
+                SettingsDivider()
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(
+                        text = "Release Notes",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = AppTheme.colors.textPrimary,
+                    )
+                    Text(
+                        text = release.releaseNotes,
+                        fontSize = 13.sp,
+                        color = AppTheme.colors.textSecondary,
+                        lineHeight = 18.sp,
+                    )
+                }
+            }
+        } else {
+            SettingsSection(title = "Status") {
+                SettingsRow(
+                    title = "Update Status",
+                    trailingValue = when (status?.status) {
+                        "checking" -> "Checking..."
+                        "up_to_date" -> "Up to date"
+                        "complete" -> "Up to date"
+                        "error" -> "Check error"
+                        else -> "Up to date"
+                    },
+                )
+                SettingsDivider()
+                SettingsRow(
+                    title = "Last Checked",
+                    trailingValue = status?.lastCheckedAt?.take(10) ?: "Just now",
+                )
+            }
+        }
+
+        if (downloading || status?.status == "downloading") {
+            val progress = status?.downloadProgress?.percent ?: 0
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Downloading package...", fontSize = 13.sp, color = AppTheme.colors.textSecondary)
+                    Text("$progress%", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary)
+                }
+                LinearProgressIndicator(
+                    progress = { progress / 100f },
+                    modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp)),
+                    color = Color(0xFF00B0FF),
+                    trackColor = Color(0xFF262626),
+                )
+            }
+        }
+
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (status?.status == "ready_to_install") {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            installing = true
+                            errorNotice = null
+                            try {
+                                val prep = session.prepareUpdateInstall()
+                                if (prep != null && prep.ok) {
+                                    val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
+                                    val targetApk = File(updatesDir, "mobot-update.apk")
+                                    val stagedPath = prep.stagedApkPath
+                                    if (stagedPath != null) {
+                                        val sourceApk = File(stagedPath)
+                                        if (sourceApk.exists()) {
+                                            sourceApk.copyTo(targetApk, overwrite = true)
+                                        }
+                                    }
+                                    val uri = FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.transcripts",
+                                        targetApk,
+                                    )
+                                    val intent = Intent(Intent.ACTION_VIEW).apply {
+                                        setDataAndType(uri, "application/vnd.android.package-archive")
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                } else {
+                                    errorNotice = prep?.error ?: "Failed to prepare update installation"
+                                }
+                            } catch (e: Exception) {
+                                errorNotice = e.message ?: "Failed to launch installer"
+                            } finally {
+                                installing = false
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00B0FF)),
+                    enabled = !installing,
+                ) {
+                    if (installing) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                    } else {
+                        Text("Install update", fontWeight = FontWeight.SemiBold, color = Color.Black)
+                    }
+                }
+            } else if (status?.status == "available") {
+                Button(
+                    onClick = {
+                        scope.launch {
+                            downloading = true
+                            errorNotice = null
+                            try {
+                                val updated = session.downloadUpdate()
+                                if (updated != null) {
+                                    status = updated
+                                }
+                            } catch (e: Exception) {
+                                errorNotice = e.message ?: "Download failed"
+                            } finally {
+                                downloading = false
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF00B0FF)),
+                    enabled = !downloading,
+                ) {
+                    if (downloading) {
+                        CircularProgressIndicator(modifier = Modifier.size(20.dp), color = Color.White, strokeWidth = 2.dp)
+                    } else {
+                        Text("Download update", fontWeight = FontWeight.SemiBold, color = Color.Black)
+                    }
+                }
+            }
+
+            OutlinedButton(
+                onClick = {
+                    scope.launch {
+                        checking = true
+                        errorNotice = null
+                        try {
+                            val checked = session.checkUpdates(force = true)
+                            if (checked != null) {
+                                status = checked
+                            }
+                        } catch (e: Exception) {
+                            errorNotice = e.message ?: "Update check failed"
+                        } finally {
+                            checking = false
+                        }
+                    }
+                },
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.outlinedButtonColors(contentColor = AppTheme.colors.textPrimary),
+                border = BorderStroke(1.dp, Color(0xFF333333)),
+                enabled = !checking && !downloading && !installing,
+            ) {
+                if (checking) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), color = AppTheme.colors.textPrimary, strokeWidth = 2.dp)
+                } else {
+                    Text("Check for updates", fontWeight = FontWeight.Medium)
+                }
+            }
+        }
+    }
 }

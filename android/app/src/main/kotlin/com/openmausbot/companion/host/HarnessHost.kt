@@ -56,6 +56,8 @@ class HarnessHost(
         /** Phase 7: per-bot browser session state root handed to the
          *  android_browser MCP server via AB_SESSIONS_ROOT. */
         fun browserSessionsDir(): File
+        /** In-app updater: passing current Android app version to host environment. */
+        fun appVersion(): String = "1.0.0"
     }
 
     private val _status = MutableStateFlow<HostStatus>(HostStatus.Idle)
@@ -234,6 +236,7 @@ class HarnessHost(
             // and a per-boot capability token, never a user credential.
             "AT_DRIVER_PORT" to TerminalDriverServer.currentPort().toString(),
             "AT_DRIVER_TOKEN" to TerminalDriverServer.currentToken(),
+            "APP_VERSION" to files.appVersion(),
         )
 
         val builder = ProcessBuilder(

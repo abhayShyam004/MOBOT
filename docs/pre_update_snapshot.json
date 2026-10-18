@@ -1,0 +1,198 @@
+{
+  "timestamp": "2026-10-18T15:58:32.011Z",
+  "appVersionName": "1.0.0",
+  "appVersionCode": 10000,
+  "schemaVersion": 1,
+  "conversations": {
+    "count": 2,
+    "threadIds": [
+      "68442bd4-f584-4dc7-87ee-b22e804fd048",
+      "8d4e9231-11ba-4f2e-9d3b-02ca3958e123"
+    ]
+  },
+  "messages": {
+    "totalCount": 6,
+    "perThread": {
+      "Olive": 3,
+      "Atlas": 3
+    }
+  },
+  "attachments": {
+    "count": 1,
+    "items": [
+      {
+        "id": "att-arch-spec-001",
+        "name": "architecture_spec_v1.pdf",
+        "mimeType": "application/pdf",
+        "size": 45280
+      }
+    ]
+  },
+  "bots": {
+    "count": 2,
+    "items": [
+      {
+        "id": "3b2c1b10-48d9-4a6a-ae1c-5fcf9731623a",
+        "name": "Olive",
+        "title": "",
+        "color": "green",
+        "modelSelection": {
+          "instanceId": "codex",
+          "model": "gpt-5.6-sol"
+        },
+        "threadId": "68442bd4-f584-4dc7-87ee-b22e804fd048"
+      },
+      {
+        "id": "7c3f8921-99ab-4c3d-8e4a-91bf2847d012",
+        "name": "Atlas",
+        "title": "Senior Systems Architect",
+        "color": "indigo",
+        "modelSelection": {
+          "instanceId": "openaiCompat",
+          "model": "meta-llama/llama-3.3-70b-instruct"
+        },
+        "threadId": "8d4e9231-11ba-4f2e-9d3b-02ca3958e123"
+      }
+    ]
+  },
+  "avatarsAndMascots": [
+    {
+      "botId": "3b2c1b10-48d9-4a6a-ae1c-5fcf9731623a",
+      "name": "Olive",
+      "color": "green"
+    },
+    {
+      "botId": "7c3f8921-99ab-4c3d-8e4a-91bf2847d012",
+      "name": "Atlas",
+      "color": "indigo"
+    }
+  ],
+  "memory": [
+    {
+      "botId": "3b2c1b10-48d9-4a6a-ae1c-5fcf9731623a",
+      "botName": "Olive",
+      "path": "workspaces/3b2c1b10-48d9-4a6a-ae1c-5fcf9731623a/MEMORY.md",
+      "lineCount": 6,
+      "sha256": "d5162fccb5c01ae065914d798e5efa1b03e354b205c51382ea6eb8ac76b7ae08"
+    },
+    {
+      "botId": "7c3f8921-99ab-4c3d-8e4a-91bf2847d012",
+      "botName": "Atlas",
+      "path": "workspaces/7c3f8921-99ab-4c3d-8e4a-91bf2847d012/MEMORY.md",
+      "lineCount": 6,
+      "sha256": "5207f0b830293fa6a81cb7d7687a4727ddff1e5418ea5a52c6b3a94e913b4884"
+    }
+  ],
+  "goals": {
+    "count": 1,
+    "items": [
+      {
+        "id": "goal-phase5-verification",
+        "botId": "3b2c1b10-48d9-4a6a-ae1c-5fcf9731623a",
+        "title": "Phase 5 Self-Updating Release Acceptance",
+        "status": "active",
+        "progress": 75
+      }
+    ]
+  },
+  "watches": {
+    "count": 1,
+    "items": [
+      {
+        "id": "watch-github-releases",
+        "botId": "3b2c1b10-48d9-4a6a-ae1c-5fcf9731623a",
+        "target": "https://github.com/mobot-app/mobot/releases",
+        "status": "active"
+      }
+    ]
+  },
+  "automations": {
+    "count": 3,
+    "items": [
+      {
+        "id": "fcee8792-cb4c-47ec-8068-8a892186cd7a",
+        "botId": "0f075062-755d-48ff-b2cc-1c79656fc7b9"
+      },
+      {
+        "id": "d158c445-7e63-4fbc-96f9-426205ee0ffb",
+        "botId": "cad25c75-c379-4ae6-8d8e-89ae2cf108d3"
+      },
+      {
+        "id": "routine-daily-health",
+        "name": "System Health and Backup Verification",
+        "status": "completed",
+        "botId": "3b2c1b10-48d9-4a6a-ae1c-5fcf9731623a"
+      }
+    ]
+  },
+  "modelSelection": {
+    "default": {
+      "instanceId": "codex",
+      "model": "gpt-5.6-sol"
+    },
+    "perBot": {
+      "Olive": {
+        "instanceId": "codex",
+        "model": "gpt-5.6-sol"
+      },
+      "Atlas": {
+        "instanceId": "openaiCompat",
+        "model": "meta-llama/llama-3.3-70b-instruct"
+      }
+    }
+  },
+  "providerConfiguration": {
+    "configuredInstanceCount": 14,
+    "instances": [
+      "grok",
+      "kimi",
+      "droid",
+      "cursor",
+      "claude",
+      "codex",
+      "antigravity",
+      "opencodeGo",
+      "computer",
+      "openaiCompat",
+      "qwen",
+      "hermes",
+      "pi",
+      "api-test-gateway"
+    ],
+    "hasOpenaiCompat": true,
+    "hasComposio": true
+  },
+  "connectedServices": {
+    "composioSurface": "platform",
+    "composioUserId": "openmausbot_***[REDACTED]",
+    "status": "connected"
+  },
+  "permissions": {
+    "terminal": "granted",
+    "filesystem": "granted",
+    "browser": "denied",
+    "composio": "granted"
+  },
+  "artifacts": [
+    {
+      "name": "verification-report.json",
+      "path": "workspaces/3b2c1b10-48d9-4a6a-ae1c-5fcf9731623a/verification-report.json",
+      "size": 224,
+      "sha256": "e8d2dfc2e782e575eb43dad424716c74773a3c3896e3440a15bc574a2b144f5d"
+    },
+    {
+      "name": "architecture_spec_v1.pdf",
+      "path": "workspaces/7c3f8921-99ab-4c3d-8e4a-91bf2847d012/architecture_spec_v1.pdf",
+      "size": 178,
+      "sha256": "c0726a7086a4b3ae2c0eea33aafc6526d339d13af2e2e9462289ec1473d14fe8"
+    }
+  ],
+  "settings": {
+    "profileName": "Technical Verification User",
+    "profileEmail": "verification@mobot.internal",
+    "neverAskPermissions": true,
+    "updaterChannel": "stable",
+    "updaterAutoCheck": true,
+    "updaterRepo": "mobot-app/mobot"
+  }
+}

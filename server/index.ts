@@ -2,11 +2,11 @@
 // (upstream rule): the React app dispatches typed commands over HTTP and
 // folds one SSE event stream; every provider process runs here.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { accessSync, constants, existsSync, readFileSync, rmSync } from "node:fs";
+import { accessSync, constants, createReadStream, existsSync, readFileSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { extname, join } from "node:path";
+import { basename, extname, join } from "node:path";
 
 import { z } from "zod";
 import { SharedComputers, sharedComputerOperation, sharedComputerRegistration } from "./shared-computers.ts";
@@ -47,6 +47,7 @@ import {
 } from "./browser-lifecycle-cleanup.ts";
 import * as checkpoints from "./checkpoints.ts";
 import { appendDecision, readDecisions, flushDecisionLog } from "./decision-log.ts";
+import { UpdaterManager } from "./updater.ts";
 import { validateBotCwd } from "./bot-cwd.ts";
 import {
   ATTACHMENTS_DIR,
@@ -579,6 +580,10 @@ let desktopMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 let companionMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 // Where remote clients reach this server (a proxy's public address); pairing URLs use it.
 const FALLBACK_PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
+const appUpdater = new UpdaterManager({
+  currentVersion: process.env.APP_VERSION || "1.0.0",
+  dataDir: DATA_DIR,
+});
 const cfg = loadConfig();
 // The per-thread event log cap is checked after every NDJSON append.
 // config.json is read once per process (a change restarts the server, like
@@ -14148,6 +14153,56 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const body = (await readBody(req)) || {};
       const target = typeof body.dir === "string" ? body.dir : "downloads";
       return json(res, 200, { report: dev.organizeDownloads(target) });
+    }
+
+    // ── Phase 5: Self-Updating MOBOT & Official Release Update System ──
+    if (method === "GET" && path === "/api/updater/status") {
+      return json(res, 200, appUpdater.getStatus());
+    }
+
+    if (method === "POST" && path === "/api/updater/check") {
+      const body = (await readBody(req)) || {};
+      const status = await appUpdater.checkForUpdates(Boolean(body?.force), body?.mockRelease);
+      return json(res, 200, status);
+    }
+
+    if (method === "POST" && path === "/api/updater/download") {
+      const status = await appUpdater.downloadUpdate();
+      return json(res, 200, status);
+    }
+
+    if (method === "POST" && path === "/api/updater/prepare-install") {
+      try {
+        const prep = await appUpdater.prepareInstall();
+        return json(res, 200, { ok: true, ...prep });
+      } catch (err: any) {
+        return json(res, 400, { ok: false, error: err.message });
+      }
+    }
+
+    if (method === "POST" && path === "/api/updater/complete-validation") {
+      const result = await appUpdater.completePostUpdateValidation();
+      return json(res, result.healthy ? 200 : 500, { ok: result.healthy, ...result });
+    }
+
+    if (method === "POST" && path === "/api/updater/rollback") {
+      try {
+        const resRollback = await appUpdater.rollback();
+        return json(res, 200, { ok: true, ...resRollback });
+      } catch (err: any) {
+        return json(res, 400, { ok: false, error: err.message });
+      }
+    }
+
+    if (method === "GET" && path === "/api/updater/download-artifact") {
+      const status = appUpdater.getStatus();
+      if (!status.stagedApkPath || !existsSync(status.stagedApkPath)) {
+        return json(res, 404, { error: "No staged update package found." });
+      }
+      res.setHeader("Content-Type", "application/vnd.android.package-archive");
+      res.setHeader("Content-Disposition", `attachment; filename="${basename(status.stagedApkPath)}"`);
+      createReadStream(status.stagedApkPath).pipe(res);
+      return;
     }
 
     // ── Phase V: Delight Features & Contextual Surfaces (Smart Recaps, Daily Briefing, Completion Cards) ────
