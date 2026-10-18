@@ -160,6 +160,7 @@ fun SettingsScreen(
     var editingQuickReplies by remember { mutableStateOf(false) }
     var neverAskPermissions by remember { mutableStateOf<Boolean?>(null) }
     var agentPermissions by remember { mutableStateOf<com.openmausbot.companion.core.AgentPermissions?>(null) }
+    var activePermissionDetailDomain by remember { mutableStateOf<String?>(null) }
     var savingPermissions by remember { mutableStateOf(false) }
     var cacheClearedMessage by remember { mutableStateOf<String?>(null) }
 
@@ -182,7 +183,13 @@ fun SettingsScreen(
 
     val currentSubPage = activeSubPage
     if (currentSubPage != null) {
-        BackHandler { activeSubPage = null }
+        BackHandler {
+            if (activePermissionDetailDomain != null) {
+                activePermissionDetailDomain = null
+            } else {
+                activeSubPage = null
+            }
+        }
         when (currentSubPage) {
             SettingsSubDestination.APPEARANCE -> {
                 SettingsSubPage(
@@ -354,134 +361,112 @@ fun SettingsScreen(
                 }
             }
             SettingsSubDestination.AGENT_PERMISSIONS -> {
-                val current = neverAskPermissions
-                SettingsSubPage(
-                    title = "Agent Permissions",
-                    subtitle = "Tool call authorization, safety barriers, and capabilities",
-                    onBack = { activeSubPage = null },
-                ) {
-                    SettingsSection(title = "Tool Execution Policy") {
-                        SettingsRow(
-                            title = "Execute Tools Without Asking",
-                            subtitle = if (current == true) {
-                                "Bots execute shell commands, web requests, and file edits automatically"
-                            } else {
-                                "Bots pause on an approval card before running tools or modifying files"
-                            },
-                            checked = current == true,
-                            enabled = current != null && !savingPermissions,
-                            busy = savingPermissions,
-                            onCheckedChange = { next ->
-                                scope.launch {
-                                    savingPermissions = true
-                                    session.setNeverAskPermissions(next)?.let {
-                                        neverAskPermissions = it.neverAskPermissions
-                                    }
-                                    savingPermissions = false
-                                }
-                            },
-                        )
-                    }
-
-                    val perms = agentPermissions ?: com.openmausbot.companion.core.AgentPermissions()
-                    fun formatPermissionState(state: String): String = when (state.lowercase()) {
-                        "granted" -> "Granted"
-                        "denied" -> "Denied"
-                        "restricted" -> "Restricted"
-                        "requires_configuration" -> "Requires configuration"
-                        else -> state.replaceFirstChar { it.uppercase() }
-                    }
-
-                    SettingsSection(title = "Core Capabilities & Permissions") {
-                        val terminalState = perms.terminal
-                        SettingsRow(
-                            title = "Terminal & Shell Execution",
-                            subtitle = "Sandboxed command-line operations on paired host",
-                            trailingValue = formatPermissionState(terminalState),
-                            checked = terminalState == "granted",
-                            onCheckedChange = { isGranted ->
-                                val next = if (isGranted) "granted" else "denied"
-                                scope.launch {
-                                    session.setAgentPermission("terminal", next)?.let {
-                                        agentPermissions = it.agentPermissions
-                                    }
-                                }
-                            },
-                        )
-                        SettingsDivider()
-                        val filesystemState = perms.filesystem
-                        SettingsRow(
-                            title = "Filesystem Read & Write",
-                            subtitle = "Access workspace files, codebases, and assets",
-                            trailingValue = formatPermissionState(filesystemState),
-                            checked = filesystemState == "granted",
-                            onCheckedChange = { isGranted ->
-                                val next = if (isGranted) "granted" else "denied"
-                                scope.launch {
-                                    session.setAgentPermission("filesystem", next)?.let {
-                                        agentPermissions = it.agentPermissions
-                                    }
-                                }
-                            },
-                        )
-                        SettingsDivider()
-                        val browserState = perms.browser
-                        SettingsRow(
-                            title = "Browser & Network",
-                            subtitle = "Inspect URLs, search web, and fetch REST endpoints",
-                            trailingValue = formatPermissionState(browserState),
-                            checked = browserState == "granted",
-                            onCheckedChange = { isGranted ->
-                                val next = if (isGranted) "granted" else "denied"
-                                scope.launch {
-                                    session.setAgentPermission("browser", next)?.let {
-                                        agentPermissions = it.agentPermissions
-                                    }
-                                }
-                            },
-                        )
-                        SettingsDivider()
-                        val composioState = perms.composio
-                        if (composioState == "requires_configuration") {
+                if (activePermissionDetailDomain != null) {
+                    PermissionDetailScreen(
+                        domainId = activePermissionDetailDomain!!,
+                        session = session,
+                        agentPermissions = agentPermissions,
+                        onPermissionsUpdated = { agentPermissions = it },
+                        onBack = { activePermissionDetailDomain = null },
+                        onOpenConnectedServices = {
+                            activePermissionDetailDomain = null
+                            activeSubPage = null
+                            onOpenConnectedApps?.invoke()
+                        },
+                    )
+                } else {
+                    val current = neverAskPermissions
+                    SettingsSubPage(
+                        title = "Agent Permissions",
+                        subtitle = "Tool call authorization, safety barriers, and capabilities",
+                        onBack = { activeSubPage = null },
+                    ) {
+                        SettingsSection(title = "Tool Execution Policy") {
                             SettingsRow(
-                                title = "Composio Integrations",
-                                subtitle = "Automate connected services (API key required)",
-                                trailingValue = "Requires configuration",
-                                showChevron = true,
-                                onClick = {
-                                    activeSubPage = null
-                                    onOpenConnectedApps?.invoke()
+                                title = "Execute Tools Without Asking",
+                                subtitle = if (current == true) {
+                                    "Bots execute shell commands, web requests, and file edits automatically"
+                                } else {
+                                    "Bots pause on an approval card before running tools or modifying files"
                                 },
-                            )
-                        } else {
-                            SettingsRow(
-                                title = "Composio Integrations",
-                                subtitle = "Automate connected services and cloud APIs",
-                                trailingValue = formatPermissionState(composioState),
-                                checked = composioState == "granted",
-                                onCheckedChange = { isGranted ->
-                                    val next = if (isGranted) "granted" else "denied"
+                                checked = current == true,
+                                enabled = current != null && !savingPermissions,
+                                busy = savingPermissions,
+                                onCheckedChange = { next ->
                                     scope.launch {
-                                        session.setAgentPermission("composio", next)?.let {
-                                            agentPermissions = it.agentPermissions
+                                        savingPermissions = true
+                                        session.setNeverAskPermissions(next)?.let {
+                                            neverAskPermissions = it.neverAskPermissions
                                         }
+                                        savingPermissions = false
                                     }
                                 },
                             )
                         }
-                    }
 
-                    if (onOpenSpecializedCapabilities != null) {
-                        SettingsSection(title = "Specialized AI") {
+                        val perms = agentPermissions ?: com.openmausbot.companion.core.AgentPermissions()
+                        fun formatPermissionState(state: String): String = when (state.lowercase()) {
+                            "granted" -> "Granted"
+                            "denied" -> "Denied"
+                            "restricted" -> "Restricted"
+                            "requires_configuration" -> "Requires configuration"
+                            else -> state.replaceFirstChar { it.uppercase() }
+                        }
+
+                        SettingsSection(title = "Core Capabilities & Permissions") {
+                            val terminalState = perms.terminal
                             SettingsRow(
-                                title = "Specialized Capabilities",
-                                subtitle = "Code interpreter, computer use, and reasoning models",
+                                title = "Terminal & Shell Execution",
+                                subtitle = "Sandboxed command-line operations on paired host",
+                                trailingValue = formatPermissionState(terminalState),
                                 showChevron = true,
-                                onClick = {
-                                    activeSubPage = null
-                                    onOpenSpecializedCapabilities()
-                                },
+                                onClick = { activePermissionDetailDomain = "terminal" },
                             )
+                            SettingsDivider()
+                            val filesystemState = perms.filesystem
+                            SettingsRow(
+                                title = "Filesystem Read & Write",
+                                subtitle = "Access workspace files, codebases, and assets",
+                                trailingValue = formatPermissionState(filesystemState),
+                                showChevron = true,
+                                onClick = { activePermissionDetailDomain = "filesystem" },
+                            )
+                            SettingsDivider()
+                            val browserState = perms.browser
+                            SettingsRow(
+                                title = "Browser & Network",
+                                subtitle = "Inspect URLs, search web, and fetch REST endpoints",
+                                trailingValue = formatPermissionState(browserState),
+                                showChevron = true,
+                                onClick = { activePermissionDetailDomain = "browser" },
+                            )
+                            SettingsDivider()
+                            val composioState = perms.composio
+                            SettingsRow(
+                                title = "Composio Integrations",
+                                subtitle = if (composioState == "requires_configuration") {
+                                    "Automate connected services (API key required)"
+                                } else {
+                                    "Automate connected services and cloud APIs"
+                                },
+                                trailingValue = formatPermissionState(composioState),
+                                showChevron = true,
+                                onClick = { activePermissionDetailDomain = "composio" },
+                            )
+                        }
+
+                        if (onOpenSpecializedCapabilities != null) {
+                            SettingsSection(title = "Specialized AI") {
+                                SettingsRow(
+                                    title = "Specialized Capabilities",
+                                    subtitle = "Code interpreter, computer use, and reasoning models",
+                                    showChevron = true,
+                                    onClick = {
+                                        activeSubPage = null
+                                        onOpenSpecializedCapabilities()
+                                    },
+                                )
+                            }
                         }
                     }
                 }

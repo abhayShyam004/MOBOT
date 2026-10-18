@@ -159,6 +159,7 @@ private fun SettingsSubPageHeader(
             Text(
                 text = title,
                 fontSize = 32.sp,
+                lineHeight = 36.sp,
                 fontWeight = FontWeight.Bold,
                 color = AppTheme.colors.textPrimary,
                 letterSpacing = (-0.5).sp,

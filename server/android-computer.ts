@@ -40,6 +40,7 @@ import { APP_BUILDER_TOOLS, setProjectManager } from "./app-builder/app-builder-
 import { DEVICE_CAPABILITY_TOOLS } from "./capabilities/capability-registry.ts";
 import { COMPUTER_AGENT_TOOLS } from "./computer-agent/agent-tools.ts";
 import { ProjectManager } from "./app-builder/project-manager.ts";
+import { checkToolPermission, loadDiskPermissions } from "./permission-policy.ts";
 
 const WORKSPACE = process.env.AC_WORKSPACE ?? "";
 if (!WORKSPACE) {
@@ -1681,58 +1682,10 @@ process.on("SIGTERM", () => {
 });
 process.on("SIGINT", () => process.exit(0));
 
-function checkPermissionForTool(toolName: string): { allowed: boolean; reason?: string } {
-  const terminalTools = new Set([
-    "run_command", "run_shell", "open_interactive",
-    "terminal_start", "terminal_write", "terminal_read",
-    "terminal_resize", "terminal_close", "terminal_list",
-  ]);
-  const filesystemTools = new Set([
-    "workspace_list", "workspace_read", "workspace_write",
-    "workspace_append", "workspace_mkdir", "workspace_move",
-    "workspace_copy", "workspace_delete", "workspace_stat",
-    "workspace_exists",
-  ]);
-  const browserTools = new Set([
-    "http_fetch", "web_search", "resource_inspect",
-    "resource_fetch", "resource_download", "resource_extract_pdf",
-    "resource_extract_html", "resource_artifacts",
-  ]);
-
-  let category: "terminal" | "filesystem" | "browser" | null = null;
-  let categoryLabel = "";
-  if (terminalTools.has(toolName)) {
-    category = "terminal";
-    categoryLabel = "Terminal & Shell Execution";
-  } else if (filesystemTools.has(toolName)) {
-    category = "filesystem";
-    categoryLabel = "Filesystem Read & Write";
-  } else if (browserTools.has(toolName)) {
-    category = "browser";
-    categoryLabel = "Browser & Network";
-  }
-
-  if (!category) return { allowed: true };
-
-  try {
-    const dataDir = process.env.OMB_DATA_DIR || (process.env.HOME ? join(process.env.HOME, ".openmausbot") : "");
-    if (dataDir) {
-      const configPath = join(dataDir, "config.json");
-      if (existsSync(configPath)) {
-        const raw = JSON.parse(readFileSync(configPath, "utf-8"));
-        const state = raw.agentPermissions?.[category];
-        if (state === "denied") {
-          return {
-            allowed: false,
-            reason: `Permission Denied: ${categoryLabel} is disabled in Settings -> Permissions.`,
-          };
-        }
-      }
-    }
-  } catch {
-    // If config file cannot be read, default to allow
-  }
-  return { allowed: true };
+function checkPermissionForTool(toolName: string, args?: Record<string, unknown>): { allowed: boolean; reason?: string } {
+  const permissions = loadDiskPermissions();
+  const res = checkToolPermission(toolName, permissions, args);
+  return { allowed: res.allowed, reason: res.reason };
 }
 
 function handle(message: RpcMessage): void {
@@ -1758,12 +1711,12 @@ function handle(message: RpcMessage): void {
       replyError(id, `unknown tool: ${name}`, -32602);
       return;
     }
-    const permCheck = checkPermissionForTool(name);
+    const args = (params.arguments ?? {}) as Record<string, unknown>;
+    const permCheck = checkPermissionForTool(name, args);
     if (!permCheck.allowed) {
       reply(id, textResult(toolError(permCheck.reason || "Permission Denied"), true));
       return;
     }
-    const args = (params.arguments ?? {}) as Record<string, unknown>;
     const controller = new AbortController();
     const abort = () => controller.abort();
     process.on("SIGTERM", abort);

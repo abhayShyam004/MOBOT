@@ -20,6 +20,7 @@ import { redactSecretsInText } from "../redact.ts";
 import { askQuestionSummary, normalizeAskUserInput } from "../../shared/ask-question.ts";
 import { toolDetailPreview } from "../tool-summary.ts";
 import { ChatToolSessionError, mountChatTools, type ChatToolDefinition, type ChatToolSession } from "./chat-mcp-tools.ts";
+import { checkToolPermission, loadDiskPermissions } from "../permission-policy.ts";
 import { createChatToolApproval } from "./chat-tool-approval.ts";
 import { appendNative } from "./native.ts";
 import { readCodexCredential, codexCredentialExpired, refreshCodexCredential, type CodexCredential } from "./codex-native-auth.ts";
@@ -601,6 +602,16 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
                 handled = true;
               } else {
                 tools.validate(call.name, args);
+              }
+              if (!handled) {
+                const diskPerms = loadDiskPermissions();
+                const perm = checkToolPermission(call.name, diskPerms, args as Record<string, unknown>);
+                if (!perm.allowed) {
+                  denials.push(call.name);
+                  startItem();
+                  result = { ok: false, text: perm.reason || "Permission Denied" };
+                  handled = true;
+                }
               }
               if (!handled) {
                 const allowed = turn.approvalMode === "full"

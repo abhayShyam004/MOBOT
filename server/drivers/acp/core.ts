@@ -19,6 +19,7 @@ import { lstat, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promi
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 
 import { PROVIDER_CREDENTIAL_ENV, WORKSPACE_CREDENTIAL_ENV } from "../../config.ts";
+import { checkToolPermission, loadDiskPermissions } from "../../permission-policy.ts";
 import { decodeInjectId } from "../local-inject.ts";
 import { describeSpawnFailure, execCli, killCliTree, spawnCli } from "../../procs.ts";
 
@@ -634,6 +635,11 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
             if (!support.clientFileSystem) throw new Error("Client file access is disabled.");
             const params = msg.params ?? {};
             const path = await resolveClientPath(params.path);
+            const toolOp = msg.method === "fs/read_text_file" ? "ReadFile" : "WriteFile";
+            const filePerm = checkToolPermission(toolOp, loadDiskPermissions(), { path });
+            if (!filePerm.allowed) {
+              return fail(new Error(filePerm.reason || "Filesystem access is disabled in Settings -> Agent Permissions."));
+            }
             if (msg.method === "fs/read_text_file") {
               const info = await stat(path);
               if (!info.isFile() || info.size > CLIENT_FILE_MAX_BYTES) {
@@ -718,6 +724,19 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
 
           const toolCall = params.toolCall ?? {};
           const isQuestion = String(toolCall.toolCallId ?? "").startsWith("interaction_");
+          const kind = String(toolCall.kind ?? "");
+          const tool = kind === "execute" ? "shell" : kind === "edit" ? "edit" : kind || "tool";
+          if (!isQuestion) {
+            const perm = checkToolPermission(tool, loadDiskPermissions(), toolCall.rawInput);
+            if (!perm.allowed) {
+              const reject = optionFor("reject");
+              return send({
+                jsonrpc: "2.0",
+                id: msg.id,
+                result: reject ? { outcome: { outcome: "selected", optionId: reject } } : cancelled,
+              });
+            }
+          }
           if (turnConfig.fullAuto && turn.approvalMode === undefined && !isQuestion) {
             const allow = optionFor("allow");
             if (!allow) missing("allow");
@@ -727,7 +746,6 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               result: allow ? { outcome: { outcome: "selected", optionId: allow } } : cancelled,
             });
           }
-          const kind = String(toolCall.kind ?? "");
           // an earlier "Always allow this session" on this exact operation
           const operationKey = isQuestion || controlsHost ? null : sessionOperationKey(toolCall);
           if (operationKey && sessionAllows.get(threadId)?.has(operationKey)) {
@@ -736,7 +754,6 @@ export function createAcpDriver(support: AcpSupport): ProviderDriver<AcpConfig> 
               return send({ jsonrpc: "2.0", id: msg.id, result: { outcome: { outcome: "selected", optionId: allow } } });
             }
           }
-          const tool = kind === "execute" ? "shell" : kind === "edit" ? "edit" : kind || "tool";
           const summary = String(toolCall.rawInput?.command ?? toolCall.title ?? tool).slice(0, 200);
           const requestId = newId();
           const finish = (

@@ -15,6 +15,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, dirname, isAbsolute, normalize } from "node:path";
 
 import { DATA_DIR, stripWorkspaceCredentialEnv } from "../config.ts";
+import { disallowedToolsForPermissions, loadDiskPermissions } from "../permission-policy.ts";
 import { augmentedPath } from "../env-path.ts";
 import { brokerSocketPath, describeSpawnFailure, execCli, killCliTree, spawnCli } from "../procs.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../resume-recovery.ts";
@@ -1115,8 +1116,13 @@ export const ClaudeDriver: ProviderDriver<ClaudeConfig> = {
         "--permission-mode", permissionMode,
       ];
       if (config.tools !== undefined) args.push("--tools", config.tools.join(","));
-      if (config.disallowedTools?.length) {
-        args.push("--disallowedTools", config.disallowedTools.join(","));
+      const disallowedTools = new Set<string>(config.disallowedTools ?? []);
+      const diskPerms = loadDiskPermissions();
+      for (const t of disallowedToolsForPermissions(diskPerms)) {
+        disallowedTools.add(t);
+      }
+      if (disallowedTools.size > 0) {
+        args.push("--disallowedTools", Array.from(disallowedTools).join(","));
       }
       const turnEnvironment = environment();
       if (turn.refreshSystemPrompt && !cliVersionChecked) {

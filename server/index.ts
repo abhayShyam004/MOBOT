@@ -3,7 +3,7 @@
 // folds one SSE event stream; every provider process runs here.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, rmSync } from "node:fs";
-import { execSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { rm as removeDirectory } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { extname, join } from "node:path";
@@ -18425,8 +18425,15 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       if (patch.agentPermissions) {
         if (patch.agentPermissions.terminal === "granted") {
           try {
-            const testCmd = process.platform === "win32" ? "cmd /c echo 1" : "/bin/sh -c 'echo 1'";
-            execSync(testCmd, { timeout: 3000, stdio: "pipe" });
+            const shBin = process.platform === "win32"
+              ? "cmd.exe"
+              : (existsSync("/system/bin/sh") ? "/system/bin/sh" : "sh");
+            const shArgs = process.platform === "win32"
+              ? ["/c", "echo 1"]
+              : ["-c", "echo 1"];
+            const test = spawnSync(shBin, shArgs, { timeout: 3000, stdio: "pipe" });
+            if (test.error) throw test.error;
+            if (test.status !== 0) throw new Error(test.stderr?.toString() || `exit code ${test.status}`);
           } catch (err: any) {
             return json(res, 400, { error: `Terminal capability cannot be granted: host shell execution failed (${err.message}).` });
           }

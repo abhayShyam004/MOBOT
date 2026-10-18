@@ -11,6 +11,7 @@ import { redactSecretsInText } from "../redact.ts";
 import { askQuestionSummary, normalizeAskUserInput } from "../../shared/ask-question.ts";
 import { toolDetailPreview } from "../tool-summary.ts";
 import { ChatToolSessionError, mountChatTools, type ChatToolDefinition, type ChatToolSession } from "./chat-mcp-tools.ts";
+import { checkToolPermission, loadDiskPermissions } from "../permission-policy.ts";
 import { createChatToolApproval } from "./chat-tool-approval.ts";
 import { ChatProtocolError, ChatReasoningDetails, ChatToolCalls, MAX_CHAT_TOOL_CALLS, object, type ChatToolCall } from "./openai-chat-protocol.ts";
 import { appendNative } from "./native.ts";
@@ -516,6 +517,16 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
                 handled = true;
               } else {
                 tools.validate(call.function.name, args);
+              }
+              if (!handled) {
+                const diskPerms = loadDiskPermissions();
+                const perm = checkToolPermission(call.function.name, diskPerms, args as Record<string, unknown>);
+                if (!perm.allowed) {
+                  denials.push(call.function.name);
+                  startItem();
+                  result = { ok: false, text: perm.reason || "Permission Denied" };
+                  handled = true;
+                }
               }
               if (!handled) {
                 // Full access is the person's explicit grant to answer every

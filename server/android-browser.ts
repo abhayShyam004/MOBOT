@@ -23,6 +23,7 @@
 // navigation — the session grant IS the scope.
 import { createHash } from "node:crypto";
 import { mkdirSync } from "node:fs";
+import { checkToolPermission, loadDiskPermissions } from "./permission-policy.ts";
 
 // ── env contract (set by HarnessHost.kt; fail closed, say why) ──────────────
 const DRIVER_PORT = Number(process.env.AB_DRIVER_PORT ?? "0");
@@ -259,6 +260,11 @@ function handle(message: RpcMessage): void {
       return;
     }
     const args = (params.arguments ?? {}) as Record<string, unknown>;
+    const perm = checkToolPermission(name, loadDiskPermissions(), args);
+    if (!perm.allowed) {
+      reply(id, textResult(toolError(perm.reason || "Browser access is disabled in Settings -> Agent Permissions"), true));
+      return;
+    }
     Promise.resolve()
       .then(() => spec.handler(args))
       .then(

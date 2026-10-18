@@ -21,68 +21,13 @@
 // stdout is the MCP channel — never console.log here.
 import { connect } from "node:net";
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { normalizeAskUserInput, questionAnswersByQuestion } from "../shared/ask-question.ts";
+import { checkToolPermission, loadDiskPermissions } from "./permission-policy.ts";
 
-function checkPermissionForTool(toolName: string): { allowed: boolean; reason?: string } {
-  const terminalTools = new Set([
-    "Bash", "run_command", "run_shell", "open_interactive",
-    "terminal_start", "terminal_write", "terminal_read",
-    "terminal_resize", "terminal_close", "terminal_list",
-  ]);
-  const filesystemTools = new Set([
-    "ReadFile", "WriteFile", "EditFile",
-    "workspace_list", "workspace_read", "workspace_write",
-    "workspace_append", "workspace_mkdir", "workspace_move",
-    "workspace_copy", "workspace_delete", "workspace_stat",
-    "workspace_exists", "device.files",
-  ]);
-  const browserTools = new Set([
-    "http_fetch", "web_search", "resource_inspect",
-    "resource_fetch", "resource_download", "resource_extract_pdf",
-    "resource_extract_html", "resource_artifacts", "browser_open",
-    "browser_click", "browser_screenshot", "browser_navigate",
-  ]);
-
-  let category: "terminal" | "filesystem" | "browser" | "composio" | null = null;
-  let categoryLabel = "";
-
-  if (terminalTools.has(toolName) || /^(bash|sh|terminal|shell|exec)/i.test(toolName)) {
-    category = "terminal";
-    categoryLabel = "Terminal & Shell Execution";
-  } else if (filesystemTools.has(toolName) || /^(fs_|file_|workspace_)/i.test(toolName)) {
-    category = "filesystem";
-    categoryLabel = "Filesystem Read & Write";
-  } else if (browserTools.has(toolName) || /^(browser_|web_|http_)/i.test(toolName)) {
-    category = "browser";
-    categoryLabel = "Browser & Network";
-  } else if (/^composio/i.test(toolName) || toolName.startsWith("mcp__composio")) {
-    category = "composio";
-    categoryLabel = "Connected Apps (Composio)";
-  }
-
-  if (!category) return { allowed: true };
-
-  try {
-    const dataDir = process.env.OMB_DATA_DIR || (process.env.HOME ? join(process.env.HOME, ".openmausbot") : "");
-    if (dataDir) {
-      const configPath = join(dataDir, "config.json");
-      if (existsSync(configPath)) {
-        const raw = JSON.parse(readFileSync(configPath, "utf-8"));
-        const state = raw.agentPermissions?.[category];
-        if (state === "denied") {
-          return {
-            allowed: false,
-            reason: `Permission Denied: ${categoryLabel} is disabled in Settings -> Permissions.`,
-          };
-        }
-      }
-    }
-  } catch {
-    // If config file cannot be read, default to allow
-  }
-  return { allowed: true };
+function checkPermissionForTool(toolName: string, args?: Record<string, unknown>): { allowed: boolean; reason?: string } {
+  const permissions = loadDiskPermissions();
+  const res = checkToolPermission(toolName, permissions, args);
+  return { allowed: res.allowed, reason: res.reason };
 }
 
 const socketPath = process.argv[2] ?? "";
@@ -275,7 +220,7 @@ async function handle(msg: any) {
       if (args.tool_name === ASK_USER_QUESTION) {
         return reply(await answerNativeQuestions(args.input));
       }
-      const permCheck = checkPermissionForTool(String(args.tool_name ?? ""));
+      const permCheck = checkPermissionForTool(String(args.tool_name ?? ""), args.input as Record<string, unknown> | undefined);
       if (!permCheck.allowed) {
         return reply(JSON.stringify({ behavior: "deny", message: permCheck.reason || "Permission Denied" }));
       }

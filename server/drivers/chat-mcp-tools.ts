@@ -5,6 +5,7 @@ import { Ajv2020 } from "ajv/dist/2020.js";
 import formats from "ajv-formats";
 import type { SendTurnInput } from "../contracts.ts";
 import { mcpChildEnvironment } from "../mcp-env.ts";
+import { checkToolPermission, loadDiskPermissions } from "../permission-policy.ts";
 import { RemoteMcpClient } from "../mcp-http.ts";
 import { killCliTree, spawnCli } from "../procs.ts";
 
@@ -353,6 +354,17 @@ export async function mountChatTools(integrations: SendTurnInput["integrations"]
       validate(name, args);
       if (callSignal.aborted) { await close(); throw aborted(); }
       const tool = registered.get(name)!;
+      const diskPerms = loadDiskPermissions();
+      const permCheck = checkToolPermission(tool.name, diskPerms, object(args) ? (args as Record<string, unknown>) : undefined);
+      if (!permCheck.allowed) {
+        return { text: permCheck.reason || "Permission Denied", ok: false };
+      }
+      if (name !== tool.name) {
+        const aliasCheck = checkToolPermission(name, diskPerms, object(args) ? (args as Record<string, unknown>) : undefined);
+        if (!aliasCheck.allowed) {
+          return { text: aliasCheck.reason || "Permission Denied", ok: false };
+        }
+      }
       try {
         const result = await tool.client.call("tools/call", { name: tool.name, arguments: args }, AbortSignal.any([signal, callSignal]), CALL_MS);
         if (signal.aborted || callSignal.aborted) throw aborted();

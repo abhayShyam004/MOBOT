@@ -21,6 +21,7 @@ import { createInterface } from "node:readline";
 
 import { resolveCliSpawn } from "./env-path.ts";
 import { DEFAULT_RESULT_BUDGET, trimResultText, trimStructured } from "./mcp-trim.ts";
+import { checkToolPermission, loadDiskPermissions } from "./permission-policy.ts";
 import { killCliTree } from "./procs.ts";
 
 type Json = Record<string, unknown>;
@@ -196,7 +197,23 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       const message = JSON.parse(line) as Json;
       if (message.method === "tools/call" && message.id !== undefined && message.id !== null) {
         const params = message.params as Json | undefined;
-        pending.set(String(message.id), typeof params?.name === "string" ? params.name : "tool");
+        const toolName = typeof params?.name === "string" ? params.name : "tool";
+        const args = (params?.arguments ?? {}) as Record<string, unknown>;
+        const perm = checkToolPermission(toolName, loadDiskPermissions(), args);
+        if (!perm.allowed) {
+          process.stdout.write(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: message.id,
+              result: {
+                content: [{ type: "text", text: perm.reason || "Permission Denied" }],
+                isError: true,
+              },
+            }) + "\n",
+          );
+          return;
+        }
+        pending.set(String(message.id), toolName);
       }
     } catch {
       /* not our business to validate the client's frames */
