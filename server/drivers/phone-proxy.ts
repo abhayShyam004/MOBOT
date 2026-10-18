@@ -5,15 +5,67 @@ import { accessSync, constants, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { delimiter, join } from "node:path";
 import { homedir } from "node:os";
+import { checkToolPermission, loadDiskPermissions } from "../permission-policy.ts";
 
 type Json = Record<string, unknown>;
-type Device = { serial: string; state: string; model: string; connection: "usb" | "network" | "emulator" };
-type UiNode = { text: string; description: string; id: string; className: string; bounds: [number, number, number, number] };
+export type Device = { serial: string; state: string; model: string; connection: "usb" | "network" | "emulator" };
+export type UiNode = {
+  text: string;
+  description: string;
+  id: string;
+  className: string;
+  bounds: [number, number, number, number];
+  clickable: boolean;
+  focusable: boolean;
+  focused: boolean;
+  scrollable: boolean;
+  editable: boolean;
+  package: string;
+};
+
+export type PhoneErrorCode =
+  | "APP_NOT_INSTALLED"
+  | "APP_NOT_LAUNCHABLE"
+  | "ANDROID_ACCESS_REQUIRED"
+  | "TARGET_NOT_FOUND"
+  | "ACTION_NOT_SUPPORTED"
+  | "ACTION_FAILED"
+  | "TIMEOUT"
+  | "VERIFICATION_FAILED"
+  | "PERMISSION_DENIED"
+  | "UNKNOWN";
+
+export class PhoneActionError extends Error {
+  code: PhoneErrorCode;
+  details?: Record<string, unknown>;
+
+  constructor(code: PhoneErrorCode, message: string, details?: Record<string, unknown>) {
+    super(message);
+    this.name = "PhoneActionError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+export interface AppInfo {
+  name: string;
+  packageName: string;
+  activity?: string;
+  launchable: boolean;
+  enabled: boolean;
+}
+
+export interface ScreenState {
+  currentPackage: string;
+  currentActivity?: string;
+  nodeCount: number;
+  nodes: UiNode[];
+}
 
 const MAX_ADB_OUTPUT = 16 * 1024 * 1024;
 const PACKAGE = /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$/;
 const COMPONENT = /^([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\/\S+$/;
-const SAFE_TEXT = /^[A-Za-z0-9 _.,@-]+$/;
+const SAFE_TEXT = /^[A-Za-z0-9 _.,@'"+:;!?()/-]+$/;
 const KEYCODES: Record<string, string> = {
   back: "KEYCODE_BACK",
   delete: "KEYCODE_DEL",
@@ -29,10 +81,68 @@ const KEYCODES: Record<string, string> = {
   tab: "KEYCODE_TAB",
   up: "KEYCODE_DPAD_UP",
 };
-const KNOWN_PACKAGES: Record<string, string> = {
+
+export const KNOWN_PACKAGES: Record<string, string> = {
+  whatsapp: "com.whatsapp",
+  settings: "com.android.settings",
+  chrome: "com.android.chrome",
+  browser: "com.android.chrome",
+  maps: "com.google.android.apps.maps",
+  googlemaps: "com.google.android.apps.maps",
+  store: "com.android.vending",
+  playstore: "com.android.vending",
+  googleplay: "com.android.vending",
+  youtube: "com.google.android.youtube",
+  gmail: "com.google.android.gm",
+  email: "com.google.android.gm",
+  messages: "com.google.android.apps.messaging",
+  sms: "com.google.android.apps.messaging",
+  contacts: "com.samsung.android.app.contacts",
+  camera: "com.sec.android.app.camera",
+  clock: "com.sec.android.app.clockpackage",
+  calculator: "com.sec.android.app.popupcalculator",
+  files: "com.sec.android.app.myfiles",
+  myfiles: "com.sec.android.app.myfiles",
+  companion: "com.openmausbot.companion",
+  mobot: "com.openmausbot.companion",
   skyscanner: "net.skyscanner.android.main",
   uber: "com.ubercab",
+  spotify: "com.spotify.music",
+  telegram: "org.telegram.messenger",
+  instagram: "com.instagram.android",
+  twitter: "com.twitter.android",
+  x: "com.twitter.android",
 };
+
+export const HUMAN_LABELS: Record<string, string> = {
+  "com.whatsapp": "WhatsApp",
+  "com.android.settings": "Settings",
+  "com.android.chrome": "Chrome",
+  "com.google.android.apps.maps": "Google Maps",
+  "com.android.vending": "Google Play Store",
+  "com.google.android.youtube": "YouTube",
+  "com.google.android.gm": "Gmail",
+  "com.google.android.apps.messaging": "Messages",
+  "com.samsung.android.app.contacts": "Contacts",
+  "com.sec.android.app.camera": "Camera",
+  "com.sec.android.app.clockpackage": "Clock",
+  "com.sec.android.app.popupcalculator": "Calculator",
+  "com.sec.android.app.myfiles": "My Files",
+  "com.openmausbot.companion": "MOBOT Companion",
+  "net.skyscanner.android.main": "Skyscanner",
+  "com.ubercab": "Uber",
+  "com.spotify.music": "Spotify",
+  "org.telegram.messenger": "Telegram",
+  "com.instagram.android": "Instagram",
+  "com.twitter.android": "X",
+};
+
+export function humanLabelForPackage(pkg: string): string {
+  if (HUMAN_LABELS[pkg]) return HUMAN_LABELS[pkg];
+  const parts = pkg.split(".");
+  const last = parts[parts.length - 1];
+  return last.charAt(0).toUpperCase() + last.slice(1);
+}
 
 function executableName(platform = process.platform) {
   return platform === "win32" ? "adb.exe" : "adb";
@@ -61,7 +171,7 @@ export function resolveAdbPath(env: NodeJS.ProcessEnv = process.env, platform = 
 
 async function runAdb(args: string[], options: { binary?: boolean; timeoutMs?: number } = {}): Promise<Buffer> {
   const adb = resolveAdbPath();
-  if (!adb) throw new Error("Android platform tools are unavailable. Reopen OpenMausBot or install adb.");
+  if (!adb) throw new PhoneActionError("ANDROID_ACCESS_REQUIRED", "Android platform tools are unavailable. Please install adb.");
   return new Promise((resolve, reject) => {
     const child = spawn(adb, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
     const stdout: Buffer[] = [];
@@ -69,8 +179,8 @@ async function runAdb(args: string[], options: { binary?: boolean; timeoutMs?: n
     let size = 0;
     const timer = setTimeout(() => {
       child.kill();
-      reject(new Error("The Android device command timed out"));
-    }, options.timeoutMs ?? 12_000);
+      reject(new PhoneActionError("TIMEOUT", "The Android device command timed out"));
+    }, options.timeoutMs ?? 14_000);
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > MAX_ADB_OUTPUT) child.kill();
@@ -79,12 +189,15 @@ async function runAdb(args: string[], options: { binary?: boolean; timeoutMs?: n
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.on("error", (error) => {
       clearTimeout(timer);
-      reject(error);
+      reject(new PhoneActionError("ACTION_FAILED", error.message));
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      if (size > MAX_ADB_OUTPUT) return reject(new Error("The Android device returned too much data"));
-      if (code !== 0) return reject(new Error(Buffer.concat(stderr).toString("utf8").trim() || `adb exited ${code}`));
+      if (size > MAX_ADB_OUTPUT) return reject(new PhoneActionError("ACTION_FAILED", "The Android device returned too much data"));
+      if (code !== 0) {
+        const errText = Buffer.concat(stderr).toString("utf8").trim() || `adb exited with code ${code}`;
+        return reject(new PhoneActionError("ACTION_FAILED", errText));
+      }
       resolve(Buffer.concat(stdout));
     });
   });
@@ -116,28 +229,36 @@ export function parseDevices(output: string): Device[] {
   return devices;
 }
 
-async function usbDevices() {
+export async function usbDevices(): Promise<Device[]> {
   if (!resolveAdbPath()) return [];
   return parseDevices((await runAdb(["devices", "-l"])).toString("utf8")).filter((device) => device.connection === "usb");
 }
 
-async function readySerial(requested?: unknown): Promise<string> {
+export async function readySerial(requested?: unknown): Promise<string> {
   const devices = await usbDevices();
   const serial = typeof requested === "string" && requested ? requested : process.env.PH_ANDROID_SERIAL;
   const candidates = serial ? devices.filter((device) => device.serial === serial) : devices;
-  if (!candidates.length) throw new Error("No physical USB Android device is connected");
-  if (candidates.length > 1 && !serial) throw new Error("Multiple USB Android devices are connected; pass serial");
+  if (!candidates.length) {
+    throw new PhoneActionError("ANDROID_ACCESS_REQUIRED", "No physical USB Android device is connected.");
+  }
+  if (candidates.length > 1 && !serial) {
+    throw new PhoneActionError("ACTION_FAILED", "Multiple USB Android devices are connected; pass serial.");
+  }
   const device = candidates[0];
-  if (device.state === "unauthorized") throw new Error("Unlock the phone and accept Allow USB debugging");
-  if (device.state !== "device") throw new Error(`The Android device is ${device.state}`);
+  if (device.state === "unauthorized") {
+    throw new PhoneActionError("ANDROID_ACCESS_REQUIRED", "Unlock the phone and accept 'Allow USB debugging'.");
+  }
+  if (device.state !== "device") {
+    throw new PhoneActionError("ANDROID_ACCESS_REQUIRED", `The Android device is ${device.state}.`);
+  }
   return device.serial;
 }
 
-async function onDevice(serial: string, args: string[], binary = false) {
+export async function onDevice(serial: string, args: string[], binary = false): Promise<Buffer> {
   return runAdb(["-s", serial, ...args], { binary });
 }
 
-function normalize(value: string) {
+export function normalize(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
 
@@ -150,12 +271,27 @@ export function parseLaunchablePackages(output: string): string[] {
   return packages;
 }
 
-export function findPackages(name: string, packages: string[]) {
+export function parseLaunchableActivities(output: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const raw of output.split(/\r?\n/)) {
+    const trimmed = raw.trim();
+    const match = COMPONENT.exec(trimmed);
+    if (match) {
+      const [_, pkg] = match;
+      if (!map.has(pkg)) {
+        map.set(pkg, trimmed);
+      }
+    }
+  }
+  return map;
+}
+
+export function findPackages(name: string, packages: string[]): string[] {
   if (PACKAGE.test(name) && packages.includes(name)) return [name];
   const needle = normalize(name);
   const known = KNOWN_PACKAGES[needle];
   if (known && packages.includes(known)) return [known];
-  if (needle.length < 4) return [];
+  if (needle.length < 3) return [];
   const ranked = [
     (token: string) => token === needle,
     (token: string) => token.startsWith(needle),
@@ -168,15 +304,48 @@ export function findPackages(name: string, packages: string[]) {
   return [];
 }
 
-async function launchablePackages(serial: string) {
-  const output = await onDevice(serial, [
-    "shell", "cmd", "package", "query-activities", "--brief",
-    "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
-  ]);
-  return parseLaunchablePackages(output.toString("utf8"));
+export async function getInstalledPackages(serial: string): Promise<Set<string>> {
+  try {
+    const out = (await onDevice(serial, ["shell", "pm", "list", "packages", "--user", "0"])).toString("utf8");
+    const pkgs = new Set<string>();
+    for (const line of out.split(/\r?\n/)) {
+      if (line.startsWith("package:")) {
+        pkgs.add(line.slice("package:".length).trim());
+      }
+    }
+    return pkgs;
+  } catch {
+    return new Set();
+  }
 }
 
-function decodeXml(value: string) {
+export async function getEnabledPackages(serial: string): Promise<Set<string>> {
+  try {
+    const out = (await onDevice(serial, ["shell", "pm", "list", "packages", "-e", "--user", "0"])).toString("utf8");
+    const pkgs = new Set<string>();
+    for (const line of out.split(/\r?\n/)) {
+      if (line.startsWith("package:")) {
+        pkgs.add(line.slice("package:".length).trim());
+      }
+    }
+    return pkgs;
+  } catch {
+    return new Set();
+  }
+}
+
+export async function getForegroundActivity(serial: string): Promise<{ package: string; activity: string } | null> {
+  try {
+    const raw = (await onDevice(serial, ["shell", "dumpsys", "window"])).toString("utf8");
+    const m = /mCurrentFocus=Window\{[^\s]+\s+(?:u\d+\s+)?([A-Za-z0-9_.]+)\/([^}\s]+)\}/.exec(raw);
+    if (m) return { package: m[1], activity: m[2] };
+    const m2 = /mFocusedApp=ActivityRecord\{[^\s]+\s+(?:u\d+\s+)?([A-Za-z0-9_.]+)\/([^}\s]+)/.exec(raw);
+    if (m2) return { package: m2[1], activity: m2[2] };
+  } catch {}
+  return null;
+}
+
+function decodeXml(value: string): string {
   return value
     .replaceAll("&quot;", '"')
     .replaceAll("&apos;", "'")
@@ -196,19 +365,35 @@ export function parseUiNodes(xml: string): UiNode[] {
     if (!bounds) continue;
     const text = attributes.text ?? "";
     const description = attributes["content-desc"] ?? "";
-    if (!text && !description && !attributes["resource-id"]) continue;
+    const id = attributes["resource-id"] ?? "";
+    const className = attributes.class ?? "";
+    const clickable = attributes.clickable === "true";
+    const focusable = attributes.focusable === "true";
+    const focused = attributes.focused === "true";
+    const scrollable = attributes.scrollable === "true";
+    const editable = className.toLowerCase().includes("edittext") || attributes.password === "true";
+    const pkg = attributes.package ?? "";
+
+    if (!text && !description && !id && !clickable && !editable && !scrollable) continue;
+
     nodes.push({
       text,
       description,
-      id: attributes["resource-id"] ?? "",
-      className: attributes.class ?? "",
+      id,
+      className,
       bounds: [Number(bounds[1]), Number(bounds[2]), Number(bounds[3]), Number(bounds[4])],
+      clickable,
+      focusable,
+      focused,
+      scrollable,
+      editable,
+      package: pkg,
     });
   }
   return nodes;
 }
 
-async function readNodes(serial: string) {
+export async function readNodes(serial: string): Promise<UiNode[]> {
   const streamed = (await onDevice(serial, ["shell", "uiautomator", "dump", "/dev/tty"])).toString("utf8");
   const streamedStart = streamed.indexOf("<?xml");
   if (streamedStart >= 0) return parseUiNodes(streamed.slice(streamedStart));
@@ -221,106 +406,437 @@ async function readNodes(serial: string) {
   return parseUiNodes(savedStart >= 0 ? saved.slice(savedStart) : saved);
 }
 
-function nodeLines(nodes: UiNode[]) {
-  return nodes.slice(0, 250).map((node, index) => {
+export function formatScreenState(state: ScreenState): string {
+  const header = `Active Screen: ${state.currentPackage}${state.currentActivity ? ` / ${state.currentActivity}` : ""} (${state.nodes.length} visible elements)`;
+  const lines = state.nodes.slice(0, 160).map((node, index) => {
     const label = [node.text, node.description].filter(Boolean).join(" · ");
-    return `${index}: ${JSON.stringify(label || node.id)} bounds=${node.bounds.join(",")} class=${node.className}`;
-  }).join("\n") || "No accessible Android UI text is visible.";
+    const tags = [
+      node.clickable ? "[CLICKABLE]" : "",
+      node.editable ? "[EDITABLE]" : "",
+      node.focused ? "[FOCUSED]" : "",
+      node.scrollable ? "[SCROLLABLE]" : "",
+    ].filter(Boolean).join(" ");
+    const tagSuffix = tags ? ` ${tags}` : "";
+    return `${index}: ${JSON.stringify(label || node.id || node.className)} bounds=${node.bounds.join(",")}${tagSuffix}`;
+  });
+  return [header, ...lines].join("\n") || "No accessible UI elements visible on screen.";
 }
 
+// ── App Discovery & Management ──────────────────────────────────────────
+
+export async function listAppCatalog(serial: string, query?: string): Promise<AppInfo[]> {
+  const [actOutput, installed, enabled] = await Promise.all([
+    onDevice(serial, [
+      "shell", "cmd", "package", "query-activities", "--brief",
+      "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
+    ]).catch(() => Buffer.from("")),
+    getInstalledPackages(serial),
+    getEnabledPackages(serial),
+  ]);
+  const launchableMap = parseLaunchableActivities(actOutput.toString("utf8"));
+
+  const results: AppInfo[] = [];
+  for (const [pkg, act] of launchableMap.entries()) {
+    results.push({
+      name: humanLabelForPackage(pkg),
+      packageName: pkg,
+      activity: act,
+      launchable: true,
+      enabled: enabled.has(pkg),
+    });
+  }
+
+  if (!query) return results;
+
+  const needle = normalize(query);
+  const filtered = results.filter((app) => (
+    normalize(app.name).includes(needle) ||
+    normalize(app.packageName).includes(needle)
+  ));
+
+  if (filtered.length > 0) return filtered;
+
+  // Check if installed but non-launchable
+  for (const pkg of installed) {
+    if (normalize(pkg).includes(needle) || normalize(humanLabelForPackage(pkg)).includes(needle)) {
+      if (!results.some((r) => r.packageName === pkg)) {
+        results.push({
+          name: humanLabelForPackage(pkg),
+          packageName: pkg,
+          launchable: false,
+          enabled: enabled.has(pkg),
+        });
+      }
+    }
+  }
+
+  return results.filter((app) => normalize(app.name).includes(needle) || normalize(app.packageName).includes(needle));
+}
+
+export async function openApp(
+  serial: string,
+  appName: string,
+): Promise<string> {
+  const cleaned = appName.trim();
+  if (!cleaned) throw new PhoneActionError("ACTION_NOT_SUPPORTED", "name is required");
+
+  const [actOutput, installed] = await Promise.all([
+    onDevice(serial, [
+      "shell", "cmd", "package", "query-activities", "--brief",
+      "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
+    ]).catch(() => Buffer.from("")),
+    getInstalledPackages(serial),
+  ]);
+  const launchableMap = parseLaunchableActivities(actOutput.toString("utf8"));
+  const launchablePkgs = Array.from(launchableMap.keys());
+  const matches = findPackages(cleaned, launchablePkgs);
+
+  if (matches.length === 0) {
+    const installedMatches = findPackages(cleaned, Array.from(installed));
+    if (installedMatches.length > 0) {
+      throw new PhoneActionError(
+        "APP_NOT_LAUNCHABLE",
+        `${cleaned} is installed (${installedMatches[0]}), but has no launchable launcher activity.`
+      );
+    }
+    throw new PhoneActionError(
+      "APP_NOT_INSTALLED",
+      `No installed launchable application matches "${cleaned}".`
+    );
+  }
+
+  if (matches.length > 1) {
+    throw new PhoneActionError(
+      "ACTION_NOT_SUPPORTED",
+      `App name is ambiguous: ${matches.map((p) => humanLabelForPackage(p)).join(", ")}`
+    );
+  }
+
+  const targetPkg = matches[0];
+  const human = humanLabelForPackage(targetPkg);
+  const component = launchableMap.get(targetPkg);
+
+  if (component) {
+    await onDevice(serial, ["shell", "am", "start", "-n", component]);
+  } else {
+    await onDevice(serial, ["shell", "monkey", "-p", targetPkg, "-c", "android.intent.category.LAUNCHER", "1"]);
+  }
+
+  // Observe device & verify foreground package settles
+  const start = Date.now();
+  const timeoutMs = 7000;
+  let settled = false;
+  let fg: { package: string; activity: string } | null = null;
+  while (Date.now() - start < timeoutMs) {
+    fg = await getForegroundActivity(serial);
+    if (fg && (fg.package === targetPkg || fg.package.startsWith(`${targetPkg}.`))) {
+      settled = true;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 350));
+  }
+
+  if (!settled) {
+    throw new PhoneActionError(
+      "VERIFICATION_FAILED",
+      `${human} could not be opened: foreground did not switch to ${targetPkg} (currently ${fg?.package ?? "unknown"}).`,
+      { expected: targetPkg, actual: fg?.package }
+    );
+  }
+
+  return `${human} is open.`;
+}
+
+// ── Screen Actions ──────────────────────────────────────────────────────
+
+export async function tapNode(
+  serial: string,
+  query: string,
+  options: { exact?: boolean; index?: number } = {}
+): Promise<string> {
+  const needle = query.trim().toLowerCase();
+  if (!needle) throw new PhoneActionError("ACTION_NOT_SUPPORTED", "text is required");
+  const exact = options.exact === true;
+  const nodes = await readNodes(serial);
+  const hits = nodes.filter((node) => {
+    const labels = [node.text, node.description].filter(Boolean).map((v) => v.toLowerCase());
+    return labels.some((label) => exact ? label === needle : label.includes(needle));
+  });
+
+  const index = Number.isInteger(options.index) ? Number(options.index) : 0;
+  const hit = hits[index];
+  if (!hit) {
+    throw new PhoneActionError("TARGET_NOT_FOUND", `No visible Android text matches "${query}".`);
+  }
+
+  const [x1, y1, x2, y2] = hit.bounds;
+  const cx = Math.round((x1 + x2) / 2);
+  const cy = Math.round((y1 + y2) / 2);
+  await onDevice(serial, ["shell", "input", "tap", String(cx), String(cy)]);
+  await new Promise((r) => setTimeout(r, 350));
+  return `Tapped "${hit.text || hit.description || hit.id}"`;
+}
+
+export async function tapCoordinates(serial: string, x: number, y: number): Promise<string> {
+  if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 10000 || y > 10000) {
+    throw new PhoneActionError("ACTION_NOT_SUPPORTED", `Invalid coordinates: ${x}, ${y}`);
+  }
+  await onDevice(serial, ["shell", "input", "tap", String(Math.round(x)), String(Math.round(y))]);
+  await new Promise((r) => setTimeout(r, 350));
+  return `Tapped ${Math.round(x)},${Math.round(y)}`;
+}
+
+export async function typeText(serial: string, text: string): Promise<string> {
+  if (!text || text.length > 256 || !SAFE_TEXT.test(text)) {
+    throw new PhoneActionError("ACTION_NOT_SUPPORTED", "Android text supports only basic ASCII text up to 256 characters");
+  }
+  const escaped = text.replaceAll(" ", "%s");
+  await onDevice(serial, ["shell", "input", "text", escaped]);
+  await new Promise((r) => setTimeout(r, 400));
+  return "Typed text into the focused Android field";
+}
+
+export async function clearText(serial: string): Promise<string> {
+  await onDevice(serial, ["shell", "input", "keyevent", "123"]); // KEYCODE_MOVE_END
+  const delArgs = ["shell", "input", "keyevent", ...Array(40).fill("KEYCODE_DEL")];
+  await onDevice(serial, delArgs);
+  await new Promise((r) => setTimeout(r, 200));
+  return "Cleared focused text field";
+}
+
+export async function swipeScreen(serial: string, direction: string): Promise<string> {
+  const size = (await onDevice(serial, ["shell", "wm", "size"])).toString("utf8");
+  const match = /(\d+)x(\d+)/.exec(size);
+  if (!match) throw new PhoneActionError("ACTION_FAILED", "Could not read Android screen size");
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  const points: Record<string, [number, number, number, number]> = {
+    up: [width / 2, height * 0.75, width / 2, height * 0.25],
+    down: [width / 2, height * 0.25, width / 2, height * 0.75],
+    left: [width * 0.75, height / 2, width * 0.25, height / 2],
+    right: [width * 0.25, height / 2, width * 0.75, height / 2],
+  };
+  const point = points[direction];
+  if (!point) throw new PhoneActionError("ACTION_NOT_SUPPORTED", `Invalid swipe direction: ${direction}`);
+  await onDevice(serial, ["shell", "input", "swipe", ...point.map((v) => String(Math.round(v))), "300"]);
+  await new Promise((r) => setTimeout(r, 350));
+  return `Swiped ${direction}`;
+}
+
+export async function pressKey(serial: string, key: string): Promise<string> {
+  const norm = key.toLowerCase();
+  const code = KEYCODES[norm];
+  if (!code) throw new PhoneActionError("ACTION_NOT_SUPPORTED", `Unsupported Android key: ${key}`);
+  await onDevice(serial, ["shell", "input", "keyevent", code]);
+  await new Promise((r) => setTimeout(r, 350));
+  return `Pressed ${key}`;
+}
+
+// ── Turn Isolation & Concurrency ────────────────────────────────────────
+
+const seenActions = new Set<string>();
+let activeDeviceLock: Promise<void> = Promise.resolve();
+
+function checkActionIsolation(args: Json) {
+  const actionId = typeof args.actionId === "string" ? args.actionId : undefined;
+  if (actionId) {
+    if (seenActions.has(actionId)) {
+      throw new PhoneActionError("ACTION_FAILED", `Action ${actionId} was already executed (duplicate rejected).`);
+    }
+    seenActions.add(actionId);
+  }
+}
+
+async function withDeviceLock<T>(fn: () => Promise<T>): Promise<T> {
+  const prevLock = activeDeviceLock;
+  let release: () => void = () => {};
+  activeDeviceLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await prevLock;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
+
+function verifyPermission(toolName: string) {
+  const perms = loadDiskPermissions();
+  const check = checkToolPermission(toolName, perms);
+  if (!check.allowed) {
+    throw new PhoneActionError("PERMISSION_DENIED", check.reason);
+  }
+}
+
+// ── Tool Definitions ────────────────────────────────────────────────────
+
 const TOOLS = [
-  { name: "status", description: "Check physical USB Android devices and USB-debugging authorization before any Android phone task.", inputSchema: { type: "object", properties: {} } },
-  { name: "read_screen", description: "Read visible text, accessibility labels, resource ids, and pixel bounds from the connected Android screen. Use after every action to verify the result.", inputSchema: { type: "object", properties: { serial: { type: "string" } } } },
-  { name: "screenshot", description: "Capture the connected Android screen when accessibility text is insufficient. Returns a PNG image.", inputSchema: { type: "object", properties: { serial: { type: "string" } } } },
-  { name: "list_apps", description: "List installed launchable Android package names, optionally filtered by a human app name. Prefer open_app first.", inputSchema: { type: "object", properties: { query: { type: "string" }, serial: { type: "string" } } } },
-  { name: "open_app", description: "Open an installed Android app directly by its human name, such as Uber or Skyscanner. Do not scan the app drawer first.", inputSchema: { type: "object", properties: { name: { type: "string" }, serial: { type: "string" } }, required: ["name"] } },
-  { name: "tap_text", description: "Tap visible Android text or an accessibility label, then use read_screen to verify.", inputSchema: { type: "object", properties: { text: { type: "string" }, exact: { type: "boolean" }, index: { type: "integer", minimum: 0 }, serial: { type: "string" } }, required: ["text"] } },
-  { name: "tap", description: "Tap Android screen pixel coordinates obtained from read_screen or screenshot.", inputSchema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, serial: { type: "string" } }, required: ["x", "y"] } },
-  { name: "swipe", description: "Swipe the Android screen in a direction, then use read_screen to verify.", inputSchema: { type: "object", properties: { direction: { type: "string", enum: ["up", "down", "left", "right"] }, serial: { type: "string" } }, required: ["direction"] } },
-  { name: "type_text", description: "Type basic ASCII text into the focused Android field. Never enter passwords, payment details, or one-time codes.", inputSchema: { type: "object", properties: { text: { type: "string", maxLength: 256 }, serial: { type: "string" } }, required: ["text"] } },
-  { name: "press", description: "Press an Android navigation or keyboard key.", inputSchema: { type: "object", properties: { key: { type: "string", enum: Object.keys(KEYCODES) }, serial: { type: "string" } }, required: ["key"] } },
+  {
+    name: "status",
+    description: "Check physical USB Android devices and USB-debugging authorization before any Android phone task.",
+    inputSchema: { type: "object", properties: { actionId: { type: "string" }, turnId: { type: "string" } } },
+  },
+  {
+    name: "read_screen",
+    description: "Read active foreground package and visible text, accessibility labels, resource ids, clickable/editable controls, and pixel bounds from the connected Android screen.",
+    inputSchema: { type: "object", properties: { serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } } },
+  },
+  {
+    name: "screenshot",
+    description: "Capture the connected Android screen when accessibility text is insufficient. Returns a PNG image.",
+    inputSchema: { type: "object", properties: { serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } } },
+  },
+  {
+    name: "list_apps",
+    description: "List installed and launchable Android applications with human-readable labels, distinguishing launchable from background services.",
+    inputSchema: { type: "object", properties: { query: { type: "string" }, serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } } },
+  },
+  {
+    name: "open_app",
+    description: "Open an installed Android app directly by its human name (e.g. WhatsApp, Settings, Chrome, Maps). Waits for device foreground state to settle and verifies foreground package before reporting success.",
+    inputSchema: { type: "object", properties: { name: { type: "string" }, serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } }, required: ["name"] },
+  },
+  {
+    name: "tap_text",
+    description: "Tap visible Android text or an accessibility label, then use read_screen to verify.",
+    inputSchema: { type: "object", properties: { text: { type: "string" }, exact: { type: "boolean" }, index: { type: "integer", minimum: 0 }, serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } }, required: ["text"] },
+  },
+  {
+    name: "tap",
+    description: "Tap Android screen pixel coordinates obtained from read_screen or screenshot.",
+    inputSchema: { type: "object", properties: { x: { type: "number" }, y: { type: "number" }, serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } }, required: ["x", "y"] },
+  },
+  {
+    name: "type_text",
+    description: "Type basic ASCII text into the focused Android field. Never enter passwords, payment details, or one-time codes.",
+    inputSchema: { type: "object", properties: { text: { type: "string", maxLength: 256 }, serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } }, required: ["text"] },
+  },
+  {
+    name: "clear_text",
+    description: "Clear basic text in the focused Android input field, then use read_screen to verify.",
+    inputSchema: { type: "object", properties: { serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } } },
+  },
+  {
+    name: "swipe",
+    description: "Swipe the Android screen in a direction, then use read_screen to verify.",
+    inputSchema: { type: "object", properties: { direction: { type: "string", enum: ["up", "down", "left", "right"] }, serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } }, required: ["direction"] },
+  },
+  {
+    name: "press",
+    description: "Press an Android navigation or keyboard key.",
+    inputSchema: { type: "object", properties: { key: { type: "string", enum: Object.keys(KEYCODES) }, serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } }, required: ["key"] },
+  },
 ] as const;
 
-type ToolResult = { content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>; isError?: boolean };
-const textResult = (text: string, isError = false): ToolResult => ({ content: [{ type: "text", text }], ...(isError ? { isError: true } : {}) });
+type ToolResult = {
+  content: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }>;
+  isError?: boolean;
+};
+
+const textResult = (text: string, isError = false): ToolResult => ({
+  content: [{ type: "text", text }],
+  ...(isError ? { isError: true } : {}),
+});
 
 async function callTool(name: string, args: Json): Promise<ToolResult> {
-  if (name === "status") {
-    const adb = resolveAdbPath();
-    const devices = adb ? await usbDevices() : [];
-    return textResult(JSON.stringify({ available: Boolean(adb), devices }, null, 2));
-  }
-  const serial = await readySerial(args.serial);
-  if (name === "read_screen") return textResult(nodeLines(await readNodes(serial)));
-  if (name === "screenshot") {
-    const png = await onDevice(serial, ["exec-out", "screencap", "-p"], true);
-    if (!png.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) throw new Error("Android returned an invalid screenshot");
-    return { content: [{ type: "text", text: `Android screenshot from ${serial}` }, { type: "image", data: png.toString("base64"), mimeType: "image/png" }] };
-  }
-  if (name === "list_apps") {
-    const packages = await launchablePackages(serial);
-    const query = typeof args.query === "string" ? args.query : "";
-    return textResult((query ? findPackages(query, packages) : packages).join("\n") || "No matching launchable app found");
-  }
-  if (name === "open_app") {
-    const appName = String(args.name ?? "").trim();
-    if (!appName) throw new Error("name is required");
-    const matches = findPackages(appName, await launchablePackages(serial));
-    if (matches.length !== 1) throw new Error(matches.length ? `App name is ambiguous: ${matches.join(", ")}` : `No installed launchable app matches ${JSON.stringify(appName)}`);
-    await onDevice(serial, ["shell", "monkey", "-p", matches[0], "-c", "android.intent.category.LAUNCHER", "1"]);
-    return textResult(`Opened ${appName} (${matches[0]})`);
-  }
-  if (name === "tap_text") {
-    const query = String(args.text ?? "").trim().toLowerCase();
-    if (!query) throw new Error("text is required");
-    const exact = args.exact === true;
-    const hits = (await readNodes(serial)).filter((node) => {
-      const labels = [node.text, node.description].filter(Boolean).map((value) => value.toLowerCase());
-      return labels.some((label) => exact ? label === query : label.includes(query));
-    });
-    const index = Number.isInteger(args.index) ? Number(args.index) : 0;
-    const hit = hits[index];
-    if (!hit) throw new Error(`No visible Android text matches ${JSON.stringify(args.text)}`);
-    const [x1, y1, x2, y2] = hit.bounds;
-    await onDevice(serial, ["shell", "input", "tap", String(Math.round((x1 + x2) / 2)), String(Math.round((y1 + y2) / 2))]);
-    return textResult(`Tapped ${JSON.stringify(hit.text || hit.description)}`);
-  }
-  if (name === "tap") {
-    const x = Number(args.x); const y = Number(args.y);
-    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 10000 || y > 10000) throw new Error("Invalid Android coordinates");
-    await onDevice(serial, ["shell", "input", "tap", String(Math.round(x)), String(Math.round(y))]);
-    return textResult(`Tapped ${Math.round(x)},${Math.round(y)}`);
-  }
-  if (name === "swipe") {
-    const direction = String(args.direction ?? "");
-    const size = (await onDevice(serial, ["shell", "wm", "size"])).toString("utf8");
-    const match = /(\d+)x(\d+)/.exec(size);
-    if (!match) throw new Error("Could not read Android screen size");
-    const width = Number(match[1]); const height = Number(match[2]);
-    const points: Record<string, [number, number, number, number]> = {
-      up: [width / 2, height * 0.75, width / 2, height * 0.25],
-      down: [width / 2, height * 0.25, width / 2, height * 0.75],
-      left: [width * 0.75, height / 2, width * 0.25, height / 2],
-      right: [width * 0.25, height / 2, width * 0.75, height / 2],
-    };
-    const point = points[direction];
-    if (!point) throw new Error("Invalid swipe direction");
-    await onDevice(serial, ["shell", "input", "swipe", ...point.map((value) => String(Math.round(value))), "260"]);
-    return textResult(`Swiped ${direction}`);
-  }
-  if (name === "type_text") {
-    const value = String(args.text ?? "");
-    if (!value || value.length > 256 || !SAFE_TEXT.test(value)) throw new Error("Android text supports only basic ASCII text up to 256 characters");
-    await onDevice(serial, ["shell", "input", "text", value.replaceAll(" ", "%s")]);
-    return textResult("Typed text into the focused Android field");
-  }
-  if (name === "press") {
-    const key = String(args.key ?? "").toLowerCase();
-    if (!KEYCODES[key]) throw new Error("Unsupported Android key");
-    await onDevice(serial, ["shell", "input", "keyevent", KEYCODES[key]]);
-    return textResult(`Pressed ${key}`);
-  }
-  throw new Error(`Unknown phone tool: ${name}`);
+  verifyPermission(name);
+  checkActionIsolation(args);
+
+  return withDeviceLock(async () => {
+    if (name === "status") {
+      const adb = resolveAdbPath();
+      const devices = adb ? await usbDevices() : [];
+      return textResult(JSON.stringify({ available: Boolean(adb), devices }, null, 2));
+    }
+
+    const serial = await readySerial(args.serial);
+
+    if (name === "read_screen") {
+      const [nodes, fg] = await Promise.all([
+        readNodes(serial),
+        getForegroundActivity(serial),
+      ]);
+      const state: ScreenState = {
+        currentPackage: fg?.package ?? "unknown",
+        currentActivity: fg?.activity,
+        nodeCount: nodes.length,
+        nodes,
+      };
+      return textResult(formatScreenState(state));
+    }
+
+    if (name === "screenshot") {
+      const png = await onDevice(serial, ["exec-out", "screencap", "-p"], true);
+      if (!png.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) {
+        throw new PhoneActionError("ACTION_FAILED", "Android returned an invalid screenshot");
+      }
+      return {
+        content: [
+          { type: "text", text: `Android screenshot from ${serial}` },
+          { type: "image", data: png.toString("base64"), mimeType: "image/png" },
+        ],
+      };
+    }
+
+    if (name === "list_apps") {
+      const query = typeof args.query === "string" ? args.query : undefined;
+      const apps = await listAppCatalog(serial, query);
+      if (apps.length === 0) {
+        return textResult(query ? `No matching installed apps found for "${query}".` : "No installed apps found.");
+      }
+      const formatted = apps.map((app) => (
+        `${app.name} (${app.packageName}) [${app.launchable ? "LAUNCHABLE" : "BACKGROUND"} / ${app.enabled ? "ENABLED" : "DISABLED"}]`
+      )).join("\n");
+      return textResult(formatted);
+    }
+
+    if (name === "open_app") {
+      const appName = String(args.name ?? "");
+      const res = await openApp(serial, appName);
+      return textResult(res);
+    }
+
+    if (name === "tap_text") {
+      const text = String(args.text ?? "");
+      const exact = args.exact === true;
+      const index = typeof args.index === "number" ? args.index : undefined;
+      const res = await tapNode(serial, text, { exact, index });
+      return textResult(res);
+    }
+
+    if (name === "tap") {
+      const x = Number(args.x);
+      const y = Number(args.y);
+      const res = await tapCoordinates(serial, x, y);
+      return textResult(res);
+    }
+
+    if (name === "type_text") {
+      const text = String(args.text ?? "");
+      const res = await typeText(serial, text);
+      return textResult(res);
+    }
+
+    if (name === "clear_text") {
+      const res = await clearText(serial);
+      return textResult(res);
+    }
+
+    if (name === "swipe") {
+      const direction = String(args.direction ?? "");
+      const res = await swipeScreen(serial, direction);
+      return textResult(res);
+    }
+
+    if (name === "press") {
+      const key = String(args.key ?? "");
+      const res = await pressKey(serial, key);
+      return textResult(res);
+    }
+
+    throw new PhoneActionError("ACTION_NOT_SUPPORTED", `Unknown phone tool: ${name}`);
+  });
 }
 
 const send = (message: Json) => process.stdout.write(`${JSON.stringify(message)}\n`);
@@ -331,7 +847,13 @@ async function handle(message: Json) {
   const id = message.id;
   const method = message.method;
   const params = (message.params ?? {}) as Json;
-  if (method === "initialize") return ok(id, { protocolVersion: String(params.protocolVersion ?? "2024-11-05"), capabilities: { tools: {} }, serverInfo: { name: "openmausbot-phone", version: "1" } });
+  if (method === "initialize") {
+    return ok(id, {
+      protocolVersion: String(params.protocolVersion ?? "2024-11-05"),
+      capabilities: { tools: {} },
+      serverInfo: { name: "openmausbot-phone", version: "2.0.0" },
+    });
+  }
   if (method === "notifications/initialized" || method === "notifications/cancelled") return;
   if (method === "ping") return ok(id, {});
   if (method === "tools/list") return ok(id, { tools: TOOLS });
@@ -339,8 +861,12 @@ async function handle(message: Json) {
     const name = String(params.name ?? "");
     if (!TOOLS.some((tool) => tool.name === name)) return rpcError(id, -32602, `Unknown tool: ${name}`);
     try {
-      return ok(id, await callTool(name, (params.arguments ?? {}) as Json));
+      const res = await callTool(name, (params.arguments ?? {}) as Json);
+      return ok(id, res);
     } catch (error) {
+      if (error instanceof PhoneActionError) {
+        return ok(id, textResult(`[${error.code}] ${error.message}`, true));
+      }
       return ok(id, textResult(error instanceof Error ? error.message : String(error), true));
     }
   }

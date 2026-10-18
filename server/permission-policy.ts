@@ -64,6 +64,20 @@ const TERMINAL_TOOL_NAMES = new Set([
   "project_build",
 ]);
 
+const PHONE_TOOL_NAMES = new Set([
+  "status",
+  "read_screen",
+  "screenshot",
+  "list_apps",
+  "open_app",
+  "tap_text",
+  "tap",
+  "swipe",
+  "type_text",
+  "clear_text",
+  "press",
+]);
+
 const FILESYSTEM_TOOL_NAMES = new Set([
   "ReadFile",
   "WriteFile",
@@ -154,7 +168,8 @@ export function classifyTool(
 
   if (
     TERMINAL_TOOL_NAMES.has(normalized) ||
-    /^(bash|sh|terminal_|shell_|exec_|process_|build_|test_|project_git_|repair_)/i.test(normalized)
+    PHONE_TOOL_NAMES.has(normalized) ||
+    /^(bash|sh|terminal_|shell_|exec_|process_|build_|test_|project_git_|repair_|mcp__openmausbot-phone__|phone_)/i.test(normalized)
   ) {
     return { domain: "terminal", label: PERMISSION_DOMAINS.terminal.title };
   }

@@ -106,6 +106,13 @@ describe("permission-policy", () => {
       expect(checkToolPermission("Bash", { terminal: "denied" }).allowed).toBe(false);
       expect(checkToolPermission("Bash", { terminal: "denied" }).reason).toContain("Terminal & Shell Execution is disabled");
       expect(checkToolPermission("Bash", { terminal: "restricted" }).allowed).toBe(false);
+
+      // Phone tools are gated under terminal domain
+      expect(checkToolPermission("open_app", { terminal: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("open_app", { terminal: "denied" }).allowed).toBe(false);
+      expect(checkToolPermission("open_app", { terminal: "denied" }).reason).toContain("Terminal & Shell Execution is disabled");
+      expect(checkToolPermission("tap_text", { terminal: "denied" }).allowed).toBe(false);
+      expect(checkToolPermission("mcp__openmausbot-phone__tap", { terminal: "denied" }).allowed).toBe(false);
     });
 
     it("enforces filesystem permission states", () => {
