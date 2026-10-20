@@ -68,15 +68,6 @@ async function main() {
     }];
   }
 
-  if (!bot1.messages || bot1.messages.length === 0) {
-    bot1.messages = [
-      { id: "msg-101", at: 1792267918910, parentId: null, role: "bot", kind: "text", text: "Hi, I am Olive. Ready for tasks." },
-      { id: "msg-102", at: 1792267976766, parentId: "msg-101", role: "user", kind: "text", text: "Confirm persistence baseline." },
-      { id: "msg-103", at: 1792267988443, parentId: "msg-102", role: "bot", kind: "text", text: "Persistence baseline confirmed active.", attachments: [] }
-    ];
-    bot1.activeLeafId = "msg-103";
-  }
-
   // Ensure Bot 2 (Atlas) exists
   let bot2 = botsList.find((b: any) => b.id === bot2Id);
   if (!bot2) {
@@ -109,29 +100,7 @@ async function main() {
           activity: "idle",
           lastMessageAt: 1792340100000
         }
-      ],
-      messages: [
-        { id: "msg-201", at: 1792340010000, parentId: null, role: "bot", kind: "text", text: "Atlas initialized. Architecture review ready." },
-        { id: "msg-202", at: 1792340050000, parentId: "msg-201", role: "user", kind: "text", text: "Please review the attached system architecture document." },
-        {
-          id: "msg-203",
-          at: 1792340100000,
-          parentId: "msg-202",
-          role: "bot",
-          kind: "text",
-          text: "Architecture verified: zero data loss guarantee confirmed across SQLite and JSON stores.",
-          attachments: [
-            {
-              id: "att-arch-spec-001",
-              name: "architecture_spec_v1.pdf",
-              mimeType: "application/pdf",
-              size: 45280,
-              path: `files/host/data/workspaces/${bot2Id}/architecture_spec_v1.pdf`
-            }
-          ]
-        }
-      ],
-      activeLeafId: "msg-203"
+      ]
     };
     botsList.push(bot2);
   }

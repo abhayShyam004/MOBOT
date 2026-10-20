@@ -71,6 +71,7 @@ function invalidateAttachmentAccounting(): void {
 const IMAGE_MIMES: Record<string, string> = {
   "image/png": ".png",
   "image/jpeg": ".jpg",
+  "image/jpg": ".jpg",
   "image/gif": ".gif",
   "image/webp": ".webp",
 };
@@ -110,6 +111,30 @@ const FILE_MIMES: Readonly<Record<string, string>> = {
   "application/vnd.oasis.opendocument.text": ".odt",
   "application/vnd.oasis.opendocument.spreadsheet": ".ods",
   "application/vnd.oasis.opendocument.presentation": ".odp",
+  "text/x-python": ".py",
+  "text/x-typescript": ".ts",
+  "application/x-typescript": ".ts",
+  "text/javascript": ".js",
+  "application/javascript": ".js",
+  "text/x-shellscript": ".sh",
+  "text/x-sh": ".sh",
+  "text/x-kotlin": ".kt",
+  "text/x-java-source": ".java",
+  "text/x-rust": ".rs",
+  "text/x-go": ".go",
+  "text/x-sql": ".sql",
+  "text/yaml": ".yaml",
+  "text/x-yaml": ".yaml",
+  "application/x-yaml": ".yaml",
+  "text/xml": ".xml",
+  "application/xml": ".xml",
+  "text/css": ".css",
+  "application/toml": ".toml",
+  "text/x-toml": ".toml",
+  "text/x-c": ".c",
+  "text/x-c++": ".cpp",
+  "text/x-csrc": ".c",
+  "text/x-chdr": ".h",
 };
 
 export function extensionForMime(mime: string | undefined): string | null {

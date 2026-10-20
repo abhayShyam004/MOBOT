@@ -417,6 +417,32 @@ class CompanionClient(
         ),
     )
 
+    suspend fun updateUserProfile(name: String?, email: String?): ConfigStatus = send(
+        makeRequest(
+            "PATCH",
+            "/api/config",
+            body = buildJsonObject {
+                put("profile", buildJsonObject {
+                    name?.takeIf(String::isNotBlank)?.let { put("name", it.trim()) }
+                    email?.takeIf(String::isNotBlank)?.let { put("email", it.trim()) }
+                })
+            },
+        ),
+    )
+
+    suspend fun completeOnboarding(version: Int = 1): ConfigStatus = send(
+        makeRequest(
+            "PATCH",
+            "/api/config",
+            body = buildJsonObject {
+                put("onboarding", buildJsonObject {
+                    put("completedAt", java.time.Instant.now().toString())
+                    put("version", version)
+                })
+            },
+        ),
+    )
+
     /**
      * Save the workspace OpenAI-compatible endpoint and key. The key is
      * write-only: every read reports configured-or-not, never the secret.
@@ -1305,6 +1331,10 @@ class CompanionClient(
 
     suspend fun interrupt(botId: String, threadId: String? = null) {
         sendUnit(makeRequest("POST", "/api/bots/${segment(botId)}/interrupt", body = jsonBody("threadId" to threadId)))
+    }
+
+    suspend fun interruptRoom(groupId: String, threadId: String? = null) {
+        sendUnit(makeRequest("POST", "/api/groups/${segment(groupId)}/interrupt", body = jsonBody("threadId" to threadId)))
     }
 
     suspend fun cloudDesktop(botId: String): CloudDesktopSession = send(

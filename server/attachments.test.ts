@@ -75,6 +75,7 @@ describe("extensionForMime", () => {
   it("maps the accepted image mimes to extensions", () => {
     expect(extensionForMime("image/png")).toBe(".png");
     expect(extensionForMime("image/jpeg")).toBe(".jpg");
+    expect(extensionForMime("image/jpg")).toBe(".jpg");
     expect(extensionForMime("image/gif")).toBe(".gif");
     expect(extensionForMime("image/webp")).toBe(".webp");
   });
@@ -392,6 +393,14 @@ describe("shared files", () => {
     expect(extensionForFileMime("text/plain; charset=utf-8")).toBe(".txt");
     expect(extensionForFileMime("application/pdf")).toBe(".pdf");
     expect(extensionForFileMime("application/vnd.openxmlformats-officedocument.wordprocessingml.document")).toBe(".docx");
+    expect(extensionForFileMime("text/x-python")).toBe(".py");
+    expect(extensionForFileMime("text/x-typescript")).toBe(".ts");
+    expect(extensionForFileMime("text/x-shellscript")).toBe(".sh");
+    expect(extensionForFileMime("text/x-kotlin")).toBe(".kt");
+    expect(extensionForFileMime("text/x-rust")).toBe(".rs");
+    expect(extensionForFileMime("text/x-go")).toBe(".go");
+    expect(extensionForFileMime("text/x-sql")).toBe(".sql");
+    expect(extensionForFileMime("text/yaml")).toBe(".yaml");
     expect(extensionForFileMime("application/zip")).toBeNull();
     expect(extensionForFileMime("application/x-msdownload")).toBeNull();
     expect(extensionForFileMime("application/octet-stream")).toBeNull();

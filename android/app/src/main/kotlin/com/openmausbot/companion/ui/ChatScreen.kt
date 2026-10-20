@@ -759,7 +759,7 @@ private fun LoadedChat(
             ChatActionId.SETTINGS -> if (bot != null) showingProfile = true
             ChatActionId.SHARE_MARKDOWN -> share(scope, environment, threadId, ShareFormat.MARKDOWN)
             ChatActionId.SHARE_JSON -> share(scope, environment, threadId, ShareFormat.JSON)
-            ChatActionId.INTERRUPT -> if (bot != null) scope.launch { session.interrupt(bot) }
+            ChatActionId.INTERRUPT -> scope.launch { session.interrupt(chat) }
         }
         Unit
     }
@@ -818,7 +818,7 @@ private fun LoadedChat(
             }
             return
         }
-        if (text.isEmpty()) return
+        if (text.isEmpty() || sendingMessage) return
         composer.onSend()
         // Clearing the draft closes the HUD through the rule above, which is
         // how iOS's `showCommandHUD = false` on submit happens as well.
@@ -834,18 +834,23 @@ private fun LoadedChat(
         // Deliberately not disabled while the bot is busy: the harness answers
         // 409 and Session surfaces "The bot is busy — stop it first." That is a
         // clearer answer than a dead button.
+        sendingMessage = true
         inFlightSend = true
         scope.launch {
-            session.actionError = null
-            session.send(text, chat)
-            session.actionError?.let { message ->
-                // A send that failed BEFORE the harness accepted it belongs to
-                // this conversation: the composer's red line — or, when the
-                // cause is a provider setting, the fix panel — instead of a
-                // global dialog the chat can't act on.
-                attachmentError = message
+            try {
                 session.actionError = null
-                inFlightSend = false
+                session.send(text, chat)
+                session.actionError?.let { message ->
+                    // A send that failed BEFORE the harness accepted it belongs to
+                    // this conversation: the composer's red line — or, when the
+                    // cause is a provider setting, the fix panel — instead of a
+                    // global dialog the chat can't act on.
+                    attachmentError = message
+                    session.actionError = null
+                    inFlightSend = false
+                }
+            } finally {
+                sendingMessage = false
             }
         }
     }
@@ -875,7 +880,7 @@ private fun LoadedChat(
             SlashEffect.Stop -> {
                 dictation.stop()
                 clearDraft()
-                if (bot != null && chat.busy) scope.launch { session.interrupt(bot) }
+                if (chat.busy) scope.launch { session.interrupt(chat) }
             }
 
             SlashEffect.NewThread -> if (!creatingThread && TaskRules.canCreate(chat)) {
@@ -1196,7 +1201,7 @@ private fun LoadedChat(
                 onInterrupt = if (isProcessing) {
                     {
                         inFlightSend = false
-                        if (bot != null) scope.launch { session.interrupt(bot) }
+                        scope.launch { session.interrupt(chat) }
                     }
                 } else null,
                 engineCanSteer = engineCanSteer,

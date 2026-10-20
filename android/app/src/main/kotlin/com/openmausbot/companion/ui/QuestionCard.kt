@@ -191,8 +191,12 @@ internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
         // Every question must pass the same validation the server applies.
         if (questions.indices.any { answerErrorFor(it) != null }) return
         val answer = AskQuestionAnswer.format(questions, questions.indices.map(::answerTextFor))
-        if (answer.isEmpty()) return
-        sent = answer
+        val finalAnswer = if (answer.isNotEmpty()) {
+            answer
+        } else {
+            "${AskQuestionAnswer.PREAMBLE}\n\n" + questions.joinToString("\n\n") { "Q: ${it.question}\nA: (skipped)" }
+        }
+        sent = finalAnswer
         answering = true
         scope.launch {
             // A question only ever answers with text; the harness rejects an
@@ -200,7 +204,7 @@ internal fun QuestionCardView(chat: Chat, message: Message, haptics: Haptics) {
             session.answer(
                 threadId = chat.threadId,
                 requestId = requestId,
-                choice = answer,
+                choice = finalAnswer,
                 isPermission = false,
             )
             answering = false

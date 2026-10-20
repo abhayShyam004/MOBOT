@@ -66,16 +66,19 @@ class Session(
         client.fleet(messages)
     },
     /** Test seam: override the engine list read for composer wording. */
-    private val instancesFn: suspend (CompanionClient) -> List<Instance> = { client ->
-        client.instances()
+    private val instancesFn: suspend (CompanionClient?) -> List<Instance> = { client ->
+        client?.instances() ?: emptyList()
     },
     /** Test seam: override the authenticated endpoint snapshot. */
     private val metadataFn: suspend (CompanionClient) -> CompanionConnectionMetadata = { client ->
         client.connectionMetadata()
     },
+    /** Test seam: override bot creation. */
+    private val createBotFn: (suspend (CompanionClient?, String?, ModelSelection?, String?, String?) -> Bot)? = null,
     /** Test seam for the handoff between a completed transfer and its caller. */
     private val afterAttachmentDownload: suspend () -> Unit = {},
     private val localHostReadyProvider: (suspend () -> Boolean)? = null,
+    initialBots: List<Bot> = emptyList(),
 ) {
     sealed interface Status {
         data object Unpaired : Status
@@ -92,7 +95,7 @@ class Session(
         data object Unpaired : RestoreState
     }
 
-    private val _state = MutableStateFlow(CompanionState())
+    private val _state = MutableStateFlow(CompanionState(bots = initialBots))
     val state: StateFlow<CompanionState> = _state.asStateFlow()
 
     /**
@@ -1235,7 +1238,10 @@ class Session(
      * screen still waiting — which is what is actually true.
      */
     suspend fun cancelQueued(send: QueuedSend, chat: Chat) {
-        val activeClient = readyClient() ?: return
+        val activeClient = readyClient() ?: run {
+            _actionError.value = "This computer is offline."
+            return
+        }
         val destination = when (chat) {
             is Chat.BotChat -> MessageDestination.Bot(chat.bot.id, chat.threadId)
             is Chat.RoomChat -> MessageDestination.Room(chat.room.id, chat.threadId)
@@ -1348,6 +1354,7 @@ class Session(
             _actionError.value = error.message
             false
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             false
         }
@@ -1441,6 +1448,7 @@ class Session(
             if (reportError) _actionError.value = error.message
             null
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             if (reportError) _actionError.value = error.message
             null
         }
@@ -1605,6 +1613,7 @@ class Session(
             _state.update { it.apply(Frame.Bot(bot)) }
             bot
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
@@ -1621,6 +1630,17 @@ class Session(
         title: String? = null,
         description: String? = null,
     ): Bot? {
+        if (createBotFn != null) {
+            return try {
+                val bot = createBotFn.invoke(client, name, model, title, description)
+                _state.update { it.apply(Frame.Bot(bot)) }
+                bot
+            } catch (error: Throwable) {
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                _actionError.value = error.message
+                null
+            }
+        }
         val activeClient = client ?: return null
         return try {
             val bot = activeClient.createBot(name, model, title, description)
@@ -1762,6 +1782,7 @@ class Session(
             _state.update { it.apply(Frame.Room(room)) }
             room
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
@@ -1781,13 +1802,23 @@ class Session(
                 }
             }
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
     }
 
+    suspend fun interrupt(chat: Chat) {
+        perform {
+            when (chat) {
+                is Chat.BotChat -> it.interrupt(chat.bot.id, chat.threadId)
+                is Chat.RoomChat -> it.interruptRoom(chat.room.id, chat.threadId)
+            }
+        }
+    }
+
     suspend fun interrupt(bot: Bot) {
-        perform { it.interrupt(bot.id, bot.threadId) }
+        interrupt(Chat.BotChat(bot))
     }
 
     suspend fun cloudDesktop(forBot: Bot): URI {
@@ -1839,6 +1870,7 @@ class Session(
             val page = activeClient.messages(threadId, before = oldest.id, limit = 50)
             _state.update { it.prepend(page, threadId) }
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
         }
     }
@@ -1846,7 +1878,8 @@ class Session(
     suspend fun image(threadId: String, messageId: String): ByteArray? =
         try {
             client?.image(threadId, messageId)
-        } catch (_: Throwable) {
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             null
         }
 
@@ -1857,6 +1890,7 @@ class Session(
         return try {
             activeClient.search(trimmed)
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             emptyList()
         }
@@ -1893,6 +1927,7 @@ class Session(
             }
             null
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
@@ -2199,9 +2234,9 @@ class Session(
      * depends on which engines are installed and signed in there.
      */
     suspend fun modelInstances(): List<Instance> {
-        val activeClient = client ?: return emptyList()
+        val activeClient = client
         return try {
-            activeClient.instances()
+            instancesFn(activeClient)
         } catch (error: Throwable) {
             if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
@@ -2643,6 +2678,28 @@ class Session(
         }
     }
 
+    suspend fun updateUserProfile(name: String?, email: String?): ConfigStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.updateUserProfile(name, email)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    suspend fun completeOnboarding(version: Int = 1): ConfigStatus? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.completeOnboarding(version)
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
     /**
      * An image a bot attached to its reply, fetched once and cached for the
      * session so a scrolling transcript never re-downloads it. Null when the
@@ -2968,6 +3025,7 @@ class Session(
             val patched = activeClient.toggleReaction(inThreadId, to.id, emoji)
             _state.update { it.apply(Frame.MessagePatch(inThreadId, patched)) }
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
         }
     }
@@ -2982,6 +3040,7 @@ class Session(
             val leaf = activeClient.setActiveBranch(forBot.id, to.id, forBot.threadId)
             _state.update { it.apply(Frame.Thread(forBot.threadId, leaf)) }
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
         }
     }
@@ -2992,6 +3051,7 @@ class Session(
             val exported = activeClient.export(threadId, format)
             ExportedTranscript(exported.data, exported.filename, exported.contentType)
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
@@ -3002,63 +3062,87 @@ class Session(
         return try {
             activeClient.updaterStatus()
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             null
         }
     }
 
     suspend fun checkUpdates(force: Boolean = false): UpdaterStatusResponse? {
-        val activeClient = readyClient() ?: return null
+        val activeClient = readyClient() ?: run {
+            _actionError.value = "This computer is offline."
+            return null
+        }
         return try {
             activeClient.updaterCheck(force)
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
     }
 
     suspend fun downloadUpdate(): UpdaterStatusResponse? {
-        val activeClient = readyClient() ?: return null
+        val activeClient = readyClient() ?: run {
+            _actionError.value = "This computer is offline."
+            return null
+        }
         return try {
             activeClient.updaterDownload()
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
     }
 
     suspend fun prepareUpdateInstall(): UpdaterPrepareInstallResponse? {
-        val activeClient = readyClient() ?: return null
+        val activeClient = readyClient() ?: run {
+            _actionError.value = "This computer is offline."
+            return null
+        }
         return try {
             activeClient.updaterPrepareInstall()
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
     }
 
     suspend fun completeUpdateValidation(): StateValidation? {
-        val activeClient = readyClient() ?: return null
+        val activeClient = readyClient() ?: run {
+            _actionError.value = "This computer is offline."
+            return null
+        }
         return try {
             activeClient.updaterCompleteValidation()
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             null
         }
     }
 
     suspend fun rollbackUpdate(): Boolean {
-        val activeClient = readyClient() ?: return false
+        val activeClient = readyClient() ?: run {
+            _actionError.value = "This computer is offline."
+            return false
+        }
         return try {
             activeClient.updaterRollback()
             true
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message
             false
         }
     }
 
     private suspend fun perform(quietly: Boolean = false, body: suspend (CompanionClient) -> Unit) {
-        val activeClient = readyClient() ?: return
+        val activeClient = readyClient() ?: run {
+            if (!quietly) _actionError.value = "This computer is offline."
+            return
+        }
         val connectionId = _connection.value?.id
         try {
             body(activeClient)
@@ -3074,6 +3158,7 @@ class Session(
                 _actionError.value = error.message
             }
         } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
             if (!quietly) _actionError.value = error.message
         }
     }

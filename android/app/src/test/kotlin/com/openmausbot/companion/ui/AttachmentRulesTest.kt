@@ -50,6 +50,7 @@ class AttachmentRulesTest {
         assertTrue(AttachmentImportRules.canSend("", 1, preparing = false, sending = false))
         assertFalse(AttachmentImportRules.canSend("hi", 1, preparing = true, sending = false))
         assertFalse(AttachmentImportRules.canSend("hi", 1, preparing = false, sending = true))
+        assertFalse(AttachmentImportRules.canSend("hi", 0, preparing = false, sending = true))
     }
 
     @Test

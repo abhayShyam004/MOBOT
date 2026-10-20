@@ -810,16 +810,16 @@ describe("Store", () => {
     expect(reloaded.bot(bot.id)?.resumeCursors).toEqual({ claude: "sess-abc", codex: "thread-xyz" });
   });
 
-  it("seedIfEmpty creates exactly one starter bot, once", () => {
+  it("seedIfEmpty does not create starter bots for MOBOT", () => {
     const store = new Store(selection);
     store.seedIfEmpty();
-    expect(store.bots).toHaveLength(1);
+    expect(store.bots).toHaveLength(0);
     store.seedIfEmpty();
-    expect(store.bots).toHaveLength(1);
+    expect(store.bots).toHaveLength(0);
 
     const reloaded = new Store(selection);
     reloaded.seedIfEmpty();
-    expect(reloaded.bots).toHaveLength(1);
+    expect(reloaded.bots).toHaveLength(0);
   });
 
   it("chains appended messages and keeps the newest as active leaf", () => {
@@ -912,6 +912,28 @@ describe("Store", () => {
 
     const reloaded = new Store(selection);
     expect(reloaded.bot(bot.id)?.busy).toBe(false);
+  });
+
+  it("scrubs rogue thread fields (messages, activeLeafId, hasMore) from bots.json and persists clean records", () => {
+    const store = new Store(selection);
+    const bot = store.createBot();
+    const raw: any[] = JSON.parse(readFileSync(join(DATA_DIR, "bots.json"), "utf8"));
+    const entry = raw.find((b) => b.id === bot.id)!;
+    entry.messages = [{ id: "msg-bad", text: "phantom" }];
+    entry.activeLeafId = "msg-bad";
+    entry.hasMore = true;
+    writeFileSync(join(DATA_DIR, "bots.json"), JSON.stringify(raw));
+
+    const reloaded = new Store(selection);
+    const cleanBot = reloaded.bot(bot.id) as any;
+    expect(cleanBot?.messages).toBeUndefined();
+    expect(cleanBot?.activeLeafId).toBeUndefined();
+    expect(cleanBot?.hasMore).toBeUndefined();
+
+    const persisted = JSON.parse(readFileSync(join(DATA_DIR, "bots.json"), "utf8"))[0];
+    expect(persisted.messages).toBeUndefined();
+    expect(persisted.activeLeafId).toBeUndefined();
+    expect(persisted.hasMore).toBeUndefined();
   });
   it("createBot with seedMessages:false starts with an empty transcript", () => {
     const store = new Store(selection);

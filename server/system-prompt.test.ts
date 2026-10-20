@@ -21,6 +21,7 @@ import {
   WEBHOOK_PROMPT,
   ANDROID_COMPUTER_SYSTEM_PROMPT,
   SIGN_IN_PROMPT,
+  CAPABILITY_GUIDANCE_PROMPT,
 } from "./system-prompt.ts";
 
 describe("buildSystemPrompt", () => {
@@ -126,10 +127,15 @@ describe("computerPrompt", () => {
 
 describe("shared sentences", () => {
   it("each begins with one space so they concatenate onto the persona line", () => {
-    for (const sentence of [COMPOSIO_PROMPT, ASK_PROMPT, CREDENTIAL_PROMPT, ROUTINE_PROMPT, ROUTINE_EXECUTION_PROMPT, LEARN_PROMPT, WEBHOOK_PROMPT, PROFILE_PROMPT, SIGN_IN_PROMPT]) {
+    for (const sentence of [COMPOSIO_PROMPT, ASK_PROMPT, CREDENTIAL_PROMPT, ROUTINE_PROMPT, ROUTINE_EXECUTION_PROMPT, LEARN_PROMPT, WEBHOOK_PROMPT, PROFILE_PROMPT, SIGN_IN_PROMPT, CAPABILITY_GUIDANCE_PROMPT]) {
       expect(sentence.startsWith(" ")).toBe(true);
       expect(sentence.startsWith("  ")).toBe(false);
     }
+  });
+
+  it("guides user toward enabling missing capabilities instead of refusing", () => {
+    expect(CAPABILITY_GUIDANCE_PROMPT).toContain("NEVER simply refuse by saying 'I can't'");
+    expect(CAPABILITY_GUIDANCE_PROMPT).toContain("guide the user proactively");
   });
 
   it("tells a bot when to ask the person, and never for permission", () => {

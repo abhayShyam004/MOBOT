@@ -376,7 +376,7 @@ import {
   formatLocationPromptBlock,
   loadUserLocation,
   saveUserLocation,
-  disableUserLocation,
+  clearUserLocation,
 } from "./location-context.ts";
 
 export function stripEmojis(text: string): string {
@@ -584,6 +584,25 @@ const appUpdater = new UpdaterManager({
   currentVersion: process.env.APP_VERSION || "1.0.0",
   dataDir: DATA_DIR,
 });
+
+// Autonomous background self-update loop:
+// Checks GitHub releases periodically and automatically stages updates.
+async function performAutonomousUpdateCheck() {
+  try {
+    const checkResult = await appUpdater.checkForUpdates(false);
+    if (checkResult.status === "available" && checkResult.release) {
+      console.log(`[updater] New release ${checkResult.release.version} detected. Starting automatic background download...`);
+      const downloadResult = await appUpdater.downloadUpdate();
+      if (downloadResult.status === "ready_to_install") {
+        console.log(`[updater] Release ${checkResult.release.version} downloaded & verified. Package staged for system installer handoff.`);
+      }
+    }
+  } catch {
+    // Non-fatal background check error (e.g. offline, rate limit)
+  }
+}
+setTimeout(performAutonomousUpdateCheck, 15_000);
+setInterval(performAutonomousUpdateCheck, 30 * 60_000);
 const cfg = loadConfig();
 // The per-thread event log cap is checked after every NDJSON append.
 // config.json is read once per process (a change restarts the server, like
@@ -1777,7 +1796,7 @@ const teamComputers = new TeamComputers(join(DATA_DIR, "team-computers.json"), E
 let followupsReady = false;
 const sendSequencer = new SendSequencer();
 bootSelection = await defaultSelection();
-store.seedIfEmpty();
+// MOBOT begins with zero bots until explicitly created by the user during onboarding.
 // A committed profile cleanup means both its config deletion and bot-reference
 // cleanup were intended to be durable. Reconcile stale secondary references
 // before Electron can ACK and remove the journal: a crash between those writes
@@ -1822,22 +1841,43 @@ const wireTask = (task: TaskRecord): WireTask => {
 };
 
 const wireBot = (bot: BotRecord): WireBot => {
-  const { resumeCursors: _resumeCursors, tasks, approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, ...rest } = bot;
+  const {
+    resumeCursors: _resumeCursors,
+    tasks,
+    approvalGrant,
+    lastProfileRequestId: _lastProfileRequestId,
+    lastTeamSetupReceipt: _lastTeamSetupReceipt,
+    messages: _messages,
+    activeLeafId: _activeLeafId,
+    hasMore: _hasMore,
+    ...rest
+  } = bot as unknown as Record<string, unknown>;
   // An elevated selection is inert until the desktop confirms its exact
   // private reply. Every ordinary client sees the effective Ask state during
   // that two-phase window, never a grant that may still roll back.
-  const visible = approvalGrant && !approvalGrant.threadOnly
+  const visible = (approvalGrant && !(approvalGrant as { threadOnly?: boolean }).threadOnly
     ? { ...rest, approvalMode: "ask" as const, autoApprove: false }
-    : rest;
+    : rest) as unknown as Omit<WireBot, "avatarUrl" | "tasks">;
   return { ...visible, ...(activeCoordinationForThread(bot.threadId) && !visible.busy ? { busy: true, activity: "working" as const } : {}),
-    avatarUrl: visible.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
+    avatarUrl: (visible as { avatarUrl?: string | null }).avatarUrl ?? null, ...(tasks ? { tasks: (tasks as TaskRecord[]).map(wireTask) } : {}) };
 };
 
 /** The correlated private response carries the requested value so Electron
  * can validate it before sending the confirmation that makes it effective. */
 const wireTrustedApprovalBot = (bot: NonNullable<ReturnType<typeof store.bot>>) => {
-  const { resumeCursors: _resumeCursors, tasks, approvalGrant: _approvalGrant, lastProfileRequestId: _lastProfileRequestId, lastTeamSetupReceipt: _lastTeamSetupReceipt, ...rest } = bot;
-  return { ...rest, approvalMode: approvalModeFor(rest), avatarUrl: rest.avatarUrl ?? null, ...(tasks ? { tasks: tasks.map(wireTask) } : {}) };
+  const {
+    resumeCursors: _resumeCursors,
+    tasks,
+    approvalGrant: _approvalGrant,
+    lastProfileRequestId: _lastProfileRequestId,
+    lastTeamSetupReceipt: _lastTeamSetupReceipt,
+    messages: _messages,
+    activeLeafId: _activeLeafId,
+    hasMore: _hasMore,
+    ...rest
+  } = bot as unknown as Record<string, unknown>;
+  const clean = rest as unknown as BotRecord;
+  return { ...clean, approvalMode: approvalModeFor(clean), avatarUrl: clean.avatarUrl ?? null, ...(tasks ? { tasks: (tasks as TaskRecord[]).map(wireTask) } : {}) };
 };
 
 /** A settings-based preview, not a receipt of a dispatched turn. No
@@ -3267,6 +3307,8 @@ store.onChange((change) => {
       break;
     }
     case "bot.deleted":
+      sharedGoalManager.deleteGoalsForBot(change.botId);
+      sharedWatchManager.deleteWatchesForBot(change.botId);
       broadcast({ kind: "bot.deleted", botId: change.botId });
       break;
     case "group": {
@@ -6323,7 +6365,7 @@ async function startTurn(
       if (!document || !Number.isFinite(from) || !Number.isFinite(to)) {
         return "Error: read_document_pages needs document, from_page and to_page.";
       }
-      return readDocumentPages(document, from, to);
+      return readDocumentPages(document, from, to, threadId);
     },
   }));
   // The bot's own mid-task question, as a harness-run tool: the call blocks
@@ -7966,6 +8008,8 @@ async function deleteBotWithLifecycle(botId: string, revalidate: () => void = ()
           // cannot be erased under a stale approval.
           revalidate();
           store.deleteBot(bot.id, setupRequest);
+          sharedGoalManager.deleteGoalsForBot(bot.id);
+          sharedWatchManager.deleteWatchesForBot(bot.id);
           // Removing schedules is not a security revocation. Keep them intact
           // if the bot/receipt write fails, so a failed deletion is retryable.
           routines!.disableForBot(bot.id);
@@ -18449,14 +18493,27 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // ── Persistent User Location Context ──
     if (method === "GET" && path === "/api/user-location") {
       const loc = loadUserLocation(DATA_DIR);
-      return json(res, 200, loc ?? { enabled: false });
+      if (!loc || loc.enabled === false || loc.provenance === "UNKNOWN/UNAVAILABLE") {
+        return json(res, 200, {
+          configured: false,
+          provenance: "UNKNOWN/UNAVAILABLE",
+          message: "No user location configured.",
+        });
+      }
+      return json(res, 200, { configured: true, location: loc, provenance: loc.provenance });
     }
     if ((method === "PUT" || method === "POST") && path === "/api/user-location") {
       const body = await readBody(req, 16384);
       if (!body || typeof body !== "object") {
         return json(res, 400, { error: "Invalid location payload" });
       }
-      const success = saveUserLocation(body as any, DATA_DIR);
+      const payload = {
+        ...(body as any),
+        provenance: "SAVED_USER",
+        enabled: true,
+        updatedAt: Date.now(),
+      };
+      const success = saveUserLocation(payload as any, DATA_DIR);
       if (!success) {
         return json(res, 400, { error: "Invalid location data" });
       }
@@ -18464,8 +18521,8 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 200, { ok: true, location: saved });
     }
     if (method === "DELETE" && path === "/api/user-location") {
-      disableUserLocation(DATA_DIR);
-      return json(res, 200, { ok: true, enabled: false });
+      clearUserLocation(DATA_DIR);
+      return json(res, 200, { ok: true, cleared: true, provenance: "UNKNOWN/UNAVAILABLE" });
     }
 
     // ── app config (API keys — never echoed back, booleans only) ──

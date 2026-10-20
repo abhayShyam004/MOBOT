@@ -419,6 +419,53 @@ class StoreTest {
         val updated = initial.apply(Frame.Bot(incomingBot))
         assertEquals(listOf("m1", "m2"), updated.transcript("t1").map { it.id })
     }
+
+    @Test
+    fun staleBotActiveLeafDoesNotClobberExistingThreadLeaf() {
+        val root = Message("root", Message.Role.USER, Message.Kind.TEXT, 1.0, parentId = null)
+        val middle = Message("middle", Message.Role.USER, Message.Kind.TEXT, 2.0, parentId = "root")
+        val latest = Message("latest", Message.Role.BOT, Message.Kind.TEXT, 3.0, parentId = "middle")
+        val threadId = "thread-1"
+        val bot = fleet().bots.first().copy(id = "bot-1", threadId = threadId)
+        val state = CompanionState(
+            bots = listOf(bot),
+            messages = mapOf(threadId to listOf(root, middle, latest)),
+            activeLeafIds = mapOf(threadId to "latest"),
+        )
+        // Receive a Frame.Bot carrying stale/null activeLeafId
+        val updated = state.apply(Frame.Bot(bot.copy(activeLeafId = "root", messages = null)))
+        assertEquals("latest", updated.activeLeafIds[threadId])
+        assertEquals(listOf("root", "middle", "latest"), updated.visibleTranscript(threadId).map(Message::id))
+    }
+
+    @Test
+    fun messageFrameAdvancesActiveLeafEvenWhenLaggingOrInvalid() {
+        val root = Message("root", Message.Role.USER, Message.Kind.TEXT, 1.0, parentId = null)
+        val middle = Message("middle", Message.Role.USER, Message.Kind.TEXT, 2.0, parentId = "root")
+        val threadId = "thread-1"
+        val bot = fleet().bots.first().copy(id = "bot-1", threadId = threadId)
+
+        // Case A: activeLeafId was lagging on root
+        val stateLagging = CompanionState(
+            bots = listOf(bot),
+            messages = mapOf(threadId to listOf(root, middle)),
+            activeLeafIds = mapOf(threadId to "root"),
+        )
+        val nextMsg = Message("next", Message.Role.BOT, Message.Kind.TEXT, 3.0, parentId = "middle")
+        val advancedA = stateLagging.apply(Frame.Message(threadId, nextMsg))
+        assertEquals("next", advancedA.activeLeafIds[threadId])
+        assertEquals(listOf("root", "middle", "next"), advancedA.visibleTranscript(threadId).map(Message::id))
+
+        // Case B: activeLeafId pointed to an invalid/foreign leaf not in thread
+        val stateForeign = CompanionState(
+            bots = listOf(bot),
+            messages = mapOf(threadId to listOf(root, middle)),
+            activeLeafIds = mapOf(threadId to "phantom-leaf"),
+        )
+        val advancedB = stateForeign.apply(Frame.Message(threadId, nextMsg))
+        assertEquals("next", advancedB.activeLeafIds[threadId])
+        assertEquals(listOf("root", "middle", "next"), advancedB.visibleTranscript(threadId).map(Message::id))
+    }
 }
 
 class StreamingTest {

@@ -35,13 +35,14 @@ export interface TurnContextInput {
 export function engineIsFresh(input: {
   instanceId: string;
   lastInstanceId: string | undefined;
-  resumeCursors: Record<string, unknown>;
+  resumeCursors?: Record<string, unknown>;
   transcript: Array<{ role: "user" | "assistant"; text: string }>;
 }): boolean {
   const { instanceId, lastInstanceId, resumeCursors, transcript } = input;
   if (!transcript.some((m) => m.role === "user")) return false;
-  if (lastInstanceId !== undefined) return lastInstanceId !== instanceId || resumeCursors[instanceId] === undefined;
-  const cursorIds = Object.keys(resumeCursors);
+  const cursors = resumeCursors ?? {};
+  if (lastInstanceId !== undefined) return lastInstanceId !== instanceId || cursors[instanceId] === undefined;
+  const cursorIds = Object.keys(cursors);
   return !(cursorIds.length === 1 && cursorIds[0] === instanceId);
 }
 

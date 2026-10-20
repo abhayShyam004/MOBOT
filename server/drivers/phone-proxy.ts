@@ -65,8 +65,19 @@ export interface ScreenState {
 const MAX_ADB_OUTPUT = 16 * 1024 * 1024;
 const PACKAGE = /^[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+$/;
 const COMPONENT = /^([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)\/\S+$/;
-const SAFE_TEXT = /^[A-Za-z0-9 _.,@'"+:;!?()/-]+$/;
+export function normalizeInputText(text: string): string {
+  return text
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    .replace(/[—–]/g, "-")
+    .replace(/…/g, "...");
+}
+
+const SAFE_TEXT = /^[\x20-\x7E\r\n]+$/;
 const KEYCODES: Record<string, string> = {
+  app_switch: "KEYCODE_APP_SWITCH",
   back: "KEYCODE_BACK",
   delete: "KEYCODE_DEL",
   down: "KEYCODE_DPAD_DOWN",
@@ -75,12 +86,22 @@ const KEYCODES: Record<string, string> = {
   home: "KEYCODE_HOME",
   left: "KEYCODE_DPAD_LEFT",
   recent: "KEYCODE_APP_SWITCH",
+  recents: "KEYCODE_APP_SWITCH",
   return: "KEYCODE_ENTER",
   right: "KEYCODE_DPAD_RIGHT",
   space: "KEYCODE_SPACE",
   tab: "KEYCODE_TAB",
   up: "KEYCODE_DPAD_UP",
 };
+
+export function escapeInputText(text: string): string {
+  const withSpaces = text.replaceAll(" ", "%s");
+  return withSpaces.replace(/([$"'`;()<>|&*?~!#[\]{}^\\&])/g, "\\$1");
+}
+
+export function escapeShellComponent(component: string): string {
+  return component.replaceAll("$", "\\$");
+}
 
 export const KNOWN_PACKAGES: Record<string, string> = {
   whatsapp: "com.whatsapp",
@@ -105,6 +126,9 @@ export const KNOWN_PACKAGES: Record<string, string> = {
   myfiles: "com.sec.android.app.myfiles",
   companion: "com.openmausbot.companion",
   mobot: "com.openmausbot.companion",
+  mobotcompanion: "com.openmausbot.companion",
+  openmausbot: "com.openmausbot.companion",
+  openmausbotcompanion: "com.openmausbot.companion",
   skyscanner: "net.skyscanner.android.main",
   uber: "com.ubercab",
   spotify: "com.spotify.music",
@@ -298,7 +322,15 @@ export function findPackages(name: string, packages: string[]): string[] {
     (token: string) => token.includes(needle),
   ];
   for (const matches of ranked) {
-    const found = packages.filter((pkg) => pkg.split(".").some((token) => matches(normalize(token))));
+    const found = packages.filter((pkg) => {
+      const tokens = pkg.split(".").map((token) => normalize(token));
+      const human = HUMAN_LABELS[pkg] ? normalize(HUMAN_LABELS[pkg]) : "";
+      return (
+        tokens.some((token) => matches(token)) ||
+        matches(normalize(pkg)) ||
+        (human ? matches(human) : false)
+      );
+    });
     if (found.length) return found;
   }
   return [];
@@ -394,7 +426,7 @@ export function parseUiNodes(xml: string): UiNode[] {
 }
 
 export async function readNodes(serial: string): Promise<UiNode[]> {
-  const streamed = (await onDevice(serial, ["shell", "uiautomator", "dump", "/dev/tty"])).toString("utf8");
+  const streamed = (await onDevice(serial, ["shell", "uiautomator", "dump", "/dev/tty"]).catch(() => Buffer.from(""))).toString("utf8");
   const streamedStart = streamed.indexOf("<?xml");
   if (streamedStart >= 0) return parseUiNodes(streamed.slice(streamedStart));
 
@@ -517,7 +549,7 @@ export async function openApp(
   const component = launchableMap.get(targetPkg);
 
   if (component) {
-    await onDevice(serial, ["shell", "am", "start", "-n", component]);
+    await onDevice(serial, ["shell", "am", "start", "-n", escapeShellComponent(component)]);
   } else {
     await onDevice(serial, ["shell", "monkey", "-p", targetPkg, "-c", "android.intent.category.LAUNCHER", "1"]);
   }
@@ -559,8 +591,10 @@ export async function tapNode(
   const exact = options.exact === true;
   const nodes = await readNodes(serial);
   const hits = nodes.filter((node) => {
-    const labels = [node.text, node.description].filter(Boolean).map((v) => v.toLowerCase());
-    return labels.some((label) => exact ? label === needle : label.includes(needle));
+    const [x1, y1, x2, y2] = node.bounds;
+    if (x2 <= x1 || y2 <= y1) return false;
+    const labels = [node.text, node.description, node.id].filter(Boolean).map((v) => v.toLowerCase());
+    return labels.some((label) => (exact ? label === needle : label.includes(needle)));
   });
 
   const index = Number.isInteger(options.index) ? Number(options.index) : 0;
@@ -587,11 +621,21 @@ export async function tapCoordinates(serial: string, x: number, y: number): Prom
 }
 
 export async function typeText(serial: string, text: string): Promise<string> {
-  if (!text || text.length > 256 || !SAFE_TEXT.test(text)) {
-    throw new PhoneActionError("ACTION_NOT_SUPPORTED", "Android text supports only basic ASCII text up to 256 characters");
+  const normalized = normalizeInputText(text);
+  if (!normalized || normalized.length > 512 || !SAFE_TEXT.test(normalized)) {
+    throw new PhoneActionError("ACTION_NOT_SUPPORTED", "Android text supports printable text up to 512 characters");
   }
-  const escaped = text.replaceAll(" ", "%s");
-  await onDevice(serial, ["shell", "input", "text", escaped]);
+  const lines = normalized.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.length > 0) {
+      const escaped = escapeInputText(line);
+      await onDevice(serial, ["shell", "input", "text", escaped]);
+    }
+    if (i < lines.length - 1) {
+      await onDevice(serial, ["shell", "input", "keyevent", "66"]);
+    }
+  }
   await new Promise((r) => setTimeout(r, 400));
   return "Typed text into the focused Android field";
 }
@@ -605,6 +649,10 @@ export async function clearText(serial: string): Promise<string> {
 }
 
 export async function swipeScreen(serial: string, direction: string): Promise<string> {
+  const norm = direction.toLowerCase();
+  if (norm !== "up" && norm !== "down" && norm !== "left" && norm !== "right") {
+    throw new PhoneActionError("ACTION_NOT_SUPPORTED", `Invalid swipe direction: ${direction}`);
+  }
   const size = (await onDevice(serial, ["shell", "wm", "size"])).toString("utf8");
   const match = /(\d+)x(\d+)/.exec(size);
   if (!match) throw new PhoneActionError("ACTION_FAILED", "Could not read Android screen size");
@@ -616,8 +664,7 @@ export async function swipeScreen(serial: string, direction: string): Promise<st
     left: [width * 0.75, height / 2, width * 0.25, height / 2],
     right: [width * 0.25, height / 2, width * 0.75, height / 2],
   };
-  const point = points[direction];
-  if (!point) throw new PhoneActionError("ACTION_NOT_SUPPORTED", `Invalid swipe direction: ${direction}`);
+  const point = points[norm];
   await onDevice(serial, ["shell", "input", "swipe", ...point.map((v) => String(Math.round(v))), "300"]);
   await new Promise((r) => setTimeout(r, 350));
   return `Swiped ${direction}`;
@@ -634,17 +681,33 @@ export async function pressKey(serial: string, key: string): Promise<string> {
 
 // ── Turn Isolation & Concurrency ────────────────────────────────────────
 
-const seenActions = new Set<string>();
+const MAX_SEEN_ACTIONS = 1000;
+export const seenActions = new Set<string>();
 let activeDeviceLock: Promise<void> = Promise.resolve();
 
-function checkActionIsolation(args: Json) {
+export function checkActionIsolation(args: Json) {
   const actionId = typeof args.actionId === "string" ? args.actionId : undefined;
   if (actionId) {
     if (seenActions.has(actionId)) {
       throw new PhoneActionError("ACTION_FAILED", `Action ${actionId} was already executed (duplicate rejected).`);
     }
+    if (seenActions.size >= MAX_SEEN_ACTIONS) {
+      const first = seenActions.values().next().value;
+      if (first !== undefined) seenActions.delete(first);
+    }
     seenActions.add(actionId);
   }
+}
+
+export function rollbackActionIsolation(args: Json) {
+  const actionId = typeof args.actionId === "string" ? args.actionId : undefined;
+  if (actionId) {
+    seenActions.delete(actionId);
+  }
+}
+
+export function resetActionIsolation() {
+  seenActions.clear();
 }
 
 async function withDeviceLock<T>(fn: () => Promise<T>): Promise<T> {
@@ -743,7 +806,8 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
   verifyPermission(name);
   checkActionIsolation(args);
 
-  return withDeviceLock(async () => {
+  try {
+    return await withDeviceLock(async () => {
     if (name === "status") {
       const adb = resolveAdbPath();
       const devices = adb ? await usbDevices() : [];
@@ -836,7 +900,11 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
     }
 
     throw new PhoneActionError("ACTION_NOT_SUPPORTED", `Unknown phone tool: ${name}`);
-  });
+    });
+  } catch (error) {
+    rollbackActionIsolation(args);
+    throw error;
+  }
 }
 
 const send = (message: Json) => process.stdout.write(`${JSON.stringify(message)}\n`);

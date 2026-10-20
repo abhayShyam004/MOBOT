@@ -288,6 +288,16 @@ describe("normalizeAskUserInput — the ask_user tool's two shapes", () => {
     const [question] = normalizeAskUserInput({ question: "Which?", type: "checkbox", choices: ["A", "B"] })!;
     expect(question.type).toBeUndefined();
   });
+
+  it("preserves multiSelect boolean when type is omitted", () => {
+    const [question] = normalizeAskUserInput({
+      question: "Which skills?",
+      multiSelect: true,
+      choices: ["Kotlin", "TypeScript"],
+    })!;
+    expect(question.multiSelect).toBe(true);
+    expect(questionType(question)).toBe("multiple_choice");
+  });
 });
 
 describe("typed questions — reading the shape back", () => {

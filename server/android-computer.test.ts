@@ -338,6 +338,60 @@ describe("android-computer MCP server (stdio contract)", () => {
     }
   }, 45_000);
 
+  it("parses DuckDuckGo HTML Lite results with isolated snippets, unwrapped URLs, and ad filtering", async () => {
+    process.env.AC_WORKSPACE = workspace;
+    const { parseDuckDuckGoResults } = await import("./android-computer.ts");
+    const sampleHtml = `
+      <div class="result results_links">
+        <div class="links_main">
+          <a class="result__a" href="/l/?uddg=https%3A%2F%2Fexample.com%2Ffirst&rut=123">First Result</a>
+          <a class="result__snippet" href="#">First snippet description.</a>
+        </div>
+      </div>
+      <div class="result results_links">
+        <div class="links_main">
+          <a class="result__a" href="//duckduckgo.com/y.js?ad_domain=spam.com">Spam Ad Tracking</a>
+          <a class="result__snippet" href="#">Spam snippet.</a>
+        </div>
+      </div>
+      <div class="result results_links">
+        <div class="links_main">
+          <a class="result__a" href="https://example.com/no-snippet">Second Result Without Snippet</a>
+        </div>
+      </div>
+      <div class="result results_links">
+        <div class="links_main">
+          <a class="result__a" href="https://example.com/third">Third Result</a>
+          <a class="result__snippet" href="#">Third snippet text.</a>
+        </div>
+      </div>
+      <div class="result results_links">
+        <div class="links_main">
+          <a class="result__a" href="https://example.com/third">Duplicate of Third</a>
+          <a class="result__snippet" href="#">Duplicate snippet.</a>
+        </div>
+      </div>
+    `;
+
+    const results = parseDuckDuckGoResults(sampleHtml, 5);
+    expect(results).toHaveLength(3);
+
+    // Hit 1: unwrapped uddg URL and its snippet
+    expect(results[0]!.title).toBe("First Result");
+    expect(results[0]!.url).toBe("https://example.com/first");
+    expect(results[0]!.snippet).toBe("First snippet description.");
+
+    // Hit 2: no snippet -> empty snippet, did not steal third snippet
+    expect(results[1]!.title).toBe("Second Result Without Snippet");
+    expect(results[1]!.url).toBe("https://example.com/no-snippet");
+    expect(results[1]!.snippet).toBe("");
+
+    // Hit 3: third result with its own snippet (not shifted)
+    expect(results[2]!.title).toBe("Third Result");
+    expect(results[2]!.url).toBe("https://example.com/third");
+    expect(results[2]!.snippet).toBe("Third snippet text.");
+  });
+
   // ── persistent terminals ──────────────────────────────────────────────────
   // The app owns the PTYs and the adapter is only a client — so these tests
   // drive a real HTTP driver with the same request and response shapes the app

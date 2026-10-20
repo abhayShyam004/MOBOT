@@ -1,14 +1,21 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  checkActionIsolation,
+  escapeInputText,
+  escapeShellComponent,
   findPackages,
   formatScreenState,
   humanLabelForPackage,
+  normalizeInputText,
   parseDevices,
   parseLaunchableActivities,
   parseLaunchablePackages,
   parseUiNodes,
   PhoneActionError,
+  resetActionIsolation,
+  rollbackActionIsolation,
+  seenActions,
   type ScreenState,
   type UiNode,
 } from "./phone-proxy.ts";
@@ -47,6 +54,7 @@ emulator-5554 device product:sdk model:Emulator transport_id:6
       "com.google.android.apps.maps",
       "com.ubercab",
       "net.skyscanner.android.main",
+      "com.openmausbot.companion",
       "com.example.other",
     ];
 
@@ -56,6 +64,9 @@ emulator-5554 device product:sdk model:Emulator transport_id:6
     expect(findPackages("Maps", packages)).toEqual(["com.google.android.apps.maps"]);
     expect(findPackages("Uber", packages)).toEqual(["com.ubercab"]);
     expect(findPackages("Skyscanner", packages)).toEqual(["net.skyscanner.android.main"]);
+    expect(findPackages("MOBOT Companion", packages)).toEqual(["com.openmausbot.companion"]);
+    expect(findPackages("OpenMausBot", packages)).toEqual(["com.openmausbot.companion"]);
+    expect(findPackages("MOBOT", packages)).toEqual(["com.openmausbot.companion"]);
 
     expect(humanLabelForPackage("com.whatsapp")).toBe("WhatsApp");
     expect(humanLabelForPackage("com.android.settings")).toBe("Settings");
@@ -143,5 +154,64 @@ emulator-5554 device product:sdk model:Emulator transport_id:6
 
     const err6 = new PhoneActionError("PERMISSION_DENIED", "Permission denied");
     expect(err6.code).toBe("PERMISSION_DENIED");
+  });
+
+  it("escapes activity components containing dollar signs for Android shell execution", () => {
+    expect(
+      escapeShellComponent("com.google.android.youtube/.app.honeycomb.Shell$HomeActivity")
+    ).toBe("com.google.android.youtube/.app.honeycomb.Shell\\$HomeActivity");
+
+    expect(
+      escapeShellComponent("com.example.app/com.example.app.ui.Main$SubActivity")
+    ).toBe("com.example.app/com.example.app.ui.Main\\$SubActivity");
+
+    expect(escapeShellComponent("com.android.settings/.Settings")).toBe(
+      "com.android.settings/.Settings"
+    );
+  });
+
+  it("escapes text input metacharacters and spaces for safe Android input text invocation", () => {
+    expect(escapeInputText("hello world")).toBe("hello%sworld");
+    expect(escapeInputText("don't")).toBe("don\\'t");
+    expect(escapeInputText("hello;world")).toBe("hello\\;world");
+    expect(escapeInputText("(test)")).toBe("\\(test\\)");
+    expect(escapeInputText("Alert! Are you sure?")).toBe("Alert\\!%sAre%syou%ssure\\?");
+    expect(escapeInputText('quotes: "hello"')).toBe('quotes:%s\\"hello\\"');
+    expect(escapeInputText("tag & label")).toBe("tag%s\\&%slabel");
+    expect(escapeInputText("a/b-c_d.e@f+g:h")).toBe("a/b-c_d.e@f+g:h");
+    expect(escapeInputText("https://site.com?q=1&b=2#sec")).toBe("https://site.com\\?q=1\\&b=2\\#sec");
+    expect(escapeInputText("x = {a: [1, 2]};")).toBe("x%s=%s\\{a:%s\\[1,%s2\\]\\}\\;");
+  });
+
+  it("normalizes smart quotes, em-dashes, and diacritics into ASCII for safe typing", () => {
+    expect(normalizeInputText('“Smart quotes” and ‘single’')).toBe('"Smart quotes" and \'single\'');
+    expect(normalizeInputText("Café résumé and naïve")).toBe("Cafe resume and naive");
+    expect(normalizeInputText("Option A — Option B – Option C…")).toBe("Option A - Option B - Option C...");
+  });
+
+  it("isolates actionIds, rejects duplicate executions, allows retry on rollback, and bounds cache size", () => {
+    resetActionIsolation();
+
+    // First execution succeeds
+    expect(() => checkActionIsolation({ actionId: "action-123" })).not.toThrow();
+    expect(seenActions.has("action-123")).toBe(true);
+
+    // Duplicate execution is rejected
+    expect(() => checkActionIsolation({ actionId: "action-123" })).toThrow(
+      /Action action-123 was already executed/
+    );
+
+    // Rollback removes actionId, permitting retry
+    rollbackActionIsolation({ actionId: "action-123" });
+    expect(seenActions.has("action-123")).toBe(false);
+    expect(() => checkActionIsolation({ actionId: "action-123" })).not.toThrow();
+
+    // Bounded size: add 1050 unique actions
+    for (let i = 0; i < 1050; i++) {
+      checkActionIsolation({ actionId: `bulk-action-${i}` });
+    }
+    expect(seenActions.size).toBe(1000);
+
+    resetActionIsolation();
   });
 });

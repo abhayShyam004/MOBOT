@@ -9,9 +9,9 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
     registry = new DeviceCapabilityRegistry();
   });
 
-  it('registers all 10 core Android device capabilities by default', () => {
+  it('registers all 11 core Android device capabilities by default', () => {
     const list = registry.list();
-    expect(list.length).toBe(10);
+    expect(list.length).toBe(11);
 
     const ids = list.map((c) => c.id).sort();
     expect(ids).toEqual([
@@ -21,6 +21,7 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
       'device.clipboard',
       'device.contacts',
       'device.files',
+      'device.location',
       'device.media',
       'device.notifications',
       'device.screenshot',
@@ -78,6 +79,15 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
     const appRes = await registry.invoke('device.apps', 'list_apps', {});
     expect(appRes.success).toBe(true);
     expect((appRes.data as any)?.apps).toBeDefined();
+  });
+
+  it('executes location status query with UNKNOWN/UNAVAILABLE when unconfigured', async () => {
+    const locRes = await registry.invoke('device.location', 'get_location', {});
+    expect(locRes.success).toBe(true);
+    const data = locRes.data as any;
+    expect(data?.liveDeviceAvailable).toBe(false);
+    expect(data?.provenance).toBeDefined();
+    expect(data?.message).toBeDefined();
   });
 
   it('returns structured error when capability is not registered', async () => {

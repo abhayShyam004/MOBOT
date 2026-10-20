@@ -196,6 +196,10 @@ export function computerPrompt(kind: ComputerPromptKind | null): string {
 
 export const COMPOSIO_PROMPT =
   " The user's connected apps (Gmail, Calendar, Slack, Notion, and the rest) are reachable through the composio tools — find the right one with COMPOSIO_SEARCH_TOOLS, read its arguments with COMPOSIO_GET_TOOL_SCHEMAS, then run it with COMPOSIO_MULTI_EXECUTE_TOOL. Reach for them before telling the user you have no access to a service.";
+
+/** Proactive guidance when an agent capability, permission, or connected service is not yet enabled. */
+export const CAPABILITY_GUIDANCE_PROMPT =
+  " When a required capability, permission, or connected service is unavailable or not yet connected: NEVER simply refuse by saying 'I can't' or give up. Instead, guide the user proactively toward enabling or connecting it. If a connection or permission request tool is available, invoke it to present an in-chat connection card; otherwise explain clearly what is needed to proceed.";
 /** Names the user-added MCP servers a turn actually mounted, so the bot
  * reaches for them instead of saying it has no such tool. Empty when none. */
 export function customMcpPrompt(names: string[]): string {

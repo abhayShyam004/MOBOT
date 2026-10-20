@@ -23,7 +23,7 @@ const FILE_TAG =
 
 /** The path attribute is always the on-disk UUID name the upload route returned. */
 const OWNED_FILE_NAME =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|txt|md|csv|tsv|json|rtf|docx|xlsx|doc|xls|pptx|ppt|odt|ods|odp)$/i;
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.(pdf|txt|md|csv|tsv|json|rtf|docx|xlsx|doc|xls|pptx|ppt|odt|ods|odp|py|js|ts|sh|kt|java|rs|go|sql|yaml|yml|xml|css|toml|c|cpp|h)$/i;
 
 export const TURN_FILE_MAX_COUNT = 4;
 export const TURN_FILE_MAX_BYTES = 25 * 1024 * 1024;
@@ -148,6 +148,23 @@ function mimeFromExtension(extension: string): string {
     ".doc": "application/msword",
     ".xls": "application/vnd.ms-excel",
     ".ppt": "application/vnd.ms-powerpoint",
+    ".py": "text/x-python",
+    ".js": "application/javascript",
+    ".ts": "text/x-typescript",
+    ".sh": "text/x-sh",
+    ".kt": "text/x-kotlin",
+    ".java": "text/x-java-source",
+    ".rs": "text/x-rust",
+    ".go": "text/x-go",
+    ".sql": "text/x-sql",
+    ".yaml": "text/yaml",
+    ".yml": "text/yaml",
+    ".xml": "text/xml",
+    ".css": "text/css",
+    ".toml": "application/toml",
+    ".c": "text/x-c",
+    ".cpp": "text/x-c++",
+    ".h": "text/x-c",
   };
   return map[extension] ?? "application/octet-stream";
 }
@@ -366,16 +383,39 @@ function friendlyDocumentError(extension: string, message: string): string {
     return `This Word document could not be read: ${message}`;
   }
   // eslint-disable-next-line no-control-regex
-  if (/^[\x00-\x08\x0E-\x1F]/.test(message) || /could not be decoded|invalid utf/i.test(message)) {
-    return "This file is not readable text in the expected encoding — try attaching it in a text format.";
+  if (/^[\x00-\x08\x0E-\x1F]/.test(message) || /could not be decoded|invalid utf|binary format/i.test(message)) {
+    return "This file appears to be a binary format rather than readable text — try attaching it in a text format.";
   }
   return message;
+}
+
+function looksTextual(bytes: Buffer): boolean {
+  if (bytes.length === 0) return true;
+  const sample = bytes.subarray(0, Math.min(bytes.length, 8192));
+  if (sample.includes(0x00)) return false;
+  let controlChars = 0;
+  for (let i = 0; i < sample.length; i++) {
+    const b = sample[i]!;
+    if (b < 32 && b !== 9 && b !== 10 && b !== 13) {
+      controlChars++;
+    }
+  }
+  return controlChars / sample.length < 0.05;
 }
 
 /** Plain-text documents pass through with the same character cap. */
 function readTextDocument(path: string, extension: string): { text: string; truncated: boolean } {
   const bytes = readFileSync(path);
+  if (bytes.length === 0) {
+    throw new Error("The attached file is empty (0 bytes of readable text).");
+  }
+  if (!looksTextual(bytes)) {
+    throw new Error("This file appears to be a binary format rather than readable text — try attaching it in a text format.");
+  }
   let text = bytes.toString("utf8");
+  if (text.trim().length === 0) {
+    throw new Error("The attached file contains only whitespace and has no readable text content.");
+  }
   if (extension === ".rtf") {
     text = parseRtfText(text);
   } else if (extension === ".csv" || extension === ".tsv") {
@@ -413,9 +453,12 @@ const documentRegistry = new Map<string, RegisteredDocument>();
 const documentCache = new Map<string, RegisteredDocument>();
 
 /** Bounded window into one registered document, pages inclusive on both ends. */
-export function readDocumentPages(key: string, from: number, to: number): string {
+export function readDocumentPages(key: string, from: number, to: number, expectedThreadId?: string): string {
   const document = documentRegistry.get(key);
   if (!document) {
+    return `Error: no document is registered under "${key}".`;
+  }
+  if (expectedThreadId && document.threadId && document.threadId !== expectedThreadId) {
     return `Error: no document is registered under "${key}".`;
   }
   if (document.kind !== "pdf" || !document.pages) {
@@ -440,6 +483,19 @@ export function readDocumentPages(key: string, from: number, to: number): string
     ? `\n[pages ${last + 1}-${total} not included; call read_document_pages with from_page ${last + 1} for more]`
     : "";
   return chunks.join("\n\n") + suffix;
+}
+
+/** Evict all registered documents associated with a deleted thread/bot. */
+export function removeDocumentsForThread(threadId: string): number {
+  let removed = 0;
+  for (const [key, doc] of Array.from(documentRegistry.entries())) {
+    if (doc.threadId === threadId) {
+      documentRegistry.delete(key);
+      documentCache.delete(doc.path);
+      removed += 1;
+    }
+  }
+  return removed;
 }
 
 export function resetTurnDocumentRegistry(): void {
@@ -563,6 +619,7 @@ export async function extractTurnFiles(
   if (hasCurrentTags) {
     const lines = text.split("\n");
     const out: string[] = [];
+    const seenPathsInTurn = new Set<string>();
     let admitted = 0;
 
     for (const line of lines) {
@@ -574,6 +631,11 @@ export async function extractTurnFiles(
       const tag = line.trim();
       const displayName = (m[2] ? decodeAttachmentAttribute(m[2]) : "") || "document";
       const rawPath = m[1] ?? "";
+
+      if (seenPathsInTurn.has(rawPath)) {
+        continue;
+      }
+      seenPathsInTurn.add(rawPath);
 
       if (admitted >= TURN_FILE_MAX_COUNT) {
         const metadata: AttachmentMetadata = {

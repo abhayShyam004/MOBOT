@@ -1233,6 +1233,7 @@ data class BotProfilePatch(
     /** The bot's own colour (mascot tint and name pill), one of the ten
      * palette names. Null keeps the saved one. */
     val color: String? = null,
+    val mascotBody: String? = null,
     val avatarUrl: AvatarURL? = null,
     val avatarCrop: AvatarCrop? = null,
     val voice: String? = null,
@@ -1338,6 +1339,7 @@ object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
         "description",
         "notifications",
         "color",
+        "mascotBody",
         "avatarUrl",
         "avatarCrop",
         "voice",
@@ -1351,6 +1353,7 @@ object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
         element<String>("description", isOptional = true)
         element<Boolean>("notifications", isOptional = true)
         element<String>("color", isOptional = true)
+        element<String>("mascotBody", isOptional = true)
         element<JsonElement>("avatarUrl", isOptional = true)
         element<String>("avatarCrop", isOptional = true)
         element<String>("voice", isOptional = true)
@@ -1367,6 +1370,7 @@ object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
             value.description?.let { put("description", it) }
             value.notifications?.let { put("notifications", it) }
             value.color?.let { put("color", it) }
+            value.mascotBody?.let { put("mascotBody", it) }
             when (val avatarUrl = value.avatarUrl) {
                 is BotProfilePatch.AvatarURL.Set -> put("avatarUrl", avatarUrl.path)
                 BotProfilePatch.AvatarURL.Clear -> put("avatarUrl", JsonNull)
@@ -1420,6 +1424,7 @@ object BotProfilePatchSerializer : KSerializer<BotProfilePatch> {
             description = string("description"),
             notifications = boolean("notifications"),
             color = string("color")?.takeIf { it in MAUS_COLOR_NAMES },
+            mascotBody = string("mascotBody"),
             avatarUrl = avatarUrl,
             avatarCrop = crop,
             voice = string("voice"),

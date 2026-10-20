@@ -5,14 +5,21 @@ import android.app.Application
 import android.content.Context
 import com.openmausbot.companion.avatar.AvatarImageStore
 import com.openmausbot.companion.core.APIError
+import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.CompanionClient
 import com.openmausbot.companion.core.Connection
 import com.openmausbot.companion.core.ConnectionStore
 import com.openmausbot.companion.core.Fleet
 import com.openmausbot.companion.core.Frame
+import com.openmausbot.companion.core.Instance
+import com.openmausbot.companion.core.InstanceAuthentication
+import com.openmausbot.companion.core.ModelCatalog
+import com.openmausbot.companion.core.ModelOption
+import com.openmausbot.companion.core.ModelSelection
 import com.openmausbot.companion.core.PairResponse
 import com.openmausbot.companion.core.PairedDevice
 import com.openmausbot.companion.core.PairingOutcome
+import com.openmausbot.companion.core.ProviderSnapshot
 import com.openmausbot.companion.core.Session
 import com.openmausbot.companion.core.StreamFrame
 import com.openmausbot.companion.core.TokenStore
@@ -71,6 +78,22 @@ class OnboardingScene(
     notificationOnboardingPending: Boolean = false,
     welcomeSeen: Boolean = false,
     notificationPromptSeen: Boolean = false,
+    val instances: List<Instance>? = null,
+    val initialBots: List<Bot> = emptyList(),
+    private val createBotOverride: (suspend (String?, ModelSelection?, String?, String?) -> Bot)? = { name, model, title, desc ->
+        Bot(
+            id = "bot-mobot-canonical",
+            threadId = "thread-mobot-canonical",
+            name = name ?: "Togepi",
+            title = title ?: "Autonomous Agent",
+            description = desc ?: "Autonomous AI teammate with device & tool capabilities.",
+            notifications = true,
+            color = "green",
+            unread = false,
+            modelSelection = model ?: ModelSelection("codex", "gpt-4o"),
+            createdAt = System.currentTimeMillis().toDouble(),
+        )
+    },
 ) {
     private val context: Context = RuntimeEnvironment.getApplication() as Application
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -144,6 +167,25 @@ class OnboardingScene(
         },
         hydrateFn = { _, _ -> Fleet(emptyList(), emptyList()) },
         metadataFn = { throw APIError.Status(404) },
+        instancesFn = { _ ->
+            instances ?: listOf(
+                Instance(
+                    instanceId = "codex",
+                    driverKind = "codex",
+                    displayName = "OpenAI Codex",
+                    snapshot = ProviderSnapshot(state = "available", authenticated = true),
+                    models = ModelCatalog(
+                        defaultModel = "gpt-4o",
+                        options = listOf(ModelOption(id = "gpt-4o", label = "GPT-4o")),
+                    ),
+                    authentication = InstanceAuthentication(method = "browser", available = true),
+                )
+            )
+        },
+        createBotFn = { _, name, model, title, desc ->
+            createBotOverride?.invoke(name, model, title, desc) ?: throw IllegalStateException("createBot failed")
+        },
+        initialBots = initialBots,
     )
 
     val environment = CompanionEnvironment(

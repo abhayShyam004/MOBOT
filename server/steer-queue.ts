@@ -101,11 +101,17 @@ export function queueSteeredMessage(
   text: string,
   options: { prompt?: string; replyToId?: string; sendId?: string; reason?: "capacity"; unattended?: boolean; peerAsk?: Message["peerAsk"] } = {},
 ): QueuedSteer {
-  const id = newId();
   const entry = queues.get(threadId) ?? { botId, items: [] };
   // A thread cannot legitimately change owners. Refuse to merge unrelated
   // queues even if a corrupt caller reuses a thread id.
   if (entry.botId !== botId) throw new Error("queued task belongs to another bot");
+  if (options.sendId) {
+    const existing = entry.items.find((item) => item.sendId === options.sendId);
+    if (existing) {
+      return { id: existing.messageId };
+    }
+  }
+  const id = newId();
   const item = {
     messageId: id,
     text,

@@ -50,9 +50,9 @@ import androidx.compose.ui.unit.sp
 
 /** The sentences these screens are made of, named so a test can look them up. */
 object OnboardingCopy {
-    const val WELCOME_TITLE = "Take your bots with you"
+    const val WELCOME_TITLE = "Meet your AI teammate"
     const val WELCOME_SUBTITLE =
-        "Open chats, approve actions, and send new work from your phone."
+        "MOBOT is an autonomous agent that runs directly on your Android device. It reasons, uses tools, and works with you without needing a computer."
     const val WELCOME_CONNECT = "Connect my computer"
     const val NOT_NOW = "Not now"
 
@@ -78,54 +78,19 @@ object OnboardingCopy {
 }
 
 /**
- * First launch. Says what the app is, then offers exactly two answers — and the
- * second one is real: "Not now" leads to [UnpairedHomeScreen], not back here.
- *
- * Nothing on this screen asks the system for anything. That is the whole point
- * of it existing.
+ * First launch. Introduces MOBOT as an autonomous Android-native AI teammate.
  */
 @Composable
-fun WelcomeScreen(onConnect: () -> Unit, onSkip: () -> Unit) {
-    OnboardingLayout(
-        actions = {
-            Button(onClick = onConnect, modifier = Modifier.fillMaxWidth()) {
-                Text(OnboardingCopy.WELCOME_CONNECT)
-            }
-            TextButton(onClick = onSkip, modifier = Modifier.fillMaxWidth()) {
-                Text(OnboardingCopy.NOT_NOW)
-            }
+fun WelcomeScreen(
+    onConnect: () -> Unit = {},
+    onSkip: () -> Unit = {},
+    onFinish: ((com.openmausbot.companion.core.Bot) -> Unit)? = null,
+) {
+    FirstRunOnboardingScreen(
+        onFinish = { bot ->
+            onFinish?.invoke(bot)
         },
-    ) {
-        OnboardingHero(Icons.AutoMirrored.Filled.Send)
-        Text(
-            text = OnboardingCopy.WELCOME_TITLE,
-            style = MaterialTheme.typography.headlineMedium,
-            fontWeight = FontWeight.SemiBold,
-            textAlign = TextAlign.Center,
-        )
-        Text(
-            text = OnboardingCopy.WELCOME_SUBTITLE,
-            style = MaterialTheme.typography.bodyLarge,
-            color = secondaryTint,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(6.dp))
-        Benefit(
-            icon = Icons.AutoMirrored.Filled.Send,
-            title = "Your chats, in your pocket",
-            detail = "Pick up the same conversations from your computer.",
-        )
-        Benefit(
-            icon = Icons.Filled.CheckCircle,
-            title = "Respond when a bot needs you",
-            detail = "Review approvals without going back to your desk.",
-        )
-        Benefit(
-            icon = Icons.Filled.Lock,
-            title = "Private by design",
-            detail = "You choose which trusted computer this phone connects to.",
-        )
-    }
+    )
 }
 
 /**

@@ -23,6 +23,7 @@ import {
   AppsCapability,
   NotificationsCapability,
   MediaCapability,
+  LocationCapability,
 } from './default-capabilities.ts';
 
 export class DeviceCapabilityRegistry {
@@ -46,6 +47,7 @@ export class DeviceCapabilityRegistry {
     this.register(new AppsCapability());
     this.register(new NotificationsCapability());
     this.register(new MediaCapability());
+    this.register(new LocationCapability());
   }
 
   /**
@@ -163,7 +165,19 @@ export class DeviceCapabilityRegistry {
       };
     }
 
-    return cap.execute(operation, params, context);
+    try {
+      return await cap.execute(operation, params, context);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : (typeof err === "string" ? err : "Action execution failed");
+      return {
+        success: false,
+        error: {
+          code: "EXECUTION_FAILED",
+          message,
+          category: "execution_failed",
+        },
+      };
+    }
   }
 }
 

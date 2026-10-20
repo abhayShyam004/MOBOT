@@ -149,7 +149,6 @@ fun SettingsScreen(
     val alwaysOnEnabled by environment.alwaysOnEnabled.collectAsState()
     val activityDetail by environment.chatPreferences.activityDetail.collectAsState()
     val themeMode by environment.appearance.theme.collectAsState()
-    val backgroundId by environment.appearance.background.collectAsState()
 
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboard.current
@@ -205,7 +204,7 @@ fun SettingsScreen(
             SettingsSubDestination.APPEARANCE -> {
                 SettingsSubPage(
                     title = "Appearance",
-                    subtitle = "Customize theme, wallpapers, and styling",
+                    subtitle = "Customize theme and styling",
                     onBack = { activeSubPage = null },
                 ) {
                     SettingsSection(title = "Theme Mode") {
@@ -215,15 +214,6 @@ fun SettingsScreen(
                                 options = ThemeMode.entries.map { it.label },
                                 selectedIndex = ThemeMode.entries.indexOf(themeMode),
                                 onSelect = { index -> environment.appearance.setTheme(ThemeMode.entries[index]) },
-                            )
-                        }
-                    }
-
-                    SettingsSection(title = "Chat Wallpaper") {
-                        Box(modifier = Modifier.padding(16.dp)) {
-                            BackgroundPicker(
-                                selectedId = backgroundId,
-                                onSelect = { environment.appearance.setBackground(it) },
                             )
                         }
                     }
@@ -2147,6 +2137,10 @@ internal fun UpdatesSubPage(
                                         if (sourceApk.exists()) {
                                             sourceApk.copyTo(targetApk, overwrite = true)
                                         }
+                                    }
+                                    if (!targetApk.exists() || targetApk.length() < 100) {
+                                        errorNotice = "Staged update package could not be read or is invalid."
+                                        return@launch
                                     }
                                     val uri = FileProvider.getUriForFile(
                                         context,

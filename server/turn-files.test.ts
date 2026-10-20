@@ -153,4 +153,110 @@ describe("turn file ingestion (attached documents)", () => {
     expect(formatted).toContain("| Revenue | $100M | $114M |");
     expect(formatted).toContain("Steady progress.");
   });
+
+  it("extracts code files into inline document context", async () => {
+    const { ATTACHMENTS_DIR } = await import("./attachments.ts");
+    const name = "12345678-1234-1234-8234-123456789001.py";
+    mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+    writeFileSync(join(ATTACHMENTS_DIR, name), "def hello():\n    return 'world'\n");
+    try {
+      const { extractTurnFiles } = await import("./turn-files.ts");
+      const result = await extractTurnFiles(`<attached-file path="${name}" name="script.py" />`);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.metadata.status).toBe("PARSED");
+      expect(result.files[0]!.metadata.mime).toBe("text/x-python");
+      expect(result.text).toContain('---BEGIN DOCUMENT "script.py"---');
+      expect(result.text).toContain("def hello():");
+    } finally {
+      rmSync(join(ATTACHMENTS_DIR, name), { force: true });
+    }
+  });
+
+  it("rejects empty files (0 bytes) with FAILED status and clear message", async () => {
+    const { ATTACHMENTS_DIR } = await import("./attachments.ts");
+    const name = "12345678-1234-1234-8234-123456789002.txt";
+    mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+    writeFileSync(join(ATTACHMENTS_DIR, name), "");
+    try {
+      const { extractTurnFiles } = await import("./turn-files.ts");
+      const result = await extractTurnFiles(`<attached-file path="${name}" name="empty.txt" />`);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.metadata.status).toBe("FAILED");
+      expect(result.files[0]!.error).toContain("empty (0 bytes");
+      expect(result.text).toContain("could not be read: The attached file is empty");
+      expect(result.text).not.toContain("---BEGIN DOCUMENT");
+    } finally {
+      rmSync(join(ATTACHMENTS_DIR, name), { force: true });
+    }
+  });
+
+  it("rejects binary files mislabelled as text files with FAILED status", async () => {
+    const { ATTACHMENTS_DIR } = await import("./attachments.ts");
+    const name = "12345678-1234-1234-8234-123456789003.txt";
+    mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+    const binaryData = Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x00, 0x00, 0x01, 0x02]);
+    writeFileSync(join(ATTACHMENTS_DIR, name), binaryData);
+    try {
+      const { extractTurnFiles } = await import("./turn-files.ts");
+      const result = await extractTurnFiles(`<attached-file path="${name}" name="binary.txt" />`);
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.metadata.status).toBe("FAILED");
+      expect(result.files[0]!.error).toContain("binary format");
+      expect(result.text).toContain("appears to be a binary format");
+      expect(result.text).not.toContain("---BEGIN DOCUMENT");
+    } finally {
+      rmSync(join(ATTACHMENTS_DIR, name), { force: true });
+    }
+  });
+
+  it("deduplicates repeated attachment tags in the same message", async () => {
+    const { ATTACHMENTS_DIR } = await import("./attachments.ts");
+    const name = "12345678-1234-1234-8234-123456789004.txt";
+    mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+    writeFileSync(join(ATTACHMENTS_DIR, name), "Single instance content");
+    try {
+      const { extractTurnFiles } = await import("./turn-files.ts");
+      const result = await extractTurnFiles(
+        `<attached-file path="${name}" name="note.txt" />\n<attached-file path="${name}" name="note.txt" />`,
+      );
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.metadata.status).toBe("PARSED");
+      const matches = result.text.match(/---BEGIN DOCUMENT/g);
+      expect(matches).toHaveLength(1);
+    } finally {
+      rmSync(join(ATTACHMENTS_DIR, name), { force: true });
+    }
+  });
+
+  it("isolates registered documents per thread and evicts documents on thread removal", async () => {
+    const { readDocumentPages, removeDocumentsForThread, resetTurnDocumentRegistry } = await import("./turn-files.ts");
+    resetTurnDocumentRegistry();
+
+    // Register test document directly into the registry
+    const { ATTACHMENTS_DIR } = await import("./attachments.ts");
+    const name = "12345678-1234-1234-8234-123456789999.pdf";
+    mkdirSync(ATTACHMENTS_DIR, { recursive: true });
+    writeFileSync(join(ATTACHMENTS_DIR, name), "PDF content");
+
+    try {
+      // Simulate registering a document with threadId 'thread-a'
+      const { extractTurnFiles } = await import("./turn-files.ts");
+      await extractTurnFiles(`<attached-file path="${name}" name="SecretReport.pdf" />`, { threadId: "thread-a" });
+
+      // If document is requested with matching threadId or no threadId filter, it is evaluated
+      // If requested with a different threadId ('thread-b'), access is blocked
+      const blocked = readDocumentPages("secretreport", 1, 2, "thread-b");
+      expect(blocked).toContain("Error: no document is registered under");
+
+      // Now evict documents for thread-a
+      const removed = removeDocumentsForThread("thread-a");
+      expect(removed).toBeGreaterThanOrEqual(1);
+      // Eviction removes entries and prevents subsequent access
+      expect(readDocumentPages("secretreport", 1, 2, "thread-a")).toContain("Error: no document is registered under");
+    } finally {
+      rmSync(join(ATTACHMENTS_DIR, name), { force: true });
+      resetTurnDocumentRegistry();
+    }
+  });
 });
+

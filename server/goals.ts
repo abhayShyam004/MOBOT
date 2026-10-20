@@ -252,10 +252,25 @@ export class GoalManager {
     if (goal.progress >= 100) {
       goal.status = "completed";
       goal.nextAction = "Goal fully achieved!";
+    } else {
+      const nextPending = goal.milestones.find((m) => !m.completed);
+      if (nextPending) {
+        goal.nextAction = `Next: ${nextPending.title}`;
+      }
     }
     goal.updatedAt = Date.now();
     this.save();
     return goal;
+  }
+
+  deleteGoalsForBot(botId: string): number {
+    const initialCount = this.goals.length;
+    this.goals = this.goals.filter((g) => g.botId !== botId);
+    const removed = initialCount - this.goals.length;
+    if (removed > 0) {
+      this.save();
+    }
+    return removed;
   }
 
   private calculateProgress(milestones: GoalMilestone[]): number {

@@ -726,7 +726,7 @@ private fun ProviderAuthDialog(
 }
 
 /** What the auth dialog renders, flattened for the `when` above. */
-private data class InstanceAuthUi(
+internal data class InstanceAuthUi(
     val phase: String,
     val flowId: String?,
     val authorizationUrl: String?,

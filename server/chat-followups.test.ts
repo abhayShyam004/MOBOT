@@ -138,4 +138,13 @@ describe("durable accepted follow-ups", () => {
     drainChannelMessages(() => false, run);
     expect(run).not.toHaveBeenCalled();
   });
+
+  it("deduplicates rapid re-sends with identical sendId while queued", () => {
+    const first = queueSteeredMessage("bot", "thread", "rapid message", { sendId: "idempotency_key_1" });
+    const duplicate = queueSteeredMessage("bot", "thread", "rapid message", { sendId: "idempotency_key_1" });
+    expect(duplicate.id).toBe(first.id);
+    expect(queuedSteerSnapshot(() => true)).toEqual({
+      thread: [{ queueId: first.id, text: "rapid message" }],
+    });
+  });
 });

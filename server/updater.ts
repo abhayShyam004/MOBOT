@@ -19,6 +19,7 @@ import { get as httpGet } from "node:http";
 import { get as httpsGet } from "node:https";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { validateUserLocation } from "./location-context.ts";
 
 export const CURRENT_SCHEMA_VERSION = 2;
 export const DEFAULT_GITHUB_REPO = "abhayShyam004/MOBOT";
@@ -257,11 +258,15 @@ export function createSafetyBackup(dataDir: string, currentVersion: string): str
     "bots.json",
     "groups.json",
     "sections.json",
+    "goals.json",
+    "watches.json",
+    "threads.json",
     "messages.db",
     "messages.db-wal",
     "messages.db-shm",
     "user-location.json",
     "memory",
+    "memory-journal",
     "workspaces",
     "artifacts",
   ];
@@ -269,6 +274,19 @@ export function createSafetyBackup(dataDir: string, currentVersion: string): str
   for (const item of persistentItems) {
     const srcPath = join(dataDir, item);
     if (!existsSync(srcPath)) continue;
+
+    if (item === "user-location.json") {
+      try {
+        const raw = JSON.parse(readFileSync(srcPath, "utf8"));
+        const validated = validateUserLocation(raw);
+        if (!validated || validated.provenance !== "SAVED_USER") {
+          continue; // Do not snapshot unverified or contaminated locations
+        }
+      } catch {
+        continue;
+      }
+    }
+
     const destPath = join(snapshotDir, item);
     const stat = statSync(srcPath);
     if (stat.isDirectory()) {
@@ -349,6 +367,19 @@ export function restoreSafetyBackup(dataDir: string, targetSnapshotDir?: string)
   for (const entry of entries) {
     if (entry === "manifest.json") continue;
     const srcPath = join(restoreSrc, entry);
+
+    if (entry === "user-location.json") {
+      try {
+        const raw = JSON.parse(readFileSync(srcPath, "utf8"));
+        const validated = validateUserLocation(raw);
+        if (!validated || validated.provenance !== "SAVED_USER") {
+          continue; // Discard unverified or contaminated location snapshot
+        }
+      } catch {
+        continue;
+      }
+    }
+
     const destPath = join(dataDir, entry);
     const stat = statSync(srcPath);
     if (stat.isDirectory()) {
@@ -520,6 +551,30 @@ export function validatePersistentState(dataDir: string): StateValidationResult 
       }
     } catch (err) {
       issues.push(`bots.json is invalid JSON: ${(err as Error).message}`);
+    }
+  }
+
+  const goalsFile = join(dataDir, "goals.json");
+  if (existsSync(goalsFile)) {
+    try {
+      const goals = JSON.parse(readFileSync(goalsFile, "utf8"));
+      if (!Array.isArray(goals)) {
+        issues.push("goals.json is not an array");
+      }
+    } catch (err) {
+      issues.push(`goals.json is invalid JSON: ${(err as Error).message}`);
+    }
+  }
+
+  const watchesFile = join(dataDir, "watches.json");
+  if (existsSync(watchesFile)) {
+    try {
+      const watches = JSON.parse(readFileSync(watchesFile, "utf8"));
+      if (!Array.isArray(watches)) {
+        issues.push("watches.json is not an array");
+      }
+    } catch (err) {
+      issues.push(`watches.json is invalid JSON: ${(err as Error).message}`);
     }
   }
 
@@ -749,6 +804,9 @@ export class UpdaterManager {
       if (!validation.healthy) {
         this.status = "error";
         this.lastError = `Post-update validation failed: ${validation.issues.join(", ")}`;
+        if (this.lastSnapshotPath) {
+          restoreSafetyBackup(this.dataDir, this.lastSnapshotPath);
+        }
         return validation;
       }
       this.status = "complete";
@@ -782,7 +840,7 @@ export class UpdaterManager {
       const parsedUrl = new URL(downloadUrl);
       const getter = parsedUrl.protocol === "https:" ? httpsGet : httpGet;
 
-      getter(downloadUrl, res => {
+      const req = getter(downloadUrl, res => {
         if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           this.performHttpDownload(res.headers.location, destPath).then(resolve).catch(reject);
           return;
@@ -795,6 +853,11 @@ export class UpdaterManager {
         const totalBytes = parseInt(res.headers["content-length"] || "0", 10) || this.activeRelease?.fileSizeBytes || 0;
         let downloadedBytes = 0;
         const fileStream = createWriteStream(destPath);
+
+        fileStream.on("error", err => {
+          try { rmSync(destPath, { force: true }); } catch {}
+          reject(err);
+        });
 
         res.on("data", chunk => {
           downloadedBytes += chunk.length;
@@ -816,7 +879,9 @@ export class UpdaterManager {
           try { rmSync(destPath, { force: true }); } catch {}
           reject(err);
         });
-      }).on("error", err => {
+      });
+
+      req.on("error", err => {
         try { rmSync(destPath, { force: true }); } catch {}
         reject(err);
       });

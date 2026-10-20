@@ -106,6 +106,11 @@ describe("engineIsFresh", () => {
       engineIsFresh({ instanceId: "claude", lastInstanceId: undefined, resumeCursors: { claude: "s1", antigravity: "s2" }, transcript: withUser }),
     ).toBe(true);
   });
+
+  it("safely handles undefined or null resumeCursors without throwing", () => {
+    expect(engineIsFresh({ instanceId: "claude", lastInstanceId: undefined, resumeCursors: undefined, transcript: withUser })).toBe(true);
+    expect(engineIsFresh({ instanceId: "claude", lastInstanceId: "claude", resumeCursors: undefined, transcript: withUser })).toBe(true);
+  });
 });
 
 describe("buildRecoveryText", () => {

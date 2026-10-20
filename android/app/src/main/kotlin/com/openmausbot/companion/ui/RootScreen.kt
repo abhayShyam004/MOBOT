@@ -15,6 +15,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.foundation.isSystemInDarkTheme
+import android.content.Intent
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.FileProvider
+import com.openmausbot.companion.core.UpdaterStatusResponse
+import java.io.File
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -89,9 +95,26 @@ fun CompanionRoot(
     // the whole of that stack.
     var showingUnpairedSettings by rememberSaveable { mutableStateOf(false) }
     var enablingNotifications by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+    var updaterStatus by remember { mutableStateOf<UpdaterStatusResponse?>(null) }
+    var updateDialogDismissed by rememberSaveable { mutableStateOf(false) }
+
+    LaunchedEffect(connection != null) {
+        if (connection == null) return@LaunchedEffect
+        while (true) {
+            try {
+                val st = session.getUpdaterStatus()
+                updaterStatus = st
+                if (st?.status == "available") {
+                    session.downloadUpdate()
+                }
+            } catch (_: Exception) {}
+            delay(60_000)
+        }
+    }
 
     val authorization = notificationAuthorization(notificationAccess)
-    val route = OnboardingRouter.route(
+    val baseRoute = OnboardingRouter.route(
         OnboardingContext(
             pairingState = onboardingPairingState(status, connection),
             hasSeenWelcome = welcomeSeen,
@@ -102,6 +125,13 @@ fun CompanionRoot(
             notificationAuthorization = authorization,
         ),
     )
+    val isStandalone = connection?.id == com.openmausbot.companion.host.StandalonePairing.SELF_CONNECTION_ID
+    val route = if (isStandalone && !welcomeSeen) {
+        OnboardingRoute.WELCOME
+    } else {
+        baseRoute
+    }
+    var pendingFirstBot by remember { mutableStateOf<com.openmausbot.companion.core.Bot?>(null) }
 
     /**
      * Settle the durable marker against what is now known.
@@ -161,7 +191,9 @@ fun CompanionRoot(
     // a much later voluntary unpair walk straight back into the pairing form.
     LaunchedEffect(connection != null) {
         if (connection == null) return@LaunchedEffect
-        onboarding.setWelcomeSeen(true)
+        if (connection?.id != com.openmausbot.companion.host.StandalonePairing.SELF_CONNECTION_ID) {
+            onboarding.setWelcomeSeen(true)
+        }
         // A new connection can be added while another is already non-null, so
         // only Session (which knows the redemption result) ends the request.
     }
@@ -235,6 +267,13 @@ fun CompanionRoot(
                                 scope.launch { onboarding.setWelcomeSeen(true) }
                                 session.endPairing()
                             },
+                            onFinish = { bot ->
+                                pendingFirstBot = bot
+                                scope.launch {
+                                    session.completeOnboarding()
+                                    onboarding.setWelcomeSeen(true)
+                                }
+                            },
                         )
 
                         OnboardingRoute.PAIRING -> {
@@ -298,6 +337,8 @@ fun CompanionRoot(
                             PairedScreen(
                                 resolution = resolution,
                                 bondGeneration = bondGeneration,
+                                pendingFirstBot = pendingFirstBot,
+                                onFirstBotConsumed = { pendingFirstBot = null },
                                 onCommit = { held, navigator ->
                                     tapCoordinator.commit(held, navigator, onPendingTargetConsumed)
                                 },
@@ -326,6 +367,59 @@ fun CompanionRoot(
             // the unpaired/onboarding routes.
             if (route != OnboardingRoute.PAIRING && route != OnboardingRoute.CHATS) {
                 ActionErrorDialog(session, navigator = null)
+            }
+            if (updaterStatus?.status == "ready_to_install" && !updateDialogDismissed) {
+                val rel = updaterStatus?.release
+                val versionText = rel?.version ?: "1.1.1"
+                AlertDialog(
+                    onDismissRequest = { updateDialogDismissed = true },
+                    title = { Text("Update Ready") },
+                    text = {
+                        Text("MOBOT $versionText has been downloaded and verified. Would you like to install it now?")
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = {
+                                scope.launch {
+                                    try {
+                                        val prep = session.prepareUpdateInstall()
+                                        if (prep != null && prep.ok) {
+                                            val updatesDir = File(context.cacheDir, "updates").apply { mkdirs() }
+                                            val targetApk = File(updatesDir, "mobot-update.apk")
+                                            val stagedPath = prep.stagedApkPath
+                                            if (stagedPath != null) {
+                                                val sourceApk = File(stagedPath)
+                                                if (sourceApk.exists()) {
+                                                    sourceApk.copyTo(targetApk, overwrite = true)
+                                                }
+                                            }
+                                            if (targetApk.exists() && targetApk.length() > 100) {
+                                                val uri = FileProvider.getUriForFile(
+                                                    context,
+                                                    "${context.packageName}.transcripts",
+                                                    targetApk,
+                                                )
+                                                val intent = Intent(Intent.ACTION_VIEW).apply {
+                                                    setDataAndType(uri, "application/vnd.android.package-archive")
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                }
+                                                context.startActivity(intent)
+                                            }
+                                        }
+                                    } catch (_: Exception) {}
+                                }
+                            }
+                        ) {
+                            Text("Install Now")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { updateDialogDismissed = true }) {
+                            Text("Later")
+                        }
+                    }
+                )
             }
         }
     }
@@ -375,10 +469,18 @@ internal fun notificationAuthorization(
 private fun PairedScreen(
     resolution: NotificationTapCoordinator.Resolution?,
     bondGeneration: Int,
+    pendingFirstBot: com.openmausbot.companion.core.Bot? = null,
+    onFirstBotConsumed: () -> Unit = {},
     onCommit: (NotificationTapCoordinator.Resolution, CompanionNavigator) -> Unit,
 ) {
     val navigator = rememberCompanionNavigator(bondGeneration)
     val environment = LocalCompanion.current
+
+    LaunchedEffect(pendingFirstBot) {
+        val bot = pendingFirstBot ?: return@LaunchedEffect
+        navigator.open(com.openmausbot.companion.core.Chat.BotChat(bot))
+        onFirstBotConsumed()
+    }
 
     // Where the person is, told to the notification surface: the conversation on
     // screen is silent and drops any banner it already had, everything else is

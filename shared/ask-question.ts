@@ -591,7 +591,7 @@ export function normalizeAskUserInput(input: unknown): AskQuestion[] | null {
   let effectiveType = typeof input.type === "string" && (ASK_QUESTION_TYPES as readonly string[]).includes(input.type)
     ? (input.type as AskQuestionType)
     : undefined;
-  let effectiveMulti = input.type === "multiple_choice";
+  let effectiveMulti = input.type === "multiple_choice" || input.multiSelect === true;
   let minSelections = input.minSelections as number | undefined;
   let maxSelections = input.maxSelections as number | undefined;
 

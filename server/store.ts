@@ -3,7 +3,7 @@
 // ProviderSessionDirectory, recipe step 6: persist the binding from day
 // one). messages-<threadId>.json holds the folded transcript.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
+import { copyFileSync, existsSync, readFileSync, mkdirSync, rmSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 
 import { writeFileAtomic } from "./atomic.ts";
@@ -18,6 +18,7 @@ import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { enforceResponseLength } from "./response-length.ts";
+import { removeDocumentsForThread } from "./turn-files.ts";
 import { botAvatarProfile } from "../shared/bot-avatar.ts";
 import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
 import type { ProfileRequestChanges } from "../shared/profile-request.ts";
@@ -497,11 +498,21 @@ export class Store {
     try {
       this.bots = JSON.parse(readFileSync(BOTS_FILE, "utf8"));
     } catch {
+      if (existsSync(BOTS_FILE)) {
+        try {
+          copyFileSync(BOTS_FILE, `${BOTS_FILE}.corrupted.${Date.now()}`);
+        } catch {}
+      }
       this.bots = [];
     }
     try {
       this.groups = JSON.parse(readFileSync(GROUPS_FILE, "utf8"));
     } catch {
+      if (existsSync(GROUPS_FILE)) {
+        try {
+          copyFileSync(GROUPS_FILE, `${GROUPS_FILE}.corrupted.${Date.now()}`);
+        } catch {}
+      }
       this.groups = [];
     }
     this.rememberSections([...this.bots, ...this.groups].map((record) => record.section));
@@ -518,6 +529,19 @@ export class Store {
       if (b.busy || (b.activity !== undefined && b.activity !== "idle")) botsMigrated = true;
       b.busy = false;
       b.activity = "idle";
+      const raw = b as unknown as Record<string, unknown>;
+      if (raw.messages !== undefined) {
+        delete raw.messages;
+        botsMigrated = true;
+      }
+      if (raw.activeLeafId !== undefined) {
+        delete raw.activeLeafId;
+        botsMigrated = true;
+      }
+      if (raw.hasMore !== undefined) {
+        delete raw.hasMore;
+        botsMigrated = true;
+      }
       if (typeof b.soul !== "string") {
         b.soul = "";
         botsMigrated = true;
@@ -906,6 +930,7 @@ export class Store {
   private deleteThreadRecord(threadId: string) {
     this.threads.delete(threadId);
     mdb.deleteThread(threadId);
+    removeDocumentsForThread(threadId);
     for (const file of [
       messagesFile(threadId),
       `${messagesFile(threadId)}.imported`,
@@ -1532,6 +1557,9 @@ export class Store {
     // proposals, manifests, and native-link ownership records with it.
     try {
       rmSync(join(DATA_DIR, "skill-state", id), { recursive: true, force: true });
+    } catch {}
+    try {
+      rmSync(join(DATA_DIR, "memory-journal", `${id}.ndjson`), { force: true });
     } catch {}
     // The bot folder (SOUL.md mirror) is the bot's too.
     removeBotFolder(id);
@@ -2205,10 +2233,8 @@ export class Store {
     return bot;
   }
 
-  /** First-run seed: one bot so the app never opens empty — it gets a
-   * random friendly name like every other bot. */
+  /** First-run seed: disabled for MOBOT so the workspace begins with zero bots. */
   seedIfEmpty() {
-    if (this.bots.length) return;
-    this.createBot();
+    // MOBOT requires zero pre-seeded bots on fresh install.
   }
 }

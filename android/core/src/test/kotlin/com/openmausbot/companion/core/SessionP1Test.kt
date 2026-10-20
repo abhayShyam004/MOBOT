@@ -12,6 +12,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.async
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -647,6 +648,63 @@ class SessionP1Test {
         tasks = tasks.mapIndexed { index, task -> BotTask(task, "Task ${index + 1}", index.toDouble()) }
             .takeIf { it.isNotEmpty() },
     )
+
+    @Test
+    fun interruptRoomChatSendsRoomInterruptRoute() = runTest {
+        val targetRoom = room("r1", "room-thread-1")
+        val session = session { Fleet(emptyList(), listOf(targetRoom)) }
+        server.enqueue(json("{}"))
+
+        session.interrupt(Chat.RoomChat(targetRoom))
+
+        val request = server.takeRequest()
+        assertEquals("/api/groups/r1/interrupt", request.path)
+        assertEquals("room-thread-1", body(request)["threadId"])
+        assertNull(session.actionError)
+    }
+
+    @Test
+    fun cancelledSessionActionRethrowsCancellationAndLeavesActionErrorNull() = runTest {
+        val session = session { Fleet(emptyList(), emptyList()) }
+        val job = launch {
+            session.send("cancelled", Chat.BotChat(bot("b1", "task-1")))
+        }
+        job.cancel()
+        job.join()
+        assertNull(session.actionError)
+    }
+
+    @Test
+    fun performWhenOfflineSurfacesOfflineErrorPromptly() = runTest {
+        val emptySession = Session(
+            scope = backgroundScope,
+            connectionStore = object : ConnectionStore {
+                override suspend fun load(): Connection = throw IllegalStateException()
+                override suspend fun save(connection: Connection) = Unit
+                override suspend fun clear() = Unit
+                override suspend fun loadRegistry() = ConnectionRegistryRestore(ConnectionRegistry(), migratedLegacyConnection = false)
+            },
+            tokenStore = object : TokenStore {
+                override suspend fun save(connectionId: String, token: String) = Unit
+                override suspend fun read(connectionId: String): TokenStore.ReadResult = TokenStore.ReadResult.Missing
+                override suspend fun remove(connectionId: String) = Unit
+            },
+            onboardingStore = InMemoryOnboardingStore(),
+            deviceNameProvider = { "Pixel" },
+            eventsFn = { _, _, _ -> emptyFlow() },
+            hydrateFn = { _, _ -> Fleet(emptyList(), emptyList()) },
+        ).also { it.awaitRestored() }
+        emptySession.send("hello", Chat.BotChat(bot("b1", "task-1")))
+        assertEquals("This computer is offline.", emptySession.actionError)
+
+        emptySession.actionError = null
+        emptySession.cancelQueued(QueuedSend("q1", "text"), Chat.BotChat(bot("b1", "task-1")))
+        assertEquals("This computer is offline.", emptySession.actionError)
+
+        emptySession.actionError = null
+        emptySession.checkUpdates()
+        assertEquals("This computer is offline.", emptySession.actionError)
+    }
 
     private fun json(body: String, code: Int = 200): MockResponse = MockResponse()
         .setResponseCode(code)

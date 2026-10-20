@@ -89,6 +89,7 @@ class ProfileClientTest {
                 description = "Finds evidence.",
                 notifications = false,
                 color = "teal",
+                mascotBody = "star",
                 avatarUrl = BotProfilePatch.AvatarURL.Set(
                     "/api/attachments/123e4567-e89b-12d3-a456-426614174000.webp",
                 ),
@@ -104,6 +105,7 @@ class ProfileClientTest {
                 "description",
                 "notifications",
                 "color",
+                "mascotBody",
                 "avatarUrl",
                 "avatarCrop",
                 "voice",

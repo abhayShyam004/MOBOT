@@ -85,36 +85,14 @@ class OnboardingRoutingTest {
     }
 
     @Test
-    fun `Not now leads to a home that can still connect and still reach Settings`() {
+    fun `a first launch contains no computer pairing requirement or bypass`() {
         val scene = OnboardingScene()
         mount(scene)
 
-        compose.onNodeWithText(OnboardingCopy.NOT_NOW).performClick()
-        compose.waitForIdle()
-
-        compose.onNodeWithText(OnboardingCopy.UNPAIRED_HOME_TITLE).assertIsDisplayed()
-        compose.onNodeWithText(OnboardingCopy.UNPAIRED_HOME_CONNECT).assertIsDisplayed()
-
-        // The later way back to notifications, without re-entering a connection
-        // flow this person has just declined.
-        compose.onNodeWithContentDescription("Settings").performClick()
-        compose.waitForIdle()
-        compose.onNodeWithText("Connect a computer").assertIsDisplayed()
-        // The redesigned screen is a taller, more spacious list than the one this
-        // was written against, so on the test's short viewport the notifications
-        // group is below the fold. Scrolling is what a person would do on a phone
-        // that small; what the assertion is about is that the row is there.
-        compose.onNodeWithText("Enable notifications").performScrollTo().assertIsDisplayed()
-        // And nothing that needs a pairing to mean anything.
-        compose.onNodeWithText("Unpair this phone").assertDoesNotExist()
-        compose.onNodeWithText("Tasks & Routines").assertDoesNotExist()
-
-        assertEquals(emptyList(), scene.asked(), "declining setup still spent a prompt")
-
-        // And back closes Settings rather than the app.
-        compose.runOnUiThread { compose.activity.onBackPressedDispatcher.onBackPressed() }
-        compose.waitForIdle()
-        compose.onNodeWithText(OnboardingCopy.UNPAIRED_HOME_TITLE).assertIsDisplayed()
+        compose.onNodeWithText(OnboardingCopy.WELCOME_TITLE).assertIsDisplayed()
+        compose.onNodeWithText("Get Started").assertIsDisplayed()
+        compose.onNodeWithText("Pair with a computer").assertDoesNotExist()
+        compose.onNodeWithText(OnboardingCopy.NOT_NOW).assertDoesNotExist()
     }
 
     @Test

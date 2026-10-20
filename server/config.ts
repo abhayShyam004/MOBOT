@@ -1,7 +1,7 @@
 // Config + data dirs. One file, ~/.openmausbot/config.json, env fallbacks:
 //   { "xai": {"key":"xai-…"}, "composio": {"apiKey":"ak_…"}, "box": {"token":"…"},
 //     "instances": { "<instanceId>": {"driver":"grok", …} } }
-import { readFileSync, mkdirSync, existsSync, renameSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync, renameSync, copyFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { z } from "zod";
@@ -333,7 +333,16 @@ export const agentPermissionsSchema = z.object({
 });
 export type AgentPermissionsConfig = z.infer<typeof agentPermissionsSchema>;
 
+export const updaterConfigSchema = z.object({
+  channel: z.enum(["stable", "beta"]).optional(),
+  autoCheck: z.boolean().optional(),
+  lastCheckedAt: z.string().optional(),
+  repo: z.string().optional(),
+});
+export type UpdaterConfig = z.infer<typeof updaterConfigSchema>;
+
 const appConfigSchema = z.object({
+  updater: updaterConfigSchema.optional(),
   /** Verified by the dedicated domain endpoint, never a generic config patch. */
   customDomain: z.string().optional(),
   /** Who may sign in with an emailed code (server/account-signin.ts):
@@ -529,6 +538,7 @@ export interface AppConfig {
    * attaches to it instead of agent-browser spawning its own (#1396). */
   browserEngine?: { attachCdpUrl?: string };
   agentPermissions?: AgentPermissionsConfig;
+  updater?: UpdaterConfig;
   instances?: InstanceConfigMap;
 }
 export type BrowserProfile = z.output<typeof browserProfileSchema> & {
@@ -822,9 +832,15 @@ function migrateLegacyFeatureFlags(): void {
 
 export function loadConfig(): AppConfig {
   let cfg: AppConfig = {};
+  const configFile = join(DATA_DIR, "config.json");
   try {
-    cfg = parseStoredConfig(parseJson(readFileSync(join(DATA_DIR, "config.json"), "utf8")));
+    cfg = parseStoredConfig(parseJson(readFileSync(configFile, "utf8")));
   } catch {
+    if (existsSync(configFile)) {
+      try {
+        copyFileSync(configFile, `${configFile}.corrupted.${Date.now()}`);
+      } catch {}
+    }
     /* first run — env fallbacks below */
   }
   // Env wins over the file for every credential. The desktop shell keeps
@@ -969,6 +985,11 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
     const parsed = jsonObjectSchema.safeParse(parseJson(readFileSync(p, "utf8")));
     if (parsed.success) disk = parsed.data;
   } catch {
+    if (existsSync(p)) {
+      try {
+        copyFileSync(p, `${p}.corrupted.${Date.now()}`);
+      } catch {}
+    }
     /* first write */
   }
   const checkedPatch = appConfigSchema.partial().parse(patch);
@@ -977,7 +998,7 @@ export function saveConfig(patch: Partial<AppConfig>, options: { replaceInstance
   // back after we have successfully recognized the legacy list.
   const storedProfiles = storedBrowserProfilesSchema.safeParse(disk.browserProfiles);
   if (storedProfiles.success) disk.browserProfiles = storedProfiles.data;
-  for (const key of ["xai", "anthropic", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "localVm", "features", "budgets", "billing", "onboarding", "browserEngine", "agentPermissions"] as const) {
+  for (const key of ["xai", "anthropic", "openaiCompat", "composio", "box", "opencodeGo", "tts", "imageGen", "profile", "rooms", "threads", "localVm", "features", "budgets", "billing", "onboarding", "browserEngine", "agentPermissions", "updater"] as const) {
     const section = checkedPatch[key];
     if (!section) continue;
     const current = jsonObjectSchema.safeParse(disk[key]);

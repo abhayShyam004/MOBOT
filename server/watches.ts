@@ -177,6 +177,16 @@ export class WatchManager {
     return true;
   }
 
+  deleteWatchesForBot(botId: string): number {
+    const initialCount = this.watches.length;
+    this.watches = this.watches.filter((w) => w.botId !== botId);
+    const removed = initialCount - this.watches.length;
+    if (removed > 0) {
+      this.save();
+    }
+    return removed;
+  }
+
   pauseWatch(id: string): Watch | null {
     return this.updateWatch(id, { status: "paused" });
   }
@@ -188,6 +198,17 @@ export class WatchManager {
   async checkWatch(id: string): Promise<WatchCheckResult | null> {
     const watch = this.watches.find((w) => w.id === id);
     if (!watch) return null;
+
+    if (watch.status === "paused") {
+      return {
+        watchId: watch.id,
+        changed: false,
+        triggered: false,
+        previousState: watch.currentState,
+        currentState: watch.currentState ?? "paused",
+        note: "Watch is paused; check skipped",
+      };
+    }
 
     if (watch.expiresAt && Date.now() > watch.expiresAt) {
       watch.status = "expired";

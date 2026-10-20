@@ -759,6 +759,60 @@ function decodeEntities(text: string): string {
     .replace(/&nbsp;/g, " ");
 }
 
+export function parseDuckDuckGoResults(
+  html: string,
+  limit: number,
+): Array<{ title: string; url: string; snippet: string }> {
+  const results: Array<{ title: string; url: string; snippet: string }> = [];
+  const seenUrls = new Set<string>();
+  const linkRe = /<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const matches = Array.from(html.matchAll(linkRe));
+
+  for (let i = 0; i < matches.length && results.length < limit; i++) {
+    const match = matches[i]!;
+    const title = decodeEntities(match[2].replace(/<[^>]+>/g, "")).trim();
+    let href = decodeEntities(match[1]);
+
+    // Unwrap DuckDuckGo redirect link /l/?uddg=...
+    try {
+      const wrapped = new URL(href, "https://duckduckgo.com");
+      const target = wrapped.searchParams.get("uddg");
+      if (target) {
+        href = decodeURIComponent(target);
+      }
+    } catch {
+      /* keep raw href */
+    }
+
+    if (!title || !href) continue;
+
+    // Validate absolute http/https URL and filter out DuckDuckGo internal/ad links
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(href);
+      if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") continue;
+      if (parsedUrl.hostname.includes("duckduckgo.com")) continue;
+    } catch {
+      continue;
+    }
+
+    if (seenUrls.has(parsedUrl.href)) continue;
+    seenUrls.add(parsedUrl.href);
+
+    // Extract snippet strictly from the slice between this link and the next result link
+    const startIndex = match.index! + match[0].length;
+    const endIndex = i + 1 < matches.length ? matches[i + 1]!.index! : Math.min(startIndex + 4000, html.length);
+    const chunk = html.slice(startIndex, endIndex);
+
+    const snippetMatch = /<(?:a|span|div|td)[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span|div|td)>/i.exec(chunk);
+    const snippet = snippetMatch ? decodeEntities(snippetMatch[1].replace(/<[^>]+>/g, "")).trim() : "";
+
+    results.push({ title, url: parsedUrl.href, snippet });
+  }
+
+  return results;
+}
+
 async function webSearch(args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
   const query = typeof args.query === "string" ? args.query.trim() : "";
   if (!query) return toolError("query is required");
@@ -777,28 +831,7 @@ async function webSearch(args: Record<string, unknown>, signal: AbortSignal): Pr
     });
     if (!response.ok) return toolError(`search engine returned HTTP ${response.status}`);
     const html = await response.text();
-    // The Lite endpoint marks hits as result__a links inside .result blocks,
-    // snippets as result__snippet. DuckDuckGo wraps outbound URLs in
-    // /l/?uddg=<encoded>; unwrap when present.
-    const results: Array<{ title: string; url: string; snippet: string }> = [];
-    const blockRe = /<a[^>]+class="[^"]*result__a[^"]*"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
-    const snippetRe = /<a[^>]+class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)<\/a>/g;
-    const snippets: string[] = [];
-    for (const match of html.matchAll(snippetRe)) snippets.push(decodeEntities(match[1].replace(/<[^>]+>/g, "")).trim());
-    let index = 0;
-    for (const match of html.matchAll(blockRe)) {
-      if (results.length >= limit) break;
-      let href = decodeEntities(match[1]);
-      try {
-        const wrapped = new URL(href, "https://duckduckgo.com");
-        const target = wrapped.searchParams.get("uddg");
-        if (target) href = target;
-      } catch { /* keep raw href */ }
-      const title = decodeEntities(match[2].replace(/<[^>]+>/g, "")).trim();
-      if (!title || !href) continue;
-      results.push({ title, url: href, snippet: snippets[index] ?? "" });
-      index += 1;
-    }
+    const results = parseDuckDuckGoResults(html, limit);
     if (!results.length) return { ok: true, query, results: [], note: "no results parsed; the page layout may have changed" };
     return { ok: true, query, results };
   } catch (error) {

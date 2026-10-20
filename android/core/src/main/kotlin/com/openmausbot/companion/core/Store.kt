@@ -169,7 +169,9 @@ data class CompanionState(
             rooms = fleet.groups,
             messages = hydratedMessages,
             hasMore = hydratedHasMore,
-            activeLeafIds = fleet.bots.associate { it.threadId to it.activeLeafId },
+            activeLeafIds = fleet.bots.mapNotNull { bot ->
+                bot.activeLeafId?.let { bot.threadId to it }
+            }.toMap(),
         )
             .let { state -> fleet.botQueuedMessages?.let { state.replaceBotQueues(it) } ?: state }
             .reconcileAllQueued()
@@ -212,14 +214,35 @@ data class CompanionState(
         is Frame.Message -> {
             val leaf = if (activeLeafIds.containsKey(frame.threadId)) activeLeafIds[frame.threadId]
                 else botForThread(frame.threadId)?.activeLeafId
+            val existing = messages[frame.threadId].orEmpty()
+            val shouldAdvanceLeaf = when {
+                leaf == null -> true
+                frame.message.parentId == leaf -> true
+                existing.none { it.id == leaf } -> true
+                existing.any { it.id == frame.message.parentId } -> {
+                    var curr: String? = frame.message.parentId
+                    val byId = existing.associateBy(Message::id)
+                    var foundAncestor = false
+                    val visited = mutableSetOf<String>()
+                    while (curr != null && visited.add(curr)) {
+                        if (curr == leaf) {
+                            foundAncestor = true
+                            break
+                        }
+                        curr = byId[curr]?.parentId
+                    }
+                    foundAncestor
+                }
+                else -> false
+            }
             var result = copy(
                 messages = append(messages, frame.threadId, frame.message),
-                activeLeafIds = if (frame.message.parentId == leaf)
+                activeLeafIds = if (shouldAdvanceLeaf)
                     activeLeafIds + (frame.threadId to frame.message.id) else activeLeafIds,
                 bots = bots.map {
                     if (
                         it.threadId == frame.threadId &&
-                        frame.message.parentId == it.activeLeafId
+                        (shouldAdvanceLeaf || frame.message.parentId == it.activeLeafId)
                     ) {
                         it.copy(activeLeafId = frame.message.id)
                     } else {
@@ -384,8 +407,13 @@ data class CompanionState(
             } else {
                 messages + (bot.threadId to bot.messages.orEmpty())
             }
-            val next = copy(bots = bots + bot, messages = nextMessages,
-                activeLeafIds = activeLeafIds + (bot.threadId to bot.activeLeafId))
+            val next = copy(
+                bots = bots + bot,
+                messages = nextMessages,
+                activeLeafIds = if (bot.activeLeafId != null && !activeLeafIds.containsKey(bot.threadId))
+                    activeLeafIds + (bot.threadId to bot.activeLeafId)
+                else activeLeafIds,
+            )
             return bot.messages?.let {
                 next.merge(ThreadPage(it, hasMore = bot.hasMore ?: false), bot.threadId)
             } ?: next
@@ -395,10 +423,13 @@ data class CompanionState(
         if (bot.messages == null) {
             val merged = bot.copy(
                 messages = previous.messages.takeIf { previous.threadId == bot.threadId },
-                activeLeafId = bot.activeLeafId ?: previous.activeLeafId.takeIf { previous.threadId == bot.threadId },
+                activeLeafId = previous.activeLeafId.takeIf { previous.threadId == bot.threadId } ?: bot.activeLeafId,
             )
-            val next = copy(bots = bots.replacing(index, merged),
-                activeLeafIds = activeLeafIds + (bot.threadId to (bot.activeLeafId ?: activeLeafIds[bot.threadId] ?: merged.activeLeafId)))
+            val currentLeaf = activeLeafIds[bot.threadId] ?: merged.activeLeafId
+            val next = copy(
+                bots = bots.replacing(index, merged),
+                activeLeafIds = if (currentLeaf != null) activeLeafIds + (bot.threadId to currentLeaf) else activeLeafIds,
+            )
             // A turn can end without a settled reply — an engine that dies
             // mid-sentence reports the failure as activity, not text — and
             // the half-written answer would otherwise sit in the buffer
@@ -411,11 +442,18 @@ data class CompanionState(
         bot.messages.forEach { byId[it.id] = it }
         val mergedMessages = byId.values.sortedWith(compareBy<Message> { it.at }.thenBy { it.id })
 
+        val currentLeaf = activeLeafIds[bot.threadId]
+        val resolvedLeaf = if (currentLeaf != null && byId.containsKey(currentLeaf)) {
+            currentLeaf
+        } else {
+            bot.activeLeafId ?: currentLeaf ?: mergedMessages.lastOrNull()?.id
+        }
+
         val result = copy(
-            bots = bots.replacing(index, bot.copy(messages = mergedMessages)),
+            bots = bots.replacing(index, bot.copy(messages = mergedMessages, activeLeafId = resolvedLeaf)),
             messages = messages + (bot.threadId to mergedMessages),
             hasMore = hasMore + (bot.threadId to (bot.hasMore ?: false)),
-            activeLeafIds = activeLeafIds + (bot.threadId to bot.activeLeafId),
+            activeLeafIds = if (resolvedLeaf != null) activeLeafIds + (bot.threadId to resolvedLeaf) else activeLeafIds,
         ).clearSettledTaskStreams(bot)
         // A replacement bypasses `append`, which is what normally retires a
         // row. Without this the held message stays above the chat bar for

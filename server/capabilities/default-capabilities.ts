@@ -14,6 +14,8 @@ import type {
   CapabilityContext,
   OperationSchema,
 } from './types.ts';
+import { loadUserLocation, saveUserLocation, clearUserLocation, type UserLocation } from '../location-context.ts';
+import { DATA_DIR } from '../config.ts';
 
 /** Files Capability */
 export class FilesCapability implements DeviceCapability {
@@ -935,6 +937,163 @@ export class MediaCapability implements DeviceCapability {
       error: {
         code: 'UNSUPPORTED_OPERATION',
         message: `Media capability does not support operation '${operation}'.`,
+        category: 'invalid_input',
+      },
+    };
+  }
+}
+
+/** Location & Geolocation Capability */
+export class LocationCapability implements DeviceCapability {
+  readonly id = 'device.location';
+  readonly name = 'Location & Geolocation';
+  readonly description = 'Access device location status or manage saved user location with strict provenance.';
+  readonly availability = { supported: true };
+  readonly requiredPermissions = [
+    'android.permission.ACCESS_COARSE_LOCATION',
+    'android.permission.ACCESS_FINE_LOCATION',
+  ];
+  readonly riskClassification = 'low' as const;
+  readonly lifecycleBehavior = 'stateless' as const;
+
+  readonly supportedOperations: OperationSchema[] = [
+    {
+      name: 'get_location',
+      description: 'Get current location status, provenance, and whether live device location or saved location is available.',
+      risk: 'low',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', enum: ['available', 'configured', 'unavailable'] },
+          liveDeviceAvailable: { type: 'boolean' },
+          savedLocation: { type: 'object' },
+          provenance: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'set_saved_location',
+      description: 'Set an explicit saved default user location (e.g. user home city).',
+      risk: 'medium',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          city: { type: 'string', description: 'City name' },
+          region: { type: 'string', description: 'State or region' },
+          country: { type: 'string', description: 'Country name' },
+          countryCode: { type: 'string', description: '2-letter country code' },
+          postalCode: { type: 'string', description: 'Postal code' },
+        },
+        required: ['city'],
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean' },
+          location: { type: 'object' },
+        },
+      },
+    },
+    {
+      name: 'clear_saved_location',
+      description: 'Clear the saved default user location, reverting to UNKNOWN/UNAVAILABLE.',
+      risk: 'low',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          success: { type: 'boolean' },
+          message: { type: 'string' },
+        },
+      },
+    },
+  ];
+
+  async execute(operation: string, params: Record<string, unknown>): Promise<CapabilityResult> {
+    if (operation === 'get_location') {
+      const saved = loadUserLocation(DATA_DIR);
+      if (saved && saved.enabled !== false && saved.provenance === 'SAVED_USER') {
+        return {
+          success: true,
+          data: {
+            status: 'configured',
+            liveDeviceAvailable: false,
+            savedLocation: saved,
+            provenance: 'SAVED_USER',
+            message: 'Saved default location is configured. Live device GPS location is currently unavailable.',
+          },
+        };
+      }
+      return {
+        success: true,
+        data: {
+          status: 'unavailable',
+          liveDeviceAvailable: false,
+          savedLocation: null,
+          provenance: 'UNKNOWN/UNAVAILABLE',
+          message: 'Live device location is currently unavailable and no saved default location has been configured.',
+        },
+      };
+    }
+    if (operation === 'set_saved_location') {
+      const city = typeof params.city === 'string' ? params.city.trim() : '';
+      if (!city) {
+        return {
+          success: false,
+          error: {
+            code: 'INVALID_PARAMETERS',
+            message: 'City is required to set saved location.',
+            category: 'invalid_input',
+          },
+        };
+      }
+      const loc: UserLocation = {
+        city,
+        region: typeof params.region === 'string' ? params.region.trim() : undefined,
+        country: typeof params.country === 'string' ? params.country.trim() : undefined,
+        countryCode: typeof params.countryCode === 'string' ? params.countryCode.trim().toUpperCase() : undefined,
+        postalCode: typeof params.postalCode === 'string' ? params.postalCode.trim() : undefined,
+        provenance: 'SAVED_USER',
+        enabled: true,
+        updatedAt: Date.now(),
+      };
+      const ok = saveUserLocation(loc, DATA_DIR);
+      if (!ok) {
+        return {
+          success: false,
+          error: {
+            code: 'PERSISTENCE_FAILED',
+            message: 'Failed to persist saved location.',
+            category: 'execution_failed',
+          },
+        };
+      }
+      return {
+        success: true,
+        data: {
+          success: true,
+          location: loadUserLocation(DATA_DIR),
+          message: `Saved default location set to ${city}.`,
+        },
+      };
+    }
+    if (operation === 'clear_saved_location') {
+      clearUserLocation(DATA_DIR);
+      return {
+        success: true,
+        data: {
+          success: true,
+          message: 'Saved default location cleared. Location status reverted to UNKNOWN/UNAVAILABLE.',
+        },
+      };
+    }
+    return {
+      success: false,
+      error: {
+        code: 'UNSUPPORTED_OPERATION',
+        message: `Location capability does not support operation '${operation}'.`,
         category: 'invalid_input',
       },
     };

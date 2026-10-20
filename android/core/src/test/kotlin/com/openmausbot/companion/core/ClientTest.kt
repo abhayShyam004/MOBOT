@@ -198,6 +198,7 @@ class ClientTest {
             "{}", // rename room task
             """{"group":$room}""", // delete room task
             "{}", // interrupt
+            "{}", // interrupt room
             """{"joinUrl":"https://desktop.example/session/fresh"}""", // cloud desktop
             "{}", // bot read
             "{}", // room read
@@ -222,13 +223,14 @@ class ClientTest {
         client.renameRoomTask("g1", "gt2", "Channel renamed")
         client.deleteRoomTask("g1", "gt2")
         client.interrupt("b1")
+        client.interruptRoom("g1", "gt1")
         assertEquals("https://desktop.example/session/fresh", client.cloudDesktop("b1").url.toString())
         client.markBotRead("b1")
         client.markRoomRead("g1")
         client.setTaskArchived("b1", "t2", 123.0)
         client.setTaskArchived("b1", "t2", null)
 
-        val requests = List(22) { server.takeRequest() }
+        val requests = List(23) { server.takeRequest() }
         assertEquals(
             listOf(
                 "POST /api/bots",
@@ -248,6 +250,7 @@ class ClientTest {
                 "PATCH /api/groups/g1/tasks/gt2",
                 "DELETE /api/groups/g1/tasks/gt2",
                 "POST /api/bots/b1/interrupt",
+                "POST /api/groups/g1/interrupt",
                 "POST /api/bots/b1/computer/join",
                 "POST /api/bots/b1/read",
                 "POST /api/groups/g1/read",
@@ -270,10 +273,11 @@ class ClientTest {
         assertEquals(mapOf("title" to "Renamed"), stringBody(requests[10].body.readUtf8()))
         assertEquals(mapOf("title" to "Channel next"), stringBody(requests[12].body.readUtf8()))
         assertEquals(mapOf("title" to "Channel renamed"), stringBody(requests[14].body.readUtf8()))
+        assertEquals(mapOf("threadId" to "gt1"), stringBody(requests[17].body.readUtf8()))
         // Unarchive is the one task PATCH that must carry an explicit null;
         // stamps stay plain integers, never scientific notation.
-        assertEquals("""{"archivedAt":123}""", requests[20].body.readUtf8())
-        assertEquals("""{"archivedAt":null}""", requests[21].body.readUtf8())
+        assertEquals("""{"archivedAt":123}""", requests[21].body.readUtf8())
+        assertEquals("""{"archivedAt":null}""", requests[22].body.readUtf8())
         requests.forEach { assertEquals("Bearer device-token", it.getHeader("Authorization")) }
     }
 
