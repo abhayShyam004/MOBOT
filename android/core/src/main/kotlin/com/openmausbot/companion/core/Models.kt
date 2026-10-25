@@ -433,6 +433,76 @@ data class Bot(
     val activeLeafId: String? = null,
     val hasMore: Boolean? = null,
     val projects: List<BotProject>? = null,
+    val contract: AgentContractWire? = null,
+)
+
+@Serializable
+data class AgentContractWire(
+    val contractVersion: Int = 1,
+    val role: String,
+    val roleTitle: String,
+    val identity: AgentIdentityWire? = null,
+    val cognitiveStance: CognitiveStanceWire? = null,
+    val toolAffinity: ToolAffinityWire? = null,
+    val verificationPolicy: VerificationPolicyWire? = null,
+    val contextSensitivity: ContextSensitivityWire? = null,
+    val autonomyPolicy: AutonomyPolicyWire? = null,
+    val outputDelivery: OutputDeliveryWire? = null,
+)
+
+@Serializable
+data class AgentIdentityWire(
+    val name: String? = null,
+    val purpose: String? = null,
+    val coreMission: String? = null,
+    val behavioralStance: String? = null,
+)
+
+@Serializable
+data class CognitiveStanceWire(
+    val reasoningDepth: String? = null,
+    val creativityBias: String? = null,
+    val skepticismLevel: String? = null,
+    val actionOrientation: String? = null,
+)
+
+@Serializable
+data class ToolAffinityWire(
+    val preferredCategories: List<String> = emptyList(),
+    val discouragedCategories: List<String> = emptyList(),
+    val autoExecutionConfidenceThreshold: Double = 0.8,
+)
+
+@Serializable
+data class VerificationPolicyWire(
+    val preExecutionCheck: Boolean = false,
+    val empiricalVerificationRequired: Boolean = false,
+    val rigorLevel: String = "standard",
+    val artifactValidation: Boolean = false,
+)
+
+@Serializable
+data class ContextSensitivityWire(
+    val deviceStateSensitivity: String = "medium",
+    val locationSensitivity: String = "medium",
+    val temporalSensitivity: String = "medium",
+    val memorySensitivity: String = "medium",
+    val goalAlignmentSensitivity: String = "medium",
+)
+
+@Serializable
+data class AutonomyPolicyWire(
+    val initiativeLevel: String = "balanced",
+    val userCheckpointPreference: String = "standard",
+    val allowDelegation: Boolean = true,
+    val maxAutonomousHorizon: String = "multi_turn",
+)
+
+@Serializable
+data class OutputDeliveryWire(
+    val defaultVerbosity: String = "concise",
+    val preferredFormat: String = "structured_cards",
+    val toneProfile: String = "",
 )
 
 /** Project only task-local controls; the original fleet record stays profile-global. */
@@ -520,6 +590,9 @@ data class MemoryOverview(
     val index: MemoryCapacity = MemoryCapacity(),
     val topics: List<MemoryFileInfo> = emptyList(),
     val logs: List<MemoryFileInfo> = emptyList(),
+    /** Whole-file text, when the endpoint sends it (the shared partition and
+     * the one-release compatibility shape of the bot endpoint both do). */
+    val text: String = "",
 )
 
 /** One memory document, with the hash a save must present. */
@@ -530,6 +603,30 @@ data class MemoryDoc(
     val hash: String = "",
     val exists: Boolean = false,
     val overview: MemoryOverview? = null,
+)
+
+/** Partitioned Memory snippet representation (Phase 6). */
+@Serializable
+data class PartitionedMemorySnippet(
+    val path: String,
+    val content: String,
+)
+
+/** Query for partitioned memory across shared and bot-specialized partitions (Phase 6). */
+@Serializable
+data class PartitionedMemoryQuery(
+    val botId: String,
+    val queryText: String = "",
+    val includeShared: Boolean = true,
+    val maxSharedSnippets: Int = 5,
+    val maxSpecializedSnippets: Int = 5,
+)
+
+/** Formal result of partitioned memory query with explicit partition paths (Phase 6). */
+@Serializable
+data class PartitionedMemoryResult(
+    val sharedSnippets: List<PartitionedMemorySnippet> = emptyList(),
+    val specializedSnippets: List<PartitionedMemorySnippet> = emptyList(),
 )
 
 @Serializable
@@ -848,6 +945,7 @@ data class Instance(
     val authentication: InstanceAuthentication? = null,
     val icon: ProviderIconDto? = null,
     val docsUrl: String? = null,
+    val isDefault: Boolean = false,
 ) {
     val id: String get() = instanceId
 
@@ -1133,7 +1231,11 @@ data class ConnectorCatalog(
     val mode: String? = null,
     val source: String? = null,
     val cards: List<ConnectorCard>,
+    val totalCount: Int? = null,
+    val hasMore: Boolean? = null,
+    val nextCursor: String? = null,
 )
+
 
 @Serializable
 data class ConnectorStatuses(

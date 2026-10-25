@@ -53,11 +53,19 @@ const CALL_TIMEOUT_MS = 60_000;
 // it to the same digest identity the app side uses. Tools take `botId` —
 // validated, hashed, never passed through as a path component.
 function sessionName(botId: unknown): string {
-  if (typeof botId !== "string" || !/^[A-Za-z0-9_-]{1,96}$/.test(botId)) {
-    throw new Error("botId is required (the bot's own id, from context)");
+  if (botId !== undefined && botId !== null && botId !== "") {
+    if (typeof botId !== "string" || !/^[A-Za-z0-9_-]{1,96}$/.test(botId)) {
+      throw new Error("botId is required (the bot's own id, from context)");
+    }
+    const digest = createHash("sha256").update(botId).digest("hex");
+    return `omb-${digest.slice(0, 32)}`;
   }
-  const digest = createHash("sha256").update(botId).digest("hex");
-  return `omb-${digest.slice(0, 32)}`;
+  const fallback = process.env.OMB_BOT_ID;
+  if (typeof fallback === "string" && /^[A-Za-z0-9_-]{1,96}$/.test(fallback)) {
+    const digest = createHash("sha256").update(fallback).digest("hex");
+    return `omb-${digest.slice(0, 32)}`;
+  }
+  throw new Error("botId is required (the bot's own id, from context)");
 }
 
 type RpcMessage = { id?: number | string | null; method?: string; params?: unknown };
@@ -149,57 +157,57 @@ async function requireSession(args: Record<string, unknown>): Promise<string> {
 const TOOLS: Record<string, { description: string; inputSchema: Record<string, unknown>; handler: ToolHandler }> = {
   browser_open: {
     description: "Open a URL in this bot's browser and wait for the page to load. Only http/https; private and loopback addresses are refused. The browser session is this bot's own — cookies and storage are isolated per bot.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" }, url: { type: "string", description: "Absolute http(s) URL to open" } }, required: ["botId", "url"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" }, url: { type: "string", description: "Absolute http(s) URL to open" } }, required: ["url"] },
     handler: async (args) => driver("open", await requireSession(args), { url: String(args.url ?? "") }),
   },
   browser_navigate: {
     description: "Navigate the current tab to a new URL (same session, same isolation).",
-    inputSchema: { type: "object", properties: { botId: { type: "string" }, url: { type: "string" } }, required: ["botId", "url"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" }, url: { type: "string" } }, required: ["url"] },
     handler: async (args) => driver("navigate", await requireSession(args), { url: String(args.url ?? "") }),
   },
   browser_status: {
     description: "Current page URL, title, load progress and back/forward availability.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: [] },
     handler: async (args) => driver("status", await requireSession(args)),
   },
   browser_back: {
     description: "Go back one page in this bot's browser history.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: [] },
     handler: async (args) => driver("back", await requireSession(args)),
   },
   browser_forward: {
     description: "Go forward one page in this bot's browser history.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: [] },
     handler: async (args) => driver("forward", await requireSession(args)),
   },
   browser_get_text: {
     description: "Read the page's visible text, bounded (default 20,000 characters). Prefer this over re-snapshotting a page.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" }, maxChars: { type: "integer", minimum: 200, maximum: 60_000 } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" }, maxChars: { type: "integer", minimum: 200, maximum: 60_000 } }, required: [] },
     handler: async (args) => driver("text", await requireSession(args), { maxChars: Number(args.maxChars ?? 20_000) }),
   },
   browser_dom: {
     description: "Inspect the page's interactive elements (links, buttons, inputs) with @eN refs for click/type. Bounded to the first N elements with visible size.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" }, maxElements: { type: "integer", minimum: 10, maximum: 400 } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" }, maxElements: { type: "integer", minimum: 10, maximum: 400 } }, required: [] },
     handler: async (args) => driver("dom", await requireSession(args), { maxElements: Number(args.maxElements ?? 120) }),
   },
   browser_click: {
     description: "Click an element by @eN ref from browser_dom (scrolls it into view first).",
-    inputSchema: { type: "object", properties: { botId: { type: "string" }, ref: { type: "string", description: "@eN from browser_dom" } }, required: ["botId", "ref"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" }, ref: { type: "string", description: "@eN from browser_dom" } }, required: ["ref"] },
     handler: async (args) => driver("click", await requireSession(args), { ref: String(args.ref ?? "") }),
   },
   browser_type: {
     description: "Type text into an input/textarea by @eN ref (clears the field first by default, fires input/change events).",
-    inputSchema: { type: "object", properties: { botId: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, clear: { type: "boolean" } }, required: ["botId", "ref", "text"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" }, ref: { type: "string" }, text: { type: "string" }, clear: { type: "boolean" } }, required: ["ref", "text"] },
     handler: async (args) => driver("type", await requireSession(args), { ref: String(args.ref ?? ""), text: String(args.text ?? ""), clear: args.clear !== false }),
   },
   browser_eval: {
     description: "Run JavaScript in the page's context and return the result as text. Page code can reach nothing of the app or other bots — this is read/write to the page only.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" }, expression: { type: "string" } }, required: ["botId", "expression"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" }, expression: { type: "string" } }, required: ["expression"] },
     handler: async (args) => driver("eval", await requireSession(args), { expression: String(args.expression ?? "") }),
   },
   browser_screenshot: {
     description: "Capture the current page as a JPEG image (bounded size).",
-    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: [] },
     handler: async (args) => {
       const jpeg = await driver("screenshot", await requireSession(args), {}, true) as Buffer;
       return imageResult(jpeg);
@@ -207,22 +215,22 @@ const TOOLS: Record<string, { description: string; inputSchema: Record<string, u
   },
   browser_cookies: {
     description: "List this session's cookies (per-bot isolated; other bots' cookies are invisible by construction).",
-    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: [] },
     handler: async (args) => driver("cookies", await requireSession(args)),
   },
   browser_clear: {
     description: "Clear this bot's browser state: cookies, storage, history. Other bots are unaffected.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: [] },
     handler: async (args) => driver("clear", await requireSession(args)),
   },
   browser_close: {
     description: "Close this bot's browser session and destroy its state on the phone.",
-    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: [] },
     handler: async (args) => driver("close", await requireSession(args)),
   },
   browser_persist: {
     description: "Flush this session's cookies to storage so logins survive an app restart (where the platform supports it).",
-    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: ["botId"] },
+    inputSchema: { type: "object", properties: { botId: { type: "string" } }, required: [] },
     handler: async (args) => driver("persist", await requireSession(args)),
   },
 };

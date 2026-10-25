@@ -191,6 +191,10 @@ android {
 
     buildFeatures {
         compose = true
+        // The signer's interface is a shared AIDL contract: each side generates
+        // the same stub from the same .aidl file, and the wire format is the
+        // method order the two copies declare.
+        aidl = true
     }
 
     packaging {

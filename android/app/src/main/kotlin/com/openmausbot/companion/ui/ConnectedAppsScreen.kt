@@ -2,6 +2,7 @@ package com.openmausbot.companion.ui
 
 import android.content.Intent
 import android.net.Uri
+import com.openmausbot.companion.MainActivity
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -123,9 +124,15 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
     var setupError by rememberSaveable { mutableStateOf<String?>(null) }
     var savingSetup by remember { mutableStateOf(false) }
 
+    var isSearching by remember { mutableStateOf(false) }
+
     suspend fun refresh(showProgress: Boolean = false) {
         if (showProgress) refreshing = true
         try {
+            val refreshedCatalog = session.loadConnectorCatalog(refresh = true)
+            if (refreshedCatalog != null) {
+                catalog = refreshedCatalog
+            }
             session.loadAllConnectorStatuses()?.let { response ->
                 inventory = ConnectedAppsPolicy.accept(inventory, response)
             }
@@ -138,6 +145,33 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
         scope.launch {
             val url = session.authorizeConnector(slug, accountAlias) ?: return@launch
             openConnectorAuthorization(context, session, url)
+
+            // Auto-redirect return polling:
+            // Poll for the connector to become ACTIVE in background.
+            // As soon as authorized, automatically bring the companion app to foreground and refresh!
+            scope.launch {
+                val startTime = System.currentTimeMillis()
+                val timeoutMs = 120_000L
+                while (System.currentTimeMillis() - startTime < timeoutMs) {
+                    kotlinx.coroutines.delay(2000L)
+                    try {
+                        val statusMap = session.loadAllConnectorStatuses()
+                        val st = statusMap?.services?.get(slug)
+                        if (st?.connected == true || st?.status.equals("ACTIVE", ignoreCase = true)) {
+                            try {
+                                val returnIntent = Intent(context, MainActivity::class.java).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                }
+                                context.startActivity(returnIntent)
+                            } catch (_: Exception) {}
+                            refresh(showProgress = true)
+                            break
+                        }
+                    } catch (_: Exception) {
+                        // ignore and continue polling
+                    }
+                }
+            }
         }
     }
 
@@ -155,6 +189,31 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
     LifecycleResumeEffect(Unit) {
         if (entered) scope.launch { refresh() } else entered = true
         onPauseOrDispose {}
+    }
+
+    LaunchedEffect(query) {
+        val trimmed = query.trim()
+        if (trimmed.length >= 2) {
+            kotlinx.coroutines.delay(350)
+            isSearching = true
+            try {
+                val searchResult = session.loadConnectorCatalog(query = trimmed)
+                if (searchResult != null && searchResult.cards.isNotEmpty()) {
+                    catalog = catalog?.let { current ->
+                        val existingSlugs = current.cards.map { it.slug }.toSet()
+                        val newCards = searchResult.cards.filter { it.slug !in existingSlugs }
+                        if (newCards.isNotEmpty()) {
+                            current.copy(
+                                cards = current.cards + newCards,
+                                totalCount = maxOf(current.totalCount ?: 0, current.cards.size + newCards.size),
+                            )
+                        } else current
+                    } ?: searchResult
+                }
+            } finally {
+                isSearching = false
+            }
+        }
     }
 
     val allCards = catalog?.cards.orEmpty()
@@ -246,13 +305,24 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                     // 1. Search Bar
                     item(key = "search_bar") {
                         Box(modifier = Modifier.padding(horizontal = 20.dp)) {
+                            val placeholderText = remember(allCards.size, catalog?.source, catalog?.totalCount) {
+                                val total = catalog?.totalCount ?: allCards.size
+                                if (catalog?.source == "api" && total >= 100) {
+                                    "Search $total+ services…"
+                                } else if (allCards.isNotEmpty()) {
+                                    "Search ${allCards.size} services…"
+                                } else {
+                                    "Search services…"
+                                }
+                            }
                             SettingsSearchBar(
                                 query = query,
                                 onQueryChange = { query = it },
-                                placeholder = "Search 1,600+ services…",
+                                placeholder = placeholderText,
                             )
                         }
                     }
+
 
                     // 2. Filter Tabs
                     item(key = "filter_tabs") {
@@ -371,7 +441,11 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                     if (filterTab != ServiceFilterTab.CONNECTED) {
                         item(key = "available_section_title") {
                             Text(
-                                text = if (query.isNotBlank()) "Search Results (${availableCards.size})" else "Available Services (${availableCards.size})",
+                                text = if (query.isNotBlank()) {
+                                    if (isSearching) "Searching Composio catalog…" else "Search Results (${availableCards.size})"
+                                } else {
+                                    "Available Services (${availableCards.size})"
+                                },
                                 fontSize = 14.sp,
                                 fontWeight = FontWeight.SemiBold,
                                 color = AppTheme.colors.textSecondary,
@@ -379,18 +453,36 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                             )
                         }
 
-                        if (availableCards.isEmpty() && !loading) {
+                        if (availableCards.isEmpty() && !loading && filterTab == ServiceFilterTab.AVAILABLE) {
                             item(key = "empty_available") {
                                 Box(
                                     modifier = Modifier
                                         .fillMaxWidth()
                                         .padding(horizontal = 24.dp, vertical = 12.dp),
                                 ) {
-                                    Text(
-                                        text = if (query.isNotBlank()) "No services found." else "No services available.",
-                                        color = AppTheme.colors.textSecondary,
-                                        fontSize = 14.sp,
-                                    )
+                                    if (isSearching) {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            CircularProgressIndicator(
+                                                modifier = Modifier.size(16.dp),
+                                                strokeWidth = 2.dp,
+                                                color = MaterialTheme.colorScheme.primary,
+                                            )
+                                            Text(
+                                                text = "Searching Composio catalog…",
+                                                color = AppTheme.colors.textSecondary,
+                                                fontSize = 14.sp,
+                                            )
+                                        }
+                                    } else {
+                                        Text(
+                                            text = if (query.isNotBlank()) "No services found." else "No services available.",
+                                            color = AppTheme.colors.textSecondary,
+                                            fontSize = 14.sp,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -418,14 +510,32 @@ fun ConnectedAppsScreen(onBack: () -> Unit) {
                         item(key = "empty_all") {
                             Box(
                                 modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(horizontal = 24.dp, vertical = 12.dp),
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 24.dp, vertical = 12.dp),
                             ) {
-                                Text(
-                                    text = if (query.isNotBlank()) "No services found." else "No services available.",
-                                    color = AppTheme.colors.textSecondary,
-                                    fontSize = 14.sp,
-                                )
+                                if (isSearching) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                    ) {
+                                        CircularProgressIndicator(
+                                            modifier = Modifier.size(16.dp),
+                                            strokeWidth = 2.dp,
+                                            color = MaterialTheme.colorScheme.primary,
+                                        )
+                                        Text(
+                                            text = "Searching Composio catalog…",
+                                            color = AppTheme.colors.textSecondary,
+                                            fontSize = 14.sp,
+                                        )
+                                    }
+                                } else {
+                                    Text(
+                                        text = if (query.isNotBlank()) "No services found." else "No services available.",
+                                        color = AppTheme.colors.textSecondary,
+                                        fontSize = 14.sp,
+                                    )
+                                }
                             }
                         }
                     }

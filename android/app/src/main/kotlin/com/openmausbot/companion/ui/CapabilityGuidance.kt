@@ -107,6 +107,26 @@ object CommonCapabilities {
         category = "Development",
     )
 
+    val GOOGLE_CALENDAR = CapabilityPrerequisite(
+        id = "googlecalendar",
+        kind = CapabilityKind.CONNECTED_SERVICE,
+        title = "Google Calendar",
+        description = "Required to view scheduled events, check availability, and create calendar entries.",
+        isConfigured = false,
+        actionLabel = "Connect Google Calendar",
+        category = "Productivity",
+    )
+
+    val LINEAR = CapabilityPrerequisite(
+        id = "linear",
+        kind = CapabilityKind.CONNECTED_SERVICE,
+        title = "Linear",
+        description = "Required to create issues, track project roadmaps, and manage sprint cycles.",
+        isConfigured = false,
+        actionLabel = "Connect Linear",
+        category = "Development",
+    )
+
     val SLACK = CapabilityPrerequisite(
         id = "slack",
         kind = CapabilityKind.CONNECTED_SERVICE,

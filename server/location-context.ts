@@ -3,12 +3,76 @@ import { join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
 
-export type LocationProvenance =
+export type ProvenanceSource =
   | "DEVICE_LIVE"
   | "USER_EXPLICIT"
   | "SAVED_USER"
   | "CONVERSATION_CONTEXT"
   | "UNKNOWN/UNAVAILABLE";
+
+export type LocationProvenance = ProvenanceSource;
+
+export interface ProvenanceRecord<T> {
+  value: T;
+  source: ProvenanceSource;
+  confidenceScore: number;
+  collectedAtMs: number;
+  expiresAtMs: number;
+  verificationEvidence?: string;
+  isSyntheticOrFixture: boolean;
+}
+
+export interface ProvenanceDiagnostic {
+  code: "ERR_PROVENANCE_CONTAMINATION" | "ERR_PROVENANCE_STALE" | "ERR_PROVENANCE_INVALID";
+  message: string;
+  timestamp: number;
+  source?: ProvenanceSource;
+  isSynthetic?: boolean;
+  evidence?: string;
+}
+
+export class ProvenanceContaminationError extends Error {
+  readonly code = "ERR_PROVENANCE_CONTAMINATION";
+  readonly diagnostic?: ProvenanceDiagnostic;
+  constructor(message: string, diagnostic?: ProvenanceDiagnostic) {
+    super(message);
+    this.name = "ProvenanceContaminationError";
+    this.diagnostic = diagnostic;
+  }
+}
+
+export class ProvenanceStaleError extends Error {
+  readonly code = "ERR_PROVENANCE_STALE";
+  readonly diagnostic?: ProvenanceDiagnostic;
+  constructor(message: string, diagnostic?: ProvenanceDiagnostic) {
+    super(message);
+    this.name = "ProvenanceStaleError";
+    this.diagnostic = diagnostic;
+  }
+}
+
+const recentProvenanceDiagnostics: ProvenanceDiagnostic[] = [];
+
+export function recordProvenanceDiagnostic(diag: ProvenanceDiagnostic): void {
+  recentProvenanceDiagnostics.push(diag);
+  if (recentProvenanceDiagnostics.length > 50) {
+    recentProvenanceDiagnostics.shift();
+  }
+}
+
+export function getLastProvenanceDiagnostic(): ProvenanceDiagnostic | null {
+  return recentProvenanceDiagnostics.length > 0
+    ? recentProvenanceDiagnostics[recentProvenanceDiagnostics.length - 1]
+    : null;
+}
+
+export function getRecentProvenanceDiagnostics(): ProvenanceDiagnostic[] {
+  return [...recentProvenanceDiagnostics];
+}
+
+export function clearProvenanceDiagnostics(): void {
+  recentProvenanceDiagnostics.length = 0;
+}
 
 export interface UserLocation {
   city?: string;
@@ -19,11 +83,16 @@ export interface UserLocation {
   latitude?: number;
   longitude?: number;
   timezone?: string;
-  provenance: LocationProvenance;
+  provenance: ProvenanceSource;
   source?: "ip" | "device" | "profile" | "user_set" | "timezone_inferred";
   updatedAt?: number;
   enabled?: boolean;
   isFixture?: boolean;
+  isSyntheticOrFixture?: boolean;
+  confidenceScore?: number;
+  collectedAtMs?: number;
+  expiresAtMs?: number;
+  verificationEvidence?: string;
 }
 
 export type LocationScope =
@@ -45,6 +114,224 @@ export interface ResolvedLocationRequest {
 const LOCATION_FILE = "user-location.json";
 
 /**
+ * Validates a ProvenanceRecord strictly:
+ * - source is one of the 5 canonical ProvenanceSource values
+ * - confidenceScore is numeric, finite, and strictly bounded to [0.00, 1.00]
+ * - collectedAtMs and expiresAtMs are real positive timestamps
+ * - expiresAtMs >= collectedAtMs
+ * - isSyntheticOrFixture is boolean
+ */
+export function validateProvenanceRecord<T>(raw: unknown): ProvenanceRecord<T> | null {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+
+  const validSources = new Set<ProvenanceSource>([
+    "DEVICE_LIVE",
+    "USER_EXPLICIT",
+    "SAVED_USER",
+    "CONVERSATION_CONTEXT",
+    "UNKNOWN/UNAVAILABLE",
+  ]);
+
+  if (typeof r.source !== "string" || !validSources.has(r.source as ProvenanceSource)) {
+    return null;
+  }
+
+  if (
+    typeof r.confidenceScore !== "number" ||
+    !Number.isFinite(r.confidenceScore) ||
+    r.confidenceScore < 0.0 ||
+    r.confidenceScore > 1.0
+  ) {
+    return null;
+  }
+
+  if (
+    typeof r.collectedAtMs !== "number" ||
+    !Number.isFinite(r.collectedAtMs) ||
+    r.collectedAtMs <= 0
+  ) {
+    return null;
+  }
+
+  if (
+    typeof r.expiresAtMs !== "number" ||
+    !Number.isFinite(r.expiresAtMs) ||
+    r.expiresAtMs <= 0 ||
+    r.expiresAtMs < r.collectedAtMs
+  ) {
+    return null;
+  }
+
+  if (typeof r.isSyntheticOrFixture !== "boolean") {
+    return null;
+  }
+
+  let verificationEvidence: string | undefined;
+  if (typeof r.verificationEvidence === "string") {
+    verificationEvidence = r.verificationEvidence.trim();
+  }
+
+  return {
+    value: r.value as T,
+    source: r.source as ProvenanceSource,
+    confidenceScore: r.confidenceScore,
+    collectedAtMs: r.collectedAtMs,
+    expiresAtMs: r.expiresAtMs,
+    verificationEvidence,
+    isSyntheticOrFixture: r.isSyntheticOrFixture,
+  };
+}
+
+/**
+ * Creates a canonical ProvenanceRecord with validated bounds.
+ * Enforces fail-closed validation: invalid confidence values (negative, > 1.0, NaN, Infinity)
+ * are rejected with ERR_PROVENANCE_INVALID and return null rather than being silently clamped.
+ */
+export function createProvenanceRecord<T>(params: {
+  value: T;
+  source: ProvenanceSource;
+  confidenceScore: number;
+  collectedAtMs?: number;
+  expiresAtMs?: number;
+  ttlMs?: number;
+  verificationEvidence?: string;
+  isSyntheticOrFixture?: boolean;
+}): ProvenanceRecord<T> | null {
+  const validSources = new Set<ProvenanceSource>([
+    "DEVICE_LIVE",
+    "USER_EXPLICIT",
+    "SAVED_USER",
+    "CONVERSATION_CONTEXT",
+    "UNKNOWN/UNAVAILABLE",
+  ]);
+
+  if (!params || !validSources.has(params.source)) {
+    recordProvenanceDiagnostic({
+      code: "ERR_PROVENANCE_INVALID",
+      message: `Invalid provenance source: ${params?.source}`,
+      timestamp: Date.now(),
+    });
+    return null;
+  }
+
+  const confidence = params.confidenceScore;
+  if (
+    typeof confidence !== "number" ||
+    !Number.isFinite(confidence) ||
+    confidence < 0.0 ||
+    confidence > 1.0
+  ) {
+    recordProvenanceDiagnostic({
+      code: "ERR_PROVENANCE_INVALID",
+      message: `Invalid confidence score: ${confidence}`,
+      timestamp: Date.now(),
+      source: params.source,
+    });
+    return null;
+  }
+
+  const now = Date.now();
+  const collected = params.collectedAtMs ?? now;
+  if (typeof collected !== "number" || !Number.isFinite(collected) || collected <= 0) {
+    recordProvenanceDiagnostic({
+      code: "ERR_PROVENANCE_INVALID",
+      message: `Invalid collectedAtMs timestamp: ${collected}`,
+      timestamp: now,
+      source: params.source,
+    });
+    return null;
+  }
+
+  const ttl = params.ttlMs ?? (params.source === "DEVICE_LIVE" ? 300_000 : 86_400_000 * 30);
+  const expires = params.expiresAtMs ?? (collected + ttl);
+  if (typeof expires !== "number" || !Number.isFinite(expires) || expires < collected) {
+    recordProvenanceDiagnostic({
+      code: "ERR_PROVENANCE_INVALID",
+      message: `Invalid expiresAtMs timestamp: ${expires} (collected: ${collected})`,
+      timestamp: now,
+      source: params.source,
+    });
+    return null;
+  }
+
+  return {
+    value: params.value,
+    source: params.source,
+    confidenceScore: confidence,
+    collectedAtMs: collected,
+    expiresAtMs: expires,
+    verificationEvidence: params.verificationEvidence?.trim() || undefined,
+    isSyntheticOrFixture: Boolean(params.isSyntheticOrFixture),
+  };
+}
+
+/**
+ * Checks if a provenance record is still fresh according to its expiration time.
+ */
+export function isProvenanceFresh<T>(record: ProvenanceRecord<T>, referenceTimeMs?: number): boolean {
+  const now = referenceTimeMs ?? Date.now();
+  return now <= record.expiresAtMs;
+}
+
+/**
+ * Freshness check that automatically records ERR_PROVENANCE_STALE and downgrades
+ * expired DEVICE_LIVE records to UNKNOWN/UNAVAILABLE per Invariant 2.
+ */
+export function checkProvenanceFreshness<T>(
+  record: ProvenanceRecord<T>,
+  referenceTimeMs?: number
+): { fresh: boolean; record: ProvenanceRecord<T> } {
+  const now = referenceTimeMs ?? Date.now();
+  if (now <= record.expiresAtMs) {
+    return { fresh: true, record };
+  }
+
+  recordProvenanceDiagnostic({
+    code: "ERR_PROVENANCE_STALE",
+    message: `Provenance record of source ${record.source} expired at ${record.expiresAtMs} (now: ${now})`,
+    timestamp: now,
+    source: record.source,
+  });
+
+  if (record.source === "DEVICE_LIVE") {
+    const downgraded: ProvenanceRecord<T> = {
+      ...record,
+      source: "UNKNOWN/UNAVAILABLE",
+      confidenceScore: 0.0,
+      verificationEvidence: "Downgraded from stale DEVICE_LIVE reading",
+    };
+    return { fresh: false, record: downgraded };
+  }
+
+  return { fresh: false, record };
+}
+
+/**
+ * Converts a UserLocation into a canonical ProvenanceRecord.
+ */
+export function toLocationProvenanceRecord(loc: UserLocation): ProvenanceRecord<UserLocation> {
+  const now = Date.now();
+  const collected = loc.collectedAtMs || loc.updatedAt || now;
+  const isLive = loc.provenance === "DEVICE_LIVE";
+  const ttl = isLive ? 300_000 : 86_400_000 * 30;
+  const expires = loc.expiresAtMs || (collected + ttl);
+  const confidence = loc.confidenceScore !== undefined
+    ? loc.confidenceScore
+    : (loc.provenance === "USER_EXPLICIT" ? 1.0 : loc.provenance === "DEVICE_LIVE" ? 0.98 : loc.provenance === "SAVED_USER" ? 0.90 : loc.provenance === "CONVERSATION_CONTEXT" ? 0.75 : 0.0);
+
+  return {
+    value: loc,
+    source: loc.provenance,
+    confidenceScore: confidence,
+    collectedAtMs: collected,
+    expiresAtMs: expires,
+    verificationEvidence: loc.verificationEvidence,
+    isSyntheticOrFixture: Boolean(loc.isFixture || loc.isSyntheticOrFixture),
+  };
+}
+
+/**
  * Validates a location object: ensures numbers are finite and in geographic bounds,
  * string fields are bounded and trimmed, provenance is verified, and eliminates
  * invalid, corrupted, or fixture records.
@@ -53,8 +340,20 @@ export function validateUserLocation(raw: unknown): UserLocation | null {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
   const obj = raw as Record<string, unknown>;
 
-  // Reject test fixture objects from being treated as real saved user locations
-  if (obj.isFixture === true || obj.test === true) {
+  // Reject test fixture or synthetic objects from being treated as real saved user locations
+  if (obj.isFixture === true || obj.isSyntheticOrFixture === true || obj.test === true) {
+    recordProvenanceDiagnostic({
+      code: "ERR_PROVENANCE_CONTAMINATION",
+      message: "Rejected synthetic or fixture location from being treated as production user location",
+      timestamp: Date.now(),
+      isSynthetic: true,
+      source: (obj.source as ProvenanceSource) || (obj.provenance as ProvenanceSource) || "UNKNOWN/UNAVAILABLE",
+    });
+    return null;
+  }
+
+  // Timezone inference is strictly non-authoritative and must never be saved as real user location
+  if (obj.source === "timezone_inferred") {
     return null;
   }
 
@@ -71,6 +370,34 @@ export function validateUserLocation(raw: unknown): UserLocation | null {
     return val;
   };
 
+  // If latitude is provided, it must be valid and within [-90, 90]
+  if (obj.latitude !== undefined) {
+    if (typeof obj.latitude !== "number" || !Number.isFinite(obj.latitude) || obj.latitude < -90 || obj.latitude > 90) {
+      return null;
+    }
+  }
+
+  // If longitude is provided, it must be valid and within [-180, 180]
+  if (obj.longitude !== undefined) {
+    if (typeof obj.longitude !== "number" || !Number.isFinite(obj.longitude) || obj.longitude < -180 || obj.longitude > 180) {
+      return null;
+    }
+  }
+
+  // If confidenceScore is provided, it must be finite and within [0.00, 1.00]
+  let confidenceScore: number | undefined;
+  if (obj.confidenceScore !== undefined) {
+    if (
+      typeof obj.confidenceScore !== "number" ||
+      !Number.isFinite(obj.confidenceScore) ||
+      obj.confidenceScore < 0.0 ||
+      obj.confidenceScore > 1.0
+    ) {
+      return null;
+    }
+    confidenceScore = obj.confidenceScore;
+  }
+
   const city = cleanString(obj.city);
   const region = cleanString(obj.region);
   const country = cleanString(obj.country);
@@ -81,7 +408,7 @@ export function validateUserLocation(raw: unknown): UserLocation | null {
   const latitude = cleanNumber(obj.latitude, -90, 90);
   const longitude = cleanNumber(obj.longitude, -180, 180);
 
-  const validProvenances = new Set<LocationProvenance>([
+  const validProvenances = new Set<ProvenanceSource>([
     "DEVICE_LIVE",
     "USER_EXPLICIT",
     "SAVED_USER",
@@ -89,9 +416,9 @@ export function validateUserLocation(raw: unknown): UserLocation | null {
     "UNKNOWN/UNAVAILABLE",
   ]);
 
-  let provenance: LocationProvenance = "SAVED_USER";
-  if (typeof obj.provenance === "string" && validProvenances.has(obj.provenance as LocationProvenance)) {
-    provenance = obj.provenance as LocationProvenance;
+  let provenance: ProvenanceSource = "SAVED_USER";
+  if (typeof obj.provenance === "string" && validProvenances.has(obj.provenance as ProvenanceSource)) {
+    provenance = obj.provenance as ProvenanceSource;
   } else if (obj.source === "device") {
     provenance = "DEVICE_LIVE";
   } else if (obj.source === "user_set" || obj.source === "profile") {
@@ -113,6 +440,18 @@ export function validateUserLocation(raw: unknown): UserLocation | null {
     ? obj.updatedAt
     : Date.now();
 
+  const collectedAtMs = typeof obj.collectedAtMs === "number" && Number.isFinite(obj.collectedAtMs)
+    ? obj.collectedAtMs
+    : updatedAt;
+
+  const expiresAtMs = typeof obj.expiresAtMs === "number" && Number.isFinite(obj.expiresAtMs)
+    ? obj.expiresAtMs
+    : (updatedAt + (provenance === "DEVICE_LIVE" ? 300_000 : 86_400_000 * 30));
+
+  const verificationEvidence = typeof obj.verificationEvidence === "string"
+    ? obj.verificationEvidence.trim()
+    : undefined;
+
   // If everything is blank and no coordinates, it's invalid
   if (!city && !region && !country && !countryCode && !postalCode && latitude === undefined && longitude === undefined) {
     return null;
@@ -128,6 +467,11 @@ export function validateUserLocation(raw: unknown): UserLocation | null {
     ...(longitude !== undefined ? { longitude } : {}),
     ...(timezone ? { timezone } : {}),
     ...(source ? { source } : {}),
+    ...(confidenceScore !== undefined ? { confidenceScore } : {}),
+    ...(collectedAtMs !== undefined ? { collectedAtMs } : {}),
+    ...(expiresAtMs !== undefined ? { expiresAtMs } : {}),
+    ...(verificationEvidence ? { verificationEvidence } : {}),
+    isSyntheticOrFixture: false,
     provenance,
     updatedAt,
     enabled,
@@ -173,19 +517,54 @@ export function loadUserLocation(customDataDir: string = DATA_DIR): UserLocation
  * Persists user location to ~/.openmausbot/user-location.json atomically.
  * Enforces provenance: must be SAVED_USER or USER_EXPLICIT.
  * Prevents test suites from mutating the production DATA_DIR.
+ * Intercepts synthetic/fixture records with ERR_PROVENANCE_CONTAMINATION.
  */
-export function saveUserLocation(location: UserLocation, customDataDir: string = DATA_DIR): boolean {
+export function saveUserLocation(
+  location: UserLocation | ProvenanceRecord<UserLocation>,
+  customDataDir: string = DATA_DIR,
+  options?: { throwOnError?: boolean },
+): boolean {
   if (customDataDir === DATA_DIR && (process.env.VITEST || process.env.NODE_ENV === "test")) {
     throw new Error("Tests must NEVER mutate production DATA_DIR! Provide an isolated fixture directory.");
   }
 
-  if (location.isFixture === true || (location as any).test === true) {
+  // Intercept synthetic / test fixture contamination before writing to disk
+  const rawObj = location as unknown as Record<string, unknown>;
+  const isSynthetic =
+    rawObj.isSyntheticOrFixture === true ||
+    rawObj.isFixture === true ||
+    rawObj.test === true ||
+    (rawObj.value && typeof rawObj.value === "object" && (
+      (rawObj.value as any).isSyntheticOrFixture === true ||
+      (rawObj.value as any).isFixture === true ||
+      (rawObj.value as any).test === true
+    ));
+
+  if (isSynthetic) {
+    const diag: ProvenanceDiagnostic = {
+      code: "ERR_PROVENANCE_CONTAMINATION",
+      message: "Blocked attempt to persist synthetic or fixture location to production storage",
+      timestamp: Date.now(),
+      isSynthetic: true,
+      source: (rawObj.source as ProvenanceSource) || (rawObj.provenance as ProvenanceSource) || "UNKNOWN/UNAVAILABLE",
+    };
+    recordProvenanceDiagnostic(diag);
+    if (options?.throwOnError) {
+      throw new ProvenanceContaminationError(diag.message, diag);
+    }
     return false;
   }
 
+  // Extract actual UserLocation object if wrapped in ProvenanceRecord
+  const loc: UserLocation = (rawObj.value && typeof rawObj.value === "object")
+    ? (rawObj.value as UserLocation)
+    : (location as UserLocation);
+
   const payload: UserLocation = {
-    ...location,
-    provenance: location.provenance || "SAVED_USER",
+    ...loc,
+    provenance: loc.provenance || "SAVED_USER",
+    isSyntheticOrFixture: false,
+    isFixture: false,
   };
 
   const validated = validateUserLocation(payload);
@@ -295,10 +674,93 @@ export function resolveLocationIntent(
     };
   }
 
+  const cleanCandidate = (rawCandidate: string): string | null => {
+    const rawWords = rawCandidate.replace(/[.,?!]+$/, "").trim().split(/\s+/);
+    const stopWords = new Set([
+      "and", "then", "with", "or", "the", "a", "an", "but", "so",
+      "right", "now", "today", "tomorrow", "yesterday", "tonight",
+      "next", "last", "this", "week", "month", "year", "days",
+      "time", "morning", "afternoon", "evening", "night",
+    ]);
+    const collected: string[] = [];
+    for (const w of rawWords) {
+      const lower = w.toLowerCase();
+      if (stopWords.has(lower) || nonLocations.has(lower)) break;
+      collected.push(w);
+    }
+    const result = collected.join(" ").trim();
+    if (!result || nonLocations.has(result.toLowerCase())) return null;
+    return result;
+  };
+
+  // Pre-process linguistic structures: negations, third-person, past-tense, and event discussions
+  const negatedLocations = new Set<string>();
+  const negationRegex = /\b(?:not\s+in|no\s+longer\s+in|not\s+at|not\s+near|haven't\s+been\s+to|didn't\s+go\s+to|don't\s+live\s+in|never\s+been\s+to)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})/gi;
+  let negMatch: RegExpExecArray | null;
+  while ((negMatch = negationRegex.exec(text)) !== null) {
+    if (negMatch[1]) {
+      const cleaned = cleanCandidate(negMatch[1])?.toLowerCase();
+      if (cleaned) {
+        negatedLocations.add(cleaned);
+      }
+    }
+  }
+
+  // Affirmative correction or current placement: "I'm in Osaka", "I am in Osaka", "currently in Osaka"
+  const affirmativeRegex = /\b(?:i\s+am\s+in|i'm\s+in|currently\s+in|now\s+in|actually\s+in|i\s+am\s+at|i'm\s+at)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})/i;
+  const affirmativeMatch = text.match(affirmativeRegex);
+  let affirmativeTarget: string | null = null;
+  if (affirmativeMatch && affirmativeMatch[1]) {
+    const cleaned = cleanCandidate(affirmativeMatch[1]);
+    if (cleaned && !negatedLocations.has(cleaned.toLowerCase())) {
+      affirmativeTarget = cleaned.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+    }
+  }
+
+  // Third-person mentions: "My friend lives in Kyoto", "John went to Paris"
+  const thirdPersonRegex = /\b(?:my\s+(?:friend|colleague|brother|sister|mother|father|mom|dad|cousin|boss|coworker|family|client|team|company)|john|alice|bob|he|she|they|friend|client|colleague)\s+(?:lives|is|works|stayed|travelled|traveled|went|based)\s+(?:in|at|to)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})/i;
+  const thirdPersonMatch = text.match(thirdPersonRegex);
+  const thirdPersonTarget = thirdPersonMatch?.[1] ? cleanCandidate(thirdPersonMatch[1])?.toLowerCase() : undefined;
+
+  // Past-tense mentions: "I visited Kyoto last year", "I was in Tokyo"
+  const pastTenseRegex = /\b(?:visited|was\s+in|lived\s+in|stayed\s+in|went\s+to|travelled\s+to|traveled\s+to|flew\s+to|used\s+to\s+live\s+in|grew\s+up\s+in)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})\s*(?:last\s+(?:year|month|week|summer)|years\s+ago|months\s+ago|weeks\s+ago|yesterday|previously|before|in\s+the\s+past)?/i;
+  const pastTenseMatch = text.match(pastTenseRegex);
+  const pastTenseTarget = pastTenseMatch?.[1] ? cleanCandidate(pastTenseMatch[1])?.toLowerCase() : undefined;
+
+  // Event / conference discussions: "The conference is in Tokyo"
+  const eventRegex = /\b(?:conference|event|summit|meeting|expo|festival|convention)\s+(?:is\s+in|in|taking\s+place\s+in)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})/i;
+  const eventMatch = text.match(eventRegex);
+  let eventTarget: string | null = null;
+  if (eventMatch && eventMatch[1]) {
+    const cleaned = cleanCandidate(eventMatch[1]);
+    if (cleaned && !negatedLocations.has(cleaned.toLowerCase())) {
+      eventTarget = cleaned.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+    }
+  }
+
+  // If the user explicitly stated they are NOT in the default location and gave no replacement
+  if (defaultLocation?.city && negatedLocations.has(defaultLocation.city.toLowerCase()) && !affirmativeTarget) {
+    return {
+      scope: "default",
+      effectiveLocation: null,
+      reason: `User explicitly stated they are not in configured default location: "${defaultLocation.city}".`,
+    };
+  }
+
   // 4. Direct location inquiries: "where am I?", "what city am I in?", "what's my location?", "check my location", "my current location"
   const directLocationQueryPattern = /\b(?:where\s+am\s+i|(?:what|which)\s+(?:city|country|state|place|town|region)\s+am\s+i\s+in|what(?:'s|\s+is)\s+my\s+(?:current\s+|new\s+|saved\s+)?location|check\s+my\s+(?:current\s+|new\s+|saved\s+)?location|my\s+current\s+location|what(?:'s|\s+is)\s+near\s+me)\b/i;
   if (directLocationQueryPattern.test(text)) {
-    if (defaultLocation && defaultLocation.enabled !== false && (defaultLocation.provenance === "SAVED_USER" || defaultLocation.provenance === "DEVICE_LIVE")) {
+    const hasPhysicalCoordsOrCity = Boolean(
+      defaultLocation?.city ||
+      (defaultLocation?.latitude !== undefined && defaultLocation?.longitude !== undefined)
+    );
+    if (
+      defaultLocation &&
+      defaultLocation.enabled !== false &&
+      hasPhysicalCoordsOrCity &&
+      defaultLocation.source !== "timezone_inferred" &&
+      (defaultLocation.provenance === "SAVED_USER" || defaultLocation.provenance === "DEVICE_LIVE")
+    ) {
       return {
         scope: "default",
         effectiveLocation: defaultLocation,
@@ -315,26 +777,43 @@ export function resolveLocationIntent(
   }
 
   // 5. Explicit location extraction from current prompt
-  // Matches "in <City>", "near <City>", "around <City>", "for <City>", "at <City>", "to <City>"
-  const explicitLocationRegex = /\b(?:in|near|around|at|for|to|check|about)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})/i;
-  const explicitMatch = text.match(explicitLocationRegex);
-  let explicitTarget: string | null = null;
+  let explicitTarget: string | null = affirmativeTarget;
 
-  if (explicitMatch && explicitMatch[1]) {
-    const rawCandidate = explicitMatch[1].replace(/[.,?!]+$/, "").trim();
-    const stopWords = new Set(["and", "then", "with", "or", "the", "a", "an", "but", "so"]);
-    const filteredWords: string[] = [];
-    for (const w of rawCandidate.split(/\s+/)) {
-      if (stopWords.has(w.toLowerCase())) break;
-      filteredWords.push(w);
-    }
-    const cleanTarget = filteredWords.join(" ").trim();
-    if (cleanTarget) {
-      const firstWord = cleanTarget.split(/\s+/)[0].toLowerCase();
-      if (!nonLocations.has(firstWord) && !nonLocations.has(cleanTarget.toLowerCase())) {
-        // Normalize casing nicely (Title Case)
-        explicitTarget = cleanTarget.replace(/\b[a-z]/g, (c) => c.toUpperCase());
-      }
+  // Event / conference discussions produce CONVERSATION_CONTEXT
+  if (!explicitTarget && eventTarget) {
+    const convoLocation: UserLocation = {
+      city: eventTarget,
+      provenance: "CONVERSATION_CONTEXT",
+      source: "user_set",
+      enabled: true,
+      updatedAt: Date.now(),
+      confidenceScore: 0.85,
+      verificationEvidence: "Derived from event or conference mention in conversation",
+    };
+    return {
+      scope: "explicit_override",
+      effectiveLocation: convoLocation,
+      explicitLocationName: eventTarget,
+      isTravelDestination: hasTravel,
+      reason: `Event or conference location mentioned in conversation: "${eventTarget}".`,
+    };
+  }
+
+  if (!explicitTarget) {
+    const explicitLocationRegex = /\b(?:in|near|around|at|for|to|check|about)\s+([a-zA-Z]+(?:\s+[a-zA-Z]+){0,2})/gi;
+    let match: RegExpExecArray | null;
+    while ((match = explicitLocationRegex.exec(text)) !== null) {
+      if (!match[1]) continue;
+      const cleaned = cleanCandidate(match[1]);
+      if (!cleaned) continue;
+
+      const lowerTarget = cleaned.toLowerCase();
+      if (negatedLocations.has(lowerTarget)) continue;
+      if (thirdPersonTarget && lowerTarget.includes(thirdPersonTarget)) continue;
+      if (pastTenseTarget && lowerTarget.includes(pastTenseTarget)) continue;
+
+      explicitTarget = cleaned.replace(/\b[a-z]/g, (c) => c.toUpperCase());
+      break;
     }
   }
 
@@ -345,6 +824,8 @@ export function resolveLocationIntent(
       source: "user_set",
       enabled: true,
       updatedAt: Date.now(),
+      confidenceScore: 1.0,
+      verificationEvidence: "Direct user statement in active turn",
     };
     return {
       scope: "explicit_override",
@@ -565,11 +1046,15 @@ export function resolveEffectiveLocation(options: LocationPrecedenceOptions): Re
     return explicitIntent;
   }
 
+  // Helper to ensure an entity has a real physical coordinate or city and is not timezone-inferred
+  const hasPhysical = (loc?: UserLocation | null) =>
+    Boolean(loc && (loc.city || (loc.latitude !== undefined && loc.longitude !== undefined)) && loc.source !== "timezone_inferred");
+
   // 3. Direct location inquiry: "where am I?", "what's my location?", "check my location"
   const directLocationQueryPattern = /\b(?:where\s+am\s+i|what(?:'s|\s+is)\s+my\s+(?:current\s+|new\s+|saved\s+)?location|check\s+my\s+(?:current\s+|new\s+|saved\s+)?location|my\s+current\s+location|what(?:'s|\s+is)\s+near\s+me)\b/i;
   if (directLocationQueryPattern.test(text)) {
     // DEVICE_LIVE takes top precedence for real-time where-am-I queries
-    if (liveDeviceLocation && liveDeviceLocation.enabled !== false && liveDeviceLocation.provenance === "DEVICE_LIVE") {
+    if (liveDeviceLocation && liveDeviceLocation.enabled !== false && liveDeviceLocation.provenance === "DEVICE_LIVE" && hasPhysical(liveDeviceLocation)) {
       return {
         scope: "default",
         effectiveLocation: liveDeviceLocation,
@@ -577,7 +1062,7 @@ export function resolveEffectiveLocation(options: LocationPrecedenceOptions): Re
       };
     }
     // SAVED_USER is persistent fallback
-    if (savedUserLocation && savedUserLocation.enabled !== false && savedUserLocation.provenance === "SAVED_USER") {
+    if (savedUserLocation && savedUserLocation.enabled !== false && savedUserLocation.provenance === "SAVED_USER" && hasPhysical(savedUserLocation)) {
       return {
         scope: "default",
         effectiveLocation: savedUserLocation,
@@ -585,7 +1070,7 @@ export function resolveEffectiveLocation(options: LocationPrecedenceOptions): Re
       };
     }
     // CONVERSATION_CONTEXT is next fallback for active conversation
-    if (conversationLocation && conversationLocation.enabled !== false && conversationLocation.provenance === "CONVERSATION_CONTEXT") {
+    if (conversationLocation && conversationLocation.enabled !== false && conversationLocation.provenance === "CONVERSATION_CONTEXT" && hasPhysical(conversationLocation)) {
       return {
         scope: "default",
         effectiveLocation: conversationLocation,
@@ -610,14 +1095,293 @@ export function resolveEffectiveLocation(options: LocationPrecedenceOptions): Re
 
   // 5. Geographically-relevant queries (weather, restaurants, maps, nearby)
   // Precedence: DEVICE_LIVE > SAVED_USER > CONVERSATION_CONTEXT
-  const baseLoc = (liveDeviceLocation && liveDeviceLocation.enabled !== false && liveDeviceLocation.provenance === "DEVICE_LIVE")
+  const baseLoc = (liveDeviceLocation && liveDeviceLocation.enabled !== false && liveDeviceLocation.provenance === "DEVICE_LIVE" && hasPhysical(liveDeviceLocation))
     ? liveDeviceLocation
-    : (savedUserLocation && savedUserLocation.enabled !== false && savedUserLocation.provenance === "SAVED_USER")
+    : (savedUserLocation && savedUserLocation.enabled !== false && savedUserLocation.provenance === "SAVED_USER" && hasPhysical(savedUserLocation))
     ? savedUserLocation
-    : (conversationLocation && conversationLocation.enabled !== false && conversationLocation.provenance === "CONVERSATION_CONTEXT")
+    : (conversationLocation && conversationLocation.enabled !== false && conversationLocation.provenance === "CONVERSATION_CONTEXT" && hasPhysical(conversationLocation))
     ? conversationLocation
     : null;
 
   return resolveLocationIntent(text, baseLoc);
 }
+
+export interface DeviceLocationProviderOptions {
+  permissionGranted: boolean;
+  rawCoordinates?: {
+    latitude: number;
+    longitude: number;
+    accuracyMeters?: number;
+  };
+  city?: string;
+  region?: string;
+  country?: string;
+  countryCode?: string;
+  postalCode?: string;
+  collectedAtMs?: number;
+  ttlMs?: number;
+  isSyntheticOrFixture?: boolean;
+  referenceTimeMs?: number;
+}
+
+/**
+ * Resolves a live hardware device location from provider options.
+ * Enforces hardware permission check, coordinate boundaries, freshness TTL (default 300s),
+ * downgrades stale readings to UNKNOWN/UNAVAILABLE, and blocks synthetic fixture injection.
+ */
+export function resolveDeviceLocationFromProvider(
+  options: DeviceLocationProviderOptions,
+): ProvenanceRecord<UserLocation> | null {
+  const now = options.referenceTimeMs ?? Date.now();
+  const ttl = options.ttlMs ?? 300_000; // 5 minutes canonical TTL
+
+  // 1. Synthetic or fixture check
+  if (options.isSyntheticOrFixture) {
+    recordProvenanceDiagnostic({
+      code: "ERR_PROVENANCE_CONTAMINATION",
+      message: "Rejected synthetic or fixture device location payload from provider",
+      timestamp: now,
+      source: "DEVICE_LIVE",
+      isSynthetic: true,
+    });
+    return null;
+  }
+
+  // 2. Permission check: if permission is revoked or not granted
+  if (!options.permissionGranted) {
+    return {
+      value: {
+        provenance: "UNKNOWN/UNAVAILABLE",
+        enabled: false,
+      },
+      source: "UNKNOWN/UNAVAILABLE",
+      confidenceScore: 0.0,
+      collectedAtMs: now,
+      expiresAtMs: now,
+      verificationEvidence: "Device location permission denied or revoked",
+      isSyntheticOrFixture: false,
+    };
+  }
+
+  // 3. Coordinate validation
+  if (!options.rawCoordinates) {
+    if (!options.city) {
+      return {
+        value: {
+          provenance: "UNKNOWN/UNAVAILABLE",
+          enabled: false,
+        },
+        source: "UNKNOWN/UNAVAILABLE",
+        confidenceScore: 0.0,
+        collectedAtMs: now,
+        expiresAtMs: now,
+        verificationEvidence: "No coordinates or city provided",
+        isSyntheticOrFixture: false,
+      };
+    }
+  } else {
+    const { latitude, longitude, accuracyMeters } = options.rawCoordinates;
+    if (
+      typeof latitude !== "number" ||
+      typeof longitude !== "number" ||
+      !Number.isFinite(latitude) ||
+      !Number.isFinite(longitude) ||
+      latitude < -90 ||
+      latitude > 90 ||
+      longitude < -180 ||
+      longitude > 180
+    ) {
+      recordProvenanceDiagnostic({
+        code: "ERR_PROVENANCE_INVALID",
+        message: `Invalid geographic coordinates: lat=${latitude}, lng=${longitude}`,
+        timestamp: now,
+        source: "DEVICE_LIVE",
+      });
+      return null;
+    }
+    if (accuracyMeters !== undefined && (typeof accuracyMeters !== "number" || !Number.isFinite(accuracyMeters) || accuracyMeters < 0)) {
+      recordProvenanceDiagnostic({
+        code: "ERR_PROVENANCE_INVALID",
+        message: `Invalid accuracy meters: ${accuracyMeters}`,
+        timestamp: now,
+        source: "DEVICE_LIVE",
+      });
+      return null;
+    }
+  }
+
+  // 4. Freshness check
+  const collectedAt = options.collectedAtMs ?? now;
+  if (typeof collectedAt !== "number" || !Number.isFinite(collectedAt) || collectedAt <= 0) {
+    return null;
+  }
+  const expiresAt = collectedAt + ttl;
+  if (now > expiresAt) {
+    recordProvenanceDiagnostic({
+      code: "ERR_PROVENANCE_STALE",
+      message: `Device location fix expired (collected: ${collectedAt}, now: ${now}, ttl: ${ttl})`,
+      timestamp: now,
+      source: "DEVICE_LIVE",
+    });
+    return {
+      value: {
+        provenance: "UNKNOWN/UNAVAILABLE",
+        enabled: false,
+      },
+      source: "UNKNOWN/UNAVAILABLE",
+      confidenceScore: 0.0,
+      collectedAtMs: collectedAt,
+      expiresAtMs: expiresAt,
+      verificationEvidence: "Stale device fix downgraded to UNKNOWN/UNAVAILABLE",
+      isSyntheticOrFixture: false,
+    };
+  }
+
+  // Confidence score: based on accuracy if provided, or default 0.98 for live GPS fix
+  let confidence = 0.98;
+  if (options.rawCoordinates?.accuracyMeters !== undefined) {
+    const acc = options.rawCoordinates.accuracyMeters;
+    if (acc <= 20) confidence = 0.99;
+    else if (acc <= 100) confidence = 0.97;
+    else if (acc <= 1000) confidence = 0.95;
+    else confidence = 0.90;
+  }
+
+  const userLoc: UserLocation = {
+    city: options.city,
+    region: options.region,
+    country: options.country,
+    countryCode: options.countryCode,
+    postalCode: options.postalCode,
+    latitude: options.rawCoordinates?.latitude,
+    longitude: options.rawCoordinates?.longitude,
+    provenance: "DEVICE_LIVE",
+    source: "device",
+    enabled: true,
+    updatedAt: collectedAt,
+    collectedAtMs: collectedAt,
+    expiresAtMs: expiresAt,
+    confidenceScore: confidence,
+    verificationEvidence: "Live hardware GPS/network fix",
+    isSyntheticOrFixture: false,
+  };
+
+  return {
+    value: userLoc,
+    source: "DEVICE_LIVE",
+    confidenceScore: confidence,
+    collectedAtMs: collectedAt,
+    expiresAtMs: expiresAt,
+    verificationEvidence: "Live hardware GPS/network fix",
+    isSyntheticOrFixture: false,
+  };
+}
+
+/**
+ * Thread-safe and bot-isolated storage for active conversation-derived locations.
+ * Prevents conversational locations in one thread/bot from leaking to another.
+ */
+export class ScopedLocationStore {
+  private store = new Map<string, ProvenanceRecord<UserLocation>>();
+
+  private buildKey(botId: string, threadId: string): string {
+    return `${botId.trim()}::${threadId.trim()}`;
+  }
+
+  setLocation(
+    botId: string,
+    threadId: string,
+    location: UserLocation | ProvenanceRecord<UserLocation>,
+    referenceTimeMs?: number,
+  ): void {
+    if (!botId || !threadId) return;
+    const now = referenceTimeMs ?? Date.now();
+    const rawObj = location as unknown as Record<string, unknown>;
+    const isSynthetic =
+      rawObj.isSyntheticOrFixture === true ||
+      rawObj.isFixture === true ||
+      rawObj.test === true ||
+      (rawObj.value && typeof rawObj.value === "object" && (
+        (rawObj.value as any).isSyntheticOrFixture === true ||
+        (rawObj.value as any).isFixture === true ||
+        (rawObj.value as any).test === true
+      ));
+
+    if (isSynthetic) {
+      recordProvenanceDiagnostic({
+        code: "ERR_PROVENANCE_CONTAMINATION",
+        message: "Attempted to register synthetic or fixture location into ScopedLocationStore",
+        timestamp: now,
+        source: (rawObj.source as ProvenanceSource) || "CONVERSATION_CONTEXT",
+        isSynthetic: true,
+      });
+      return;
+    }
+
+    const record: ProvenanceRecord<UserLocation> =
+      "value" in location && "source" in location
+        ? (location as ProvenanceRecord<UserLocation>)
+        : toLocationProvenanceRecord(location as UserLocation);
+
+    const scopedSource: ProvenanceSource =
+      record.source === "USER_EXPLICIT" ? "USER_EXPLICIT" : "CONVERSATION_CONTEXT";
+
+    const scopedRecord: ProvenanceRecord<UserLocation> = {
+      ...record,
+      source: scopedSource,
+      value: {
+        ...record.value,
+        provenance: scopedSource,
+      },
+      expiresAtMs: record.expiresAtMs || (now + 86_400_000),
+    };
+
+    this.store.set(this.buildKey(botId, threadId), scopedRecord);
+  }
+
+  getLocation(botId: string, threadId: string, referenceTimeMs?: number): ProvenanceRecord<UserLocation> | null {
+    if (!botId || !threadId) return null;
+    const key = this.buildKey(botId, threadId);
+    const found = this.store.get(key);
+    if (!found) return null;
+
+    const now = referenceTimeMs ?? Date.now();
+    if (now > found.expiresAtMs) {
+      this.store.delete(key);
+      recordProvenanceDiagnostic({
+        code: "ERR_PROVENANCE_STALE",
+        message: `Scoped thread location expired for ${key}`,
+        timestamp: now,
+        source: found.source,
+      });
+      return null;
+    }
+
+    return found;
+  }
+
+  clear(botId?: string, threadId?: string): void {
+    if (!botId && !threadId) {
+      this.store.clear();
+      return;
+    }
+    if (botId && threadId) {
+      this.store.delete(this.buildKey(botId, threadId));
+      return;
+    }
+    for (const key of Array.from(this.store.keys())) {
+      if (botId && key.startsWith(`${botId}::`)) {
+        this.store.delete(key);
+      } else if (threadId && key.endsWith(`::${threadId}`)) {
+        this.store.delete(key);
+      }
+    }
+  }
+
+  size(): number {
+    return this.store.size;
+  }
+}
+
+export const defaultScopedLocationStore = new ScopedLocationStore();
 

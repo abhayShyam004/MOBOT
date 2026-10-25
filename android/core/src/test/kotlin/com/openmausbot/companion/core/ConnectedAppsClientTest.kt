@@ -164,6 +164,30 @@ class ConnectedAppsClientTest {
     }
 
     @Test
+    fun connectorCatalogSupportsQueryAndRefreshParameters() = runBlocking {
+        val dummyCatalog = """{"configured":true,"cards":[{"slug":"zoom","label":"Zoom","blurb":"Meetings"}],"totalCount":25}"""
+        server.enqueue(json(dummyCatalog))
+        server.enqueue(json(dummyCatalog))
+        server.enqueue(json(dummyCatalog))
+        server.enqueue(json(dummyCatalog))
+
+        client.connectorCatalog(query = "zoom meeting")
+        client.connectorCatalog(refresh = true)
+        client.connectorCatalog(query = "spotify", refresh = true)
+        client.connectorCatalog()
+
+        val req1 = server.takeRequest()
+        val req2 = server.takeRequest()
+        val req3 = server.takeRequest()
+        val req4 = server.takeRequest()
+
+        assertEquals("GET /api/connectors/catalog?query=zoom%20meeting", "${req1.method} ${req1.path}")
+        assertEquals("GET /api/connectors/catalog?refresh=true", "${req2.method} ${req2.path}")
+        assertEquals("GET /api/connectors/catalog?query=spotify&refresh=true", "${req3.method} ${req3.path}")
+        assertEquals("GET /api/connectors/catalog", "${req4.method} ${req4.path}")
+    }
+
+    @Test
     fun firstAuthorizationOmitsAliasAndAnotherAccountSendsOnlyTheTrimmedAlias() = runBlocking {
         server.enqueue(json("""{"url":"https://auth.example/connect"}"""))
         server.enqueue(json("""{"url":"https://auth.example/connect/personal"}"""))

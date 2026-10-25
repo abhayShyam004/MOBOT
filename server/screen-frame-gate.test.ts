@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
+import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews, shouldSurfaceBrowserScreenInChat } from "./screen-frame-gate.ts";
 
 describe("screenTouchingTool", () => {
   it("strips the Claude driver's mcp__<server>__ prefix", () => {
@@ -42,7 +42,12 @@ describe("screenTouchingTool", () => {
     // with no picture even after agent-browser's tool names were added.
     expect(screenTouchingTool("browser__agent_browser_open")).toBe(true);
     expect(screenTouchingTool("browser__agent_browser_screenshot")).toBe(true);
+    expect(screenTouchingTool("android_browser_browser_open")).toBe(true);
+    expect(screenTouchingTool("android_browser_browser_navigate")).toBe(true);
+    expect(screenTouchingTool("android_browser_browser_screenshot")).toBe(true);
     expect(screenSurfaceForTool("browser__agent_browser_open")).toBe("browser");
+    expect(screenSurfaceForTool("android_browser_browser_open")).toBe("browser");
+    expect(screenSurfaceForTool("android_browser_browser_navigate")).toBe("browser");
     // Not only the browser: the computer server's own tools carry the same
     // spelling and were missed the same way.
     expect(screenTouchingTool("computer__screenshot")).toBe(true);
@@ -170,3 +175,93 @@ describe("screenSurfaceForTool", () => {
     expect(screenSurfaceForTool("agent_browser_open")).not.toBe(screenSurfaceForTool("launch_app"));
   });
 });
+
+describe("shouldSurfaceBrowserScreenInChat", () => {
+  it("rejects normal browsing research tasks without explicit screenshot intent", () => {
+    const normalQueries = [
+      "Find me the best course for me.",
+      "Search for recent AI news on news.ycombinator.com",
+      "Research the cheapest flights to Tokyo next month",
+      "Compare price of Python books on Amazon and Barnes & Noble",
+      "Go to python.org and read the latest release notes",
+      "What is the population of Tokyo?",
+      "Summarize the Wikipedia article on quantum computing",
+    ];
+    for (const prompt of normalQueries) {
+      expect(shouldSurfaceBrowserScreenInChat({ userPrompt: prompt })).toBe(false);
+    }
+  });
+
+  it("accepts explicit user requests to show the page or send a screenshot", () => {
+    const explicitQueries = [
+      "show me the page",
+      "show the page",
+      "show me the website",
+      "show me the screen",
+      "send me a screenshot",
+      "take a screenshot of the homepage",
+      "take screenshot",
+      "capture a screenshot",
+      "grab a screenshot of the results",
+      "snap a screenshot",
+      "give me a screenshot",
+      "what does the page look like?",
+      "what does the website look like",
+      "what does it look like",
+      "how does the page look",
+      "can I see the page",
+      "let me see the page",
+      "include visual evidence",
+      "provide visual proof",
+      "inspect the visual layout",
+      "FIRST_SCREEN",
+    ];
+    for (const prompt of explicitQueries) {
+      expect(shouldSurfaceBrowserScreenInChat({ userPrompt: prompt })).toBe(true);
+    }
+  });
+
+  it("checks taskTitle and taskDescription when userPrompt has no explicit request", () => {
+    expect(shouldSurfaceBrowserScreenInChat({
+      userPrompt: "Find best course",
+      taskTitle: "Capture screenshot of course syllabus",
+    })).toBe(true);
+
+    expect(shouldSurfaceBrowserScreenInChat({
+      userPrompt: "Find best course",
+      taskDescription: "Navigate to page and take a screenshot for verification",
+    })).toBe(true);
+
+    expect(shouldSurfaceBrowserScreenInChat({
+      userPrompt: "Find best course",
+      taskTitle: "Course research",
+      taskDescription: "Find top 3 courses and summarize in text",
+    })).toBe(false);
+  });
+
+  it("does not false-positive on incidental screen or page references", () => {
+    const incidental = [
+      "Tap the search icon on the screen",
+      "The phone has an OLED screen with high refresh rate",
+      "Click the submit button on the page",
+      "Scroll down the page to find the comments",
+      "Read the text on the page",
+      "Find a laptop with a 16 inch screen",
+    ];
+    for (const prompt of incidental) {
+      expect(shouldSurfaceBrowserScreenInChat({ userPrompt: prompt })).toBe(false);
+    }
+  });
+
+  it("honors explicitIntent flag", () => {
+    expect(shouldSurfaceBrowserScreenInChat({ userPrompt: "hello", explicitIntent: true })).toBe(true);
+    expect(shouldSurfaceBrowserScreenInChat({ explicitIntent: true })).toBe(true);
+  });
+
+  it("handles empty or missing parameters safely", () => {
+    expect(shouldSurfaceBrowserScreenInChat({})).toBe(false);
+    expect(shouldSurfaceBrowserScreenInChat({ userPrompt: null, taskTitle: undefined })).toBe(false);
+    expect(shouldSurfaceBrowserScreenInChat({ userPrompt: "" })).toBe(false);
+  });
+});
+

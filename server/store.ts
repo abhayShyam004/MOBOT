@@ -21,6 +21,8 @@ import { enforceResponseLength } from "./response-length.ts";
 import { removeDocumentsForThread } from "./turn-files.ts";
 import { botAvatarProfile } from "../shared/bot-avatar.ts";
 import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
+import { isAgentContract, resolveAgentContract } from "../shared/agent-contract.ts";
+export type { AgentContract } from "../shared/agent-contract.ts";
 import type { ProfileRequestChanges } from "../shared/profile-request.ts";
 import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
@@ -548,6 +550,10 @@ export class Store {
       }
       if (b.soulHash !== soulHash(b.soul)) {
         b.soulHash = soulHash(b.soul);
+        botsMigrated = true;
+      }
+      if (!b.contract || !isAgentContract(b.contract)) {
+        b.contract = resolveAgentContract(b);
         botsMigrated = true;
       }
       // Existing bots predate their folders. Create missing mirrors before
@@ -1382,18 +1388,26 @@ export class Store {
   }
 
   bot(id: string) {
-    return this.bots.find((b) => b.id === id) ?? null;
+    const candidate = this.bots.find((b) => b.id === id) ?? null;
+    if (candidate && (!candidate.contract || !isAgentContract(candidate.contract))) {
+      candidate.contract = resolveAgentContract(candidate);
+    }
+    return candidate;
   }
 
   botByThread(threadId: string) {
-    return this.bots.find((b) => b.threadId === threadId || b.tasks?.some((t) => t.threadId === threadId)) ?? null;
+    const candidate = this.bots.find((b) => b.threadId === threadId || b.tasks?.some((t) => t.threadId === threadId)) ?? null;
+    if (candidate && (!candidate.contract || !isAgentContract(candidate.contract))) {
+      candidate.contract = resolveAgentContract(candidate);
+    }
+    return candidate;
   }
 
   createBot(
     profile: Partial<
       Pick<
         BotRecord,
-        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section"
+        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "contract"
       >
     > = {},
     opts: {
@@ -1405,6 +1419,9 @@ export class Store {
     this.rememberSections([profile.section]);
     const name = profile.name?.trim() || pickBotName(this.bots.map((b) => b.name));
     const section = sectionKey(profile.section);
+    const contract = profile.contract && isAgentContract(profile.contract)
+      ? resolveAgentContract({ ...profile, contract: profile.contract, name })
+      : resolveAgentContract({ ...profile, name, title: profile.title ?? "" });
     const bot: BotRecord = {
       id: newId(),
       threadId: newId(),
@@ -1420,6 +1437,7 @@ export class Store {
       unread: false,
       modelSelection: profile.modelSelection ?? this.defaultSelection(),
       resumeCursors: {},
+      contract,
       createdAt: Date.now(),
     };
     if (section) bot.section = section;
@@ -1570,6 +1588,9 @@ export class Store {
   patchBot(id: string, patch: Partial<BotRecord>): BotRecord | null {
     const bot = this.bot(id);
     if (!bot) return null;
+    if (patch.contract !== undefined) {
+      patch.contract = resolveAgentContract({ ...bot, ...patch, contract: patch.contract });
+    }
     // Runtime revocations must become effective in memory even when disk is
     // unavailable. Profile edits use the separate atomic path below.
     Object.assign(bot, patch);
@@ -1609,6 +1630,9 @@ export class Store {
     const bot = this.bot(id);
     if (!bot) return null;
     const next = { ...bot, ...patch };
+    if (patch.title !== undefined || patch.description !== undefined) {
+      next.contract = resolveAgentContract({ ...next, contract: next.contract });
+    }
     if (patch.soul !== undefined) {
       next.soulHash = soulHash(patch.soul);
       next.soulDrift = false;

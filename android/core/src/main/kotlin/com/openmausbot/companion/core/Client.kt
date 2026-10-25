@@ -508,6 +508,43 @@ class CompanionClient(
         )
     }
 
+    /** The team's shared partition: the stable facts every bot may read.
+     * It lives beside the bots' workspaces rather than inside one of them, so
+     * switching the active bot never takes it away and never copies it. */
+    suspend fun sharedMemory(): MemoryOverview =
+        send(makeRequest("GET", "/api/memory/shared"))
+
+    /** Save the shared partition. `expectedHash` is what the reader returned,
+     * so a shared record a bot wrote in between is never silently clobbered. */
+    suspend fun saveSharedMemory(text: String, expectedHash: String) {
+        sendUnit(
+            makeRequest(
+                "PUT",
+                "/api/memory/shared",
+                body = buildJsonObject {
+                    put("text", text)
+                    put("expectedHash", expectedHash)
+                },
+            ),
+        )
+    }
+
+    /** Query partitioned memory across shared and specialized partitions (Phase 6). */
+    suspend fun queryPartitionedMemory(query: PartitionedMemoryQuery): PartitionedMemoryResult =
+        send(
+            makeRequest(
+                "POST",
+                "/api/memory/partitioned/query",
+                body = buildJsonObject {
+                    put("botId", query.botId)
+                    put("queryText", query.queryText)
+                    put("includeShared", query.includeShared)
+                    put("maxSharedSnippets", query.maxSharedSnippets)
+                    put("maxSpecializedSnippets", query.maxSpecializedSnippets)
+                },
+            ),
+        )
+
     /**
      * Re-discover the OpenAI-compatible endpoint's model list. Returns the
      * refreshed instance catalog, the same shape every model picker reads.
@@ -628,7 +665,11 @@ class CompanionClient(
 
     /** Poll a started sign-in flow. */
     suspend fun instanceAuthStatus(instanceId: String, flowId: String): InstanceAuthStatus = send<AuthStatusResponse>(
-        makeRequest("GET", "/api/instances/${segment(instanceId)}/auth/status?flowId=${segment(flowId)}"),
+        makeRequest(
+            "GET",
+            "/api/instances/${segment(instanceId)}/auth/status",
+            query = listOf("flowId" to flowId),
+        ),
     ).auth
 
     /** Complete a paste-code / browser-callback sign-in. */
@@ -747,8 +788,16 @@ class CompanionClient(
         ),
     )
 
-    suspend fun connectorCatalog(): ConnectorCatalog =
-        send(makeRequest("GET", "/api/connectors/catalog"))
+    suspend fun connectorCatalog(query: String? = null, refresh: Boolean = false): ConnectorCatalog {
+        val queryParams = mutableListOf<Pair<String, String>>()
+        if (!query.isNullOrBlank()) {
+            queryParams.add("query" to query.trim())
+        }
+        if (refresh) {
+            queryParams.add("refresh" to "true")
+        }
+        return send(makeRequest("GET", "/api/connectors/catalog", query = queryParams))
+    }
 
     suspend fun allConnectorStatuses(): ConnectorStatuses =
         send(makeRequest("GET", "/api/connectors/connected"))
@@ -1369,8 +1418,16 @@ class CompanionClient(
     ): Request {
         require(body == null || rawBody == null)
         val base = endpoint?.baseUrl ?: throw APIError.BadUrl
-        val url = base.newBuilder().encodedPath(path).apply {
-            query.forEach { (name, value) -> addQueryParameter(name, value) }
+        val cleanPath = path.substringBefore("?")
+        val inlineQuery = if (path.contains("?")) {
+            path.substringAfter("?").split("&").mapNotNull { part ->
+                val eq = part.indexOf('=')
+                if (eq > 0) part.substring(0, eq) to part.substring(eq + 1) else null
+            }
+        } else emptyList()
+        val allQuery = inlineQuery + query
+        val url = base.newBuilder().encodedPath(cleanPath).apply {
+            allQuery.forEach { (name, value) -> addQueryParameter(name, value) }
         }.build()
         val requestBody = when {
             rawBody != null -> rawBody

@@ -6,5 +6,23 @@
              release links and system share destinations unambiguous. -->
         <activity android:name=".PairingLinkActivity" tools:node="remove" />
         <activity android:name=".ShareReceiveActivity" tools:node="remove" />
+
+        <!-- Device-test adversary for the separate-UID signer: a second process
+             of the same UID that tries to take the signing authority without an
+             enrollment challenge. Preview flavor only; absent from the shipped
+             build. Exported so `am start-foreground-service` can drive it, and
+             specialUse because that is how the platform lets an exported test
+             service run at all from the background — the probe posts its own
+             notification and stops itself when it is done. -->
+        <service
+            android:name=".host.SignerRaceProbeService"
+            android:process=":race"
+            android:exported="true"
+            android:stopWithTask="true"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Device verification harness: separate-UID signer authorization probe." />
+        </service>
     </application>
 </manifest>

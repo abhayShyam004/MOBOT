@@ -498,3 +498,356 @@ export function resetMemoryJournalState(): void {
   baselines.clear();
   turnBots.clear();
 }
+
+// ── Phase 4 Structured Memory Record Journal ──────────────────────────
+
+export type MemoryRecordAction =
+  | "create"
+  | "reinforce"
+  | "archive"
+  | "delete"
+  | "compact"
+  /** Phase 5: the belief was retired as known-invalid rather than replaced. */
+  | "deprecate"
+  /** Phase 5: a reconciliation decision (see MemoryReconciliationJournalEntry). */
+  | "reconcile";
+
+export interface MemoryRecordJournalEntry {
+  id: string;
+  at: number;
+  botId: string;
+  action: MemoryRecordAction;
+  recordId: string;
+  category?: string;
+  headline?: string;
+  confidence?: number;
+  sourceTurnId?: string;
+  via: string;
+}
+
+export function recordJournalFile(botId: string): string {
+  return join(JOURNAL_DIR, `${botId}-records.ndjson`);
+}
+
+/**
+ * Appends a structured record change to the bot's audit journal.
+ * Scans and redacts any secrets in headlines/metadata.
+ */
+export function recordMemoryRecordJournalEntry(
+  botId: string,
+  entry: {
+    action: MemoryRecordAction;
+    recordId: string;
+    category?: string;
+    headline?: string;
+    confidence?: number;
+    sourceTurnId?: string;
+    via?: string;
+  }
+): MemoryRecordJournalEntry | null {
+  const row: MemoryRecordJournalEntry = {
+    id: randomUUID(),
+    at: Date.now(),
+    botId,
+    action: entry.action,
+    recordId: entry.recordId,
+    category: entry.category,
+    headline: entry.headline ? redactSecretsInText(entry.headline) : undefined,
+    confidence: entry.confidence,
+    sourceTurnId: entry.sourceTurnId,
+    via: entry.via || "system",
+  };
+
+  const previous = writeQueues.get(botId) ?? Promise.resolve();
+  const queued = previous
+    .then(async () => {
+      mkdirSync(JOURNAL_DIR, { recursive: true, mode: 0o700 });
+      await appendFile(recordJournalFile(botId), `${JSON.stringify(row)}\n`, { mode: 0o600 });
+    })
+    .catch((error: unknown) => {
+      console.error(`memory-journal: could not append record journal for ${botId}:`, error instanceof Error ? error.message : error);
+    });
+  writeQueues.set(botId, queued);
+  void queued.finally(() => {
+    if (writeQueues.get(botId) === queued) writeQueues.delete(botId);
+  });
+
+  return row;
+}
+
+/**
+ * Every row in the bot's record journal, newest first, untyped. The record,
+ * reconciliation and security-audit readers each keep a different shape in
+ * this one file, so the shape test belongs to the reader that knows the
+ * shape — filtering here would hide the other readers' rows entirely.
+ */
+function readRecordJournalRows(botId: string, limit = 50): unknown[] {
+  let text: string;
+  let offset: number;
+  try {
+    const fd = openSync(recordJournalFile(botId), "r");
+    try {
+      const size = fstatSync(fd).size;
+      offset = Math.max(0, size - MAX_JOURNAL_READ_BYTES);
+      const buffer = Buffer.alloc(size - offset);
+      let length = 0;
+      while (length < buffer.length) {
+        const count = readSync(fd, buffer, length, buffer.length - length, offset + length);
+        if (!count) break;
+        length += count;
+      }
+      text = buffer.subarray(0, length).toString("utf8");
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return [];
+  }
+
+  const rows: unknown[] = [];
+  const lines = text.split("\n");
+  const maxRows = Math.min(MAX_ROWS, Math.max(1, limit));
+  for (let index = lines.length - 1; index >= (offset > 0 ? 1 : 0) && rows.length < maxRows; index--) {
+    const line = lines[index];
+    if (!line) continue;
+    try {
+      const value: unknown = JSON.parse(line);
+      if (typeof value === "object" && value !== null) rows.push(value);
+    } catch {}
+  }
+  return rows;
+}
+
+/**
+ * Reads structured memory record audit history for a bot, newest first.
+ */
+export function readMemoryRecordJournal(botId: string, limit = 50): MemoryRecordJournalEntry[] {
+  return readRecordJournalRows(botId, limit).filter(
+    (value): value is MemoryRecordJournalEntry =>
+      typeof value === "object" && value !== null && "action" in value && "recordId" in value,
+  );
+}
+
+// ── Phase 5 Reconciliation Journal ────────────────────────────────────
+//
+// A reconciliation is the one memory change a person cannot reconstruct by
+// reading the store afterwards: the retired record is still there, but WHY
+// it was retired — which evidence, whose words, what confidence — is not.
+// So the row carries the decision itself: the action, the prior and
+// replacement text, the contradiction, the justification and the score.
+//
+// Same file and same per-bot queue as the Phase 4 rows, so a reader sees
+// one ordered audit trail per bot rather than two that interleave
+// unpredictably. Every text field goes through the same redactor, because
+// contradiction evidence is, by definition, something the person said and
+// people paste keys into chat.
+
+export type ReconciliationJournalActionType = "retain" | "update" | "archive" | "deprecate";
+
+export interface MemoryReconciliationJournalEntry {
+  id: string;
+  at: number;
+  botId: string;
+  /** Distinguishes these rows from Phase 4's create/reinforce/archive rows. */
+  action: "reconcile";
+  actionType: ReconciliationJournalActionType;
+  /** The belief under review after the action (the replacement for update). */
+  recordId: string;
+  retiredRecordId?: string;
+  category?: string;
+  headline?: string;
+  priorDetail?: string;
+  replacementDetail?: string;
+  contradictionEvidence: string;
+  justification: string;
+  confidenceScore: number;
+  sourceTurnId?: string;
+  actor: "person" | "bot" | "system" | "import";
+  via: string;
+}
+
+export function recordMemoryReconciliationJournalEntry(
+  botId: string,
+  entry: Omit<MemoryReconciliationJournalEntry, "id" | "at" | "botId" | "action">,
+): MemoryReconciliationJournalEntry | null {
+  const row: MemoryReconciliationJournalEntry = {
+    id: randomUUID(),
+    at: Date.now(),
+    botId,
+    action: "reconcile",
+    actionType: entry.actionType,
+    recordId: entry.recordId,
+    retiredRecordId: entry.retiredRecordId,
+    category: entry.category,
+    headline: entry.headline ? redactSecretsInText(entry.headline) : undefined,
+    priorDetail: entry.priorDetail ? redactSecretsInText(entry.priorDetail) : undefined,
+    replacementDetail: entry.replacementDetail ? redactSecretsInText(entry.replacementDetail) : undefined,
+    contradictionEvidence: redactSecretsInText(entry.contradictionEvidence),
+    justification: redactSecretsInText(entry.justification),
+    confidenceScore: entry.confidenceScore,
+    sourceTurnId: entry.sourceTurnId,
+    actor: entry.actor,
+    via: entry.via,
+  };
+
+  const previous = writeQueues.get(botId) ?? Promise.resolve();
+  const queued = previous
+    .then(async () => {
+      mkdirSync(JOURNAL_DIR, { recursive: true, mode: 0o700 });
+      await appendFile(recordJournalFile(botId), `${JSON.stringify(row)}\n`, { mode: 0o600 });
+    })
+    .catch((error: unknown) => {
+      console.error(`memory-journal: could not append reconciliation row for ${botId}:`, error instanceof Error ? error.message : error);
+    });
+  writeQueues.set(botId, queued);
+  void queued.finally(() => {
+    if (writeQueues.get(botId) === queued) writeQueues.delete(botId);
+  });
+
+  return row;
+}
+
+/** Reconciliation rows only, newest first — the audit view of decisions
+ * rather than of every record mutation. */
+export function readMemoryReconciliationJournal(botId: string, limit = 50): MemoryReconciliationJournalEntry[] {
+  return readMemoryRecordJournal(botId, Math.min(limit, MAX_ROWS)).filter(
+    (row): row is MemoryReconciliationJournalEntry => (row as { action?: string }).action === "reconcile",
+  );
+}
+
+// ── Phase 6 Cross-Bot Security & Partition Violation Audit ───────────
+
+export interface MemorySecurityAuditEntry {
+  id: string;
+  at: number;
+  botId: string;
+  action: "security_violation";
+  category: "permission_denied";
+  errorCode: string;
+  requestingBotId: string;
+  targetBotId: string;
+  operation: "read" | "write" | "query";
+  path?: string;
+  reason: string;
+}
+
+/** A record store that no longer verifies is not a permission decision; it is
+ * an integrity incident. Kept in the same append-only audit file and under
+ * its own category so readers can tell "someone asked for the wrong
+ * partition" from "someone edited the store behind the server's back". */
+export interface MemoryIntegrityAuditEntry {
+  id: string;
+  at: number;
+  botId: string;
+  action: "security_violation";
+  category: "integrity_failure";
+  errorCode: "ERR_MEMORY_INTEGRITY";
+  requestingBotId: string;
+  targetBotId: string;
+  operation: "read";
+  path?: string;
+  reason: string;
+}
+
+/**
+ * Records an unauthorized cross-bot memory or partition access attempt in the audit trail.
+ * Fire-and-forget, atomic write with 0600 mode, secrets scrubbed.
+ */
+export function recordMemorySecurityViolation(entry: {
+  requestingBotId: string;
+  targetBotId: string;
+  operation: "read" | "write" | "query";
+  path?: string;
+  reason?: string;
+}): MemorySecurityAuditEntry {
+  const row: MemorySecurityAuditEntry = {
+    id: randomUUID(),
+    at: Date.now(),
+    botId: entry.requestingBotId,
+    action: "security_violation",
+    category: "permission_denied",
+    errorCode: "ERR_CROSS_BOT_MEMORY_LEAK",
+    requestingBotId: entry.requestingBotId,
+    targetBotId: entry.targetBotId,
+    operation: entry.operation,
+    path: entry.path ? redactSecretsInText(entry.path) : undefined,
+    reason: redactSecretsInText(entry.reason ?? "ERR_CROSS_BOT_MEMORY_LEAK: unauthorized cross-bot memory access"),
+  };
+
+  const previous = writeQueues.get(entry.requestingBotId) ?? Promise.resolve();
+  const queued = previous
+    .then(async () => {
+      mkdirSync(JOURNAL_DIR, { recursive: true, mode: 0o700 });
+      await appendFile(recordJournalFile(entry.requestingBotId), `${JSON.stringify(row)}\n`, { mode: 0o600 });
+    })
+    .catch((error: unknown) => {
+      console.error(`memory-journal: could not append security violation for ${entry.requestingBotId}:`, error instanceof Error ? error.message : error);
+    });
+  writeQueues.set(entry.requestingBotId, queued);
+  void queued.finally(() => {
+    if (writeQueues.get(entry.requestingBotId) === queued) writeQueues.delete(entry.requestingBotId);
+  });
+
+  return row;
+}
+
+/**
+ * Records a failed authenticity check on a canonical record store.
+ * Fire-and-forget like the permission audit, and deliberately free of record
+ * contents: the reason names the failed invariant, never the forged text.
+ */
+export function recordMemoryIntegrityIncident(entry: {
+  botId: string;
+  path?: string;
+  reason: string;
+}): MemoryIntegrityAuditEntry {
+  const row: MemoryIntegrityAuditEntry = {
+    id: randomUUID(),
+    at: Date.now(),
+    botId: entry.botId,
+    action: "security_violation",
+    category: "integrity_failure",
+    errorCode: "ERR_MEMORY_INTEGRITY",
+    requestingBotId: entry.botId,
+    targetBotId: entry.botId,
+    operation: "read",
+    path: entry.path ? redactSecretsInText(entry.path) : undefined,
+    reason: redactSecretsInText(entry.reason),
+  };
+
+  const previous = writeQueues.get(entry.botId) ?? Promise.resolve();
+  const queued = previous
+    .then(async () => {
+      mkdirSync(JOURNAL_DIR, { recursive: true, mode: 0o700 });
+      await appendFile(recordJournalFile(entry.botId), `${JSON.stringify(row)}\n`, { mode: 0o600 });
+    })
+    .catch((error: unknown) => {
+      console.error(`memory-journal: could not append integrity incident for ${entry.botId}:`, error instanceof Error ? error.message : error);
+    });
+  writeQueues.set(entry.botId, queued);
+  void queued.finally(() => {
+    if (writeQueues.get(entry.botId) === queued) writeQueues.delete(entry.botId);
+  });
+
+  return row;
+}
+
+/**
+ * Reads memory security audit entries for a bot, newest first.
+ */
+export function readMemorySecurityAuditJournal(botId: string, limit = 50): MemorySecurityAuditEntry[] {
+  return readRecordJournalRows(botId, limit).filter(
+    (row): row is MemorySecurityAuditEntry =>
+      (row as { action?: string }).action === "security_violation" &&
+      (row as { category?: string }).category === "permission_denied",
+  );
+}
+
+/** Integrity incidents only, newest first. */
+export function readMemoryIntegrityAuditJournal(botId: string, limit = 50): MemoryIntegrityAuditEntry[] {
+  return readRecordJournalRows(botId, limit).filter(
+    (row): row is MemoryIntegrityAuditEntry =>
+      (row as { action?: string }).action === "security_violation" &&
+      (row as { category?: string }).category === "integrity_failure",
+  );
+}

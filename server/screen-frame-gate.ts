@@ -30,3 +30,60 @@ export function settledFrameIsNews(shownFrameHash: string | undefined, png: stri
   return shownFrameHash === undefined || screenFrameHash(png) !== shownFrameHash;
 }
 
+/**
+ * Browser visual telemetry is decoupled from chat output.
+ * Live browser frames stream to Watch Computer and internal tools, but
+ * are only surfaced as chat attachments/messages when explicitly requested:
+ *  1. User explicitly asks:
+ *     - "show me the page"
+ *     - "send me a screenshot"
+ *     - "what does the page look like?"
+ *  2. The task explicitly requests a screenshot/image artifact.
+ *  3. Visual appearance / layout is necessary to communicate the result.
+ *  4. User explicitly asks for visual evidence / proof.
+ */
+export const BROWSER_SCREENSHOT_INTENT_PATTERNS: readonly RegExp[] = [
+  // 1. Explicit screenshot requests:
+  // "screenshot", "screenshots", "screen shot", "take a screenshot", "send a screenshot", etc.
+  /\b(?:take|capture|grab|get|snap|send|give|provide|include|attach|post|share)\b[\w\s]{0,25}\b(?:screenshot|screen-shot|screen\s*shot)s?\b/i,
+  /\b(?:screenshot|screen-shot|screen\s*shot)s?\b/i,
+
+  // 2. "show me the page", "let me see the page", "can I see the page/screen"
+  /\b(?:show|send|display)\b(?:\s+me)?\s+(?:the\s+)?(?:page|webpage|website|site|screen)\b/i,
+  /\b(?:let\s+me|can\s+i)\s+(?:see|view)\s+(?:the\s+)?(?:page|webpage|website|site|screen)\b/i,
+
+  // 3. "what does the page look like", "how does it look"
+  /\bwhat\s+(?:does|do)\b[\w\s]{0,30}\blook\s+like\b/i,
+  /\bhow\s+does\b[\w\s]{0,30}\blook\b/i,
+
+  // 4. Visual evidence / proof / visual layout
+  /\bvisual\s+(?:evidence|proof|inspection|confirmation|layout|appearance)\b/i,
+  /\b(?:look\s+and\s+feel|visual\s+design)\b/i,
+  /\bimage\s+(?:proof|evidence)\b/i,
+
+  // Test fixture tokens
+  /\bFIRST_SCREEN\b/,
+];
+
+export function shouldSurfaceBrowserScreenInChat(options: {
+  userPrompt?: string | null;
+  taskTitle?: string | null;
+  taskDescription?: string | null;
+  explicitIntent?: boolean;
+}): boolean {
+  if (options.explicitIntent) return true;
+  const candidates = [
+    options.userPrompt,
+    options.taskTitle,
+    options.taskDescription,
+  ].filter((text): text is string => typeof text === "string" && text.length > 0);
+
+  for (const text of candidates) {
+    if (BROWSER_SCREENSHOT_INTENT_PATTERNS.some((pattern) => pattern.test(text))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+

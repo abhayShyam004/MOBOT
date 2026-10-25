@@ -91,6 +91,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.BorderStroke
 import androidx.core.content.ContextCompat
+import com.openmausbot.companion.MainActivity
 import com.openmausbot.companion.core.Bot
 import com.openmausbot.companion.core.BotProfilePatch
 import com.openmausbot.companion.core.Instance
@@ -2243,6 +2244,10 @@ private fun OnboardingAuthDialog(
             error = session.actionError ?: "The sign-in could not be started."
             return@LaunchedEffect
         }
+        if (started.phase == "succeeded") {
+            onDone()
+            return@LaunchedEffect
+        }
         val method = instance.authentication?.method ?: "browser"
         phase = InstanceAuthUi(started.phase, started.flowId, started.authorizationUrl, started.userCode, null, method)
         val url = started.authorizationUrl
@@ -2251,10 +2256,29 @@ private fun OnboardingAuthDialog(
         }
         val flowId = started.flowId ?: return@LaunchedEffect
         while (true) {
-            delay(2_000)
-            val status = session.instanceAuthStatus(instance.instanceId, flowId) ?: continue
-            phase = InstanceAuthUi(status.phase, flowId, status.authorizationUrl, status.userCode, status.message, method)
-            if (status.succeeded || status.dead) break
+            delay(1_000)
+            val status = session.instanceAuthStatus(instance.instanceId, flowId)
+            if (status != null) {
+                phase = InstanceAuthUi(status.phase, flowId, status.authorizationUrl, status.userCode, status.message, method)
+                if (status.succeeded) {
+                    try {
+                        val returnIntent = Intent(context, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        }
+                        context.startActivity(returnIntent)
+                    } catch (_: Exception) {}
+                    delay(300)
+                    onDone()
+                    break
+                }
+                if (status.dead) break
+            }
+        }
+    }
+
+    LaunchedEffect(phase?.phase) {
+        if (phase?.phase == "succeeded") {
+            onDone()
         }
     }
 
@@ -2295,7 +2319,13 @@ private fun OnboardingAuthDialog(
                     onClick = {
                         completing = true
                         scope.launch {
-                            current.flowId?.let { session.completeInstanceAuth(instance.instanceId, it, code.trim()) }
+                            val flowId = current.flowId
+                            if (flowId != null) {
+                                val ok = session.completeInstanceAuth(instance.instanceId, flowId, code.trim())
+                                if (ok) {
+                                    onDone()
+                                }
+                            }
                             completing = false
                         }
                     },

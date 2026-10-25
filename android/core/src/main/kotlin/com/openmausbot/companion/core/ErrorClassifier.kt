@@ -33,23 +33,28 @@ object ErrorClassifier {
 
         // 1. Authentication Failures (HTTP 401, Invalid API key / token)
         if (effectiveStatusCode == 401 ||
-            containsAny(lower, "unauthorized", "invalid api key", "invalid api-key", "api key not valid", "missing api key", "no api key", "pairing expired", "revoked", "invalid token")
+            containsAny(lower, "unauthorized", "invalid api key", "invalid api-key", "api key not valid", "missing api key", "no api key", "pairing expired", "revoked", "invalid token", "missing dashboard jwt", "dashboard jwt", "jwt in authorization header")
         ) {
             val isDeployment = containsAny(lower, "vercel", "render", "deploy") || containsAny(operation.lowercase(), "vercel", "render", "deploy")
             val isPairing = containsAny(lower, "pairing", "companion", "phone is not paired", "not paired")
+            val isConnector = containsAny(lower, "dashboard jwt", "jwt", "composio", "connector", "connected service", "toolkit") ||
+                containsAny(operation.lowercase(), "connector", "connected service", "composio")
             val headline = when {
                 isDeployment -> "Cloud Deployment Authentication Failed"
                 isPairing -> "Phone Pairing Expired or Revoked"
+                isConnector -> "Connected Services Authentication Failed"
                 else -> "Model Provider Authentication Failed"
             }
             val category = when {
                 isDeployment -> ErrorCategory.DEPLOYMENT
                 isPairing -> ErrorCategory.PERMISSION
+                isConnector -> ErrorCategory.PROVIDER
                 else -> ErrorCategory.PROVIDER
             }
             val explanation = when {
                 isDeployment -> "The cloud deployment provider rejected the authentication token with HTTP 401 Unauthorized. The Personal Access Token is missing, expired, or revoked."
                 isPairing -> "The host computer rejected this phone's authentication token. The pairing session has expired or was removed."
+                isConnector -> "The connected services provider (Composio) rejected the request due to an authentication error. Verify your Composio API key or connection surface in Connected Services settings."
                 else -> "The model provider rejected the request with HTTP 401 Unauthorized. The API key is missing, invalid, or expired."
             }
             val steps = when {
@@ -63,6 +68,11 @@ object ErrorClassifier {
                     "Ensure your host computer is powered on and running the companion server.",
                     "Verify both devices are on the same local network or tailnet."
                 )
+                isConnector -> listOf(
+                    "Open Connected Services settings in MOBOT.",
+                    "Verify that your Composio API key starts with 'ak_' for Platform or 'ck_' for Connect.",
+                    "Re-enter your Composio key and save settings."
+                )
                 else -> listOf(
                     "Open Model Provider settings in MOBOT.",
                     "Enter a valid API key for the selected provider.",
@@ -75,7 +85,7 @@ object ErrorClassifier {
             }
             return StructuredAppError(
                 category = category,
-                operation = operation,
+                operation = if (isConnector && (operation == "Application Operation" || operation.isBlank())) "Connected Services Authentication" else operation,
                 headline = headline,
                 explanation = explanation,
                 confidence = CauseConfidence.CONFIRMED,

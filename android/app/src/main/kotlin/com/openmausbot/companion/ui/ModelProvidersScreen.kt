@@ -54,6 +54,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.browser.customtabs.CustomTabsIntent
+import com.openmausbot.companion.MainActivity
 import com.openmausbot.companion.core.Instance
 import com.openmausbot.companion.core.ProviderIconDto
 import com.openmausbot.companion.core.Session
@@ -208,12 +210,24 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
                     )
                     SettingsDivider()
                     if (ModelProvidersRules.offersSignIn(detailInstance)) {
+                        val isSwitch = ModelProvidersRules.showsSwitchAccount(detailInstance)
                         SettingsRow(
-                            title = if (ModelProvidersRules.showsSwitchAccount(detailInstance)) "Switch Account" else "Sign In",
+                            title = if (isSwitch) "Switch Account" else "Sign In",
                             subtitle = "Authenticate via provider flow",
                             trailingValue = "Continue",
                             showChevron = true,
-                            onClick = { signingIn = detailInstance },
+                            onClick = {
+                                if (isSwitch) {
+                                    scope.launch {
+                                        val updated = session.signOutInstance(detailInstance.instanceId)
+                                        updated?.let { instances = it }
+                                        val freshTarget = instances.firstOrNull { it.instanceId == detailInstance.instanceId } ?: detailInstance
+                                        signingIn = freshTarget
+                                    }
+                                } else {
+                                    signingIn = detailInstance
+                                }
+                            },
                         )
                     } else {
                         val blockedReason = ModelProvidersRules.signInBlockedReason(detailInstance)
@@ -270,6 +284,13 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
                             selected = isDefault,
                             onClick = {
                                 scope.launch {
+                                    instances = instances.map { inst ->
+                                        if (inst.instanceId == detailInstance.instanceId) {
+                                            inst.copy(models = inst.models.copy(defaultModel = opt.id), isDefault = true)
+                                        } else {
+                                            inst.copy(isDefault = false)
+                                        }
+                                    }
                                     session.setDefaultModelSelection(detailInstance.instanceId, opt.id)
                                     reload()
                                 }
@@ -366,7 +387,8 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
                 val eligibleInstances = instances.filter {
                     ModelProvidersRules.isSupportedBuiltInProvider(it) || ModelProvidersRules.isCustomApiProvider(it)
                 }
-                val defaultInstance = eligibleInstances.firstOrNull { it.snapshot.isAvailable && it.models.defaultModel.isNotEmpty() }
+                val defaultInstance = eligibleInstances.firstOrNull { it.isDefault }
+                    ?: eligibleInstances.firstOrNull { it.snapshot.isAvailable && it.models.defaultModel.isNotEmpty() }
                     ?: eligibleInstances.firstOrNull { it.snapshot.isAvailable }
 
                 SettingsSection(title = "Default Model") {
@@ -504,7 +526,10 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
                 signingIn = null
                 reload()
             },
-            onDismiss = { signingIn = null },
+            onDismiss = {
+                signingIn = null
+                reload()
+            },
         )
     }
 
@@ -626,6 +651,10 @@ private fun ProviderAuthDialog(
             error = session.actionError ?: "The sign-in could not be started."
             return@LaunchedEffect
         }
+        if (started.phase == "succeeded") {
+            onDone()
+            return@LaunchedEffect
+        }
         val method = instance.authentication?.method ?: "browser"
         phase = InstanceAuthUi(started.phase, started.flowId, started.authorizationUrl, started.userCode, null, method)
         val url = started.authorizationUrl
@@ -637,10 +666,29 @@ private fun ProviderAuthDialog(
         val flowId = started.flowId
         if (flowId == null) return@LaunchedEffect
         while (true) {
-            delay(2_000)
-            val status = session.instanceAuthStatus(instance.instanceId, flowId) ?: continue
-            phase = InstanceAuthUi(status.phase, flowId, status.authorizationUrl, status.userCode, status.message, method)
-            if (status.succeeded || status.dead) break
+            delay(1_000)
+            val status = session.instanceAuthStatus(instance.instanceId, flowId)
+            if (status != null) {
+                phase = InstanceAuthUi(status.phase, flowId, status.authorizationUrl, status.userCode, status.message, method)
+                if (status.succeeded) {
+                    try {
+                        val returnIntent = Intent(context, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        }
+                        context.startActivity(returnIntent)
+                    } catch (_: Exception) {}
+                    delay(300)
+                    onDone()
+                    break
+                }
+                if (status.dead) break
+            }
+        }
+    }
+
+    LaunchedEffect(phase?.phase) {
+        if (phase?.phase == "succeeded") {
+            onDone()
         }
     }
 
@@ -708,7 +756,10 @@ private fun ProviderAuthDialog(
                         scope.launch {
                             val flowId = current.flowId
                             if (flowId != null) {
-                                session.completeInstanceAuth(instance.instanceId, flowId, code.trim())
+                                val ok = session.completeInstanceAuth(instance.instanceId, flowId, code.trim())
+                                if (ok) {
+                                    onDone()
+                                }
                             }
                             completing = false
                         }
@@ -850,9 +901,19 @@ object ModelProvidersRules {
 }
 
 internal fun openBrowser(context: Context, url: String) {
-    context.startActivity(
-        Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-    )
+    val uri = Uri.parse(url)
+    try {
+        val customTabsIntent = CustomTabsIntent.Builder()
+            .setShowTitle(true)
+            .build()
+        customTabsIntent.launchUrl(context, uri)
+    } catch (_: Exception) {
+        try {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (_: Exception) {}
+    }
 }
 
 @Composable

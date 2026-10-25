@@ -1,6 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <!--
+      The separate-UID signing authority. Declared by the signer package with
+      protectionLevel="signature", so only an APK signed with this app's
+      certificate can bind it; the signer then requires enrollment before it
+      signs anything (see SignerEnrollmentReceiver below).
+    -->
+    <uses-permission android:name="com.openmausbot.companion.permission.MEMORY_SIGNER" />
+
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -93,6 +102,11 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <!--
+          Android 11+ package visibility: the signer is a separate package, and
+          an explicit bind to it is only allowed if it is visible here.
+        -->
+        <package android:name="com.openmausbot.companion.signer" />
     </queries>
 
     <application
@@ -149,6 +163,31 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data
                     android:host="pair"
+                    android:scheme="openmausbot" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".OAuthCallbackActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true"
+            android:persistableMode="persistNever"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="connected"
+                    android:scheme="openmausbot" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:host="auth"
                     android:scheme="openmausbot" />
             </intent-filter>
         </activity>
@@ -255,6 +294,20 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Embedded MOBOT agent host: local loopback HTTP server, transcripts, and bot runtime." />
         </service>
+
+        <!--
+          Enrollment for the separate-UID signing authority. The signer mints a
+          single-use random challenge and delivers it *here*, as an explicit
+          broadcast, so the value reaches this app's own process and no other
+          process of this UID: an explicit component is never delivered to a
+          dynamically registered receiver, and the signature permission keeps
+          every other app from receiving it. Presenting the challenge is what
+          authorizes this process to ask the signer for MACs.
+        -->
+        <receiver
+            android:name=".host.SignerEnrollmentReceiver"
+            android:exported="true"
+            android:permission="com.openmausbot.companion.permission.MEMORY_SIGNER" />
 
         <!--
           Restarts AlwaysOnConnectionService after a reboot, only when the user

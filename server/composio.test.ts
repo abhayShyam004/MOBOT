@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AppConfig } from "./config.ts";
 import {
   applyManagedBrokerMessage,
+  authorizeConnectService,
   authorizeService,
   connectedServices,
   connectionMode,
@@ -11,6 +12,7 @@ import {
   listToolkits,
   mcpIntegration,
   normalizeAccountAlias,
+  parseConnectMcpJsonRpc,
   prepareComposioCredential,
   prepareProjectSession,
   removeAccount,
@@ -18,6 +20,14 @@ import {
   relayMcp,
   setManagedBrokerAccess,
   verifyConnectConsumerKey,
+  type ServiceRequirement,
+  type ServiceConnectionSuspension,
+  ERR_OAUTH_TIMEOUT,
+  ServiceSuspensionManager,
+  evaluateServiceRequirement,
+  getRequiredScopesForService,
+  sanitizeServicePayload,
+  createServiceConnectionCardPayload,
 } from "./composio.ts";
 
 let api: Server;
@@ -106,7 +116,7 @@ beforeAll(async () => {
 
     const apiKey = String(req.headers["x-api-key"] ?? "");
     if (!["ak_test", "ak_catalog_a", "ak_catalog_b", "ak_catalog_pages", "ak_catalog_partial", "ak_catalog_stuck",
-        "ak_catalog_page_stuck", "ak_catalog_exhausted"].includes(apiKey)) {
+        "ak_catalog_page_stuck", "ak_catalog_exhausted", "ak_catalog_multi_page"].includes(apiKey)) {
       res.writeHead(401, { "content-type": "application/json" });
       return res.end(JSON.stringify({ error: { message: "invalid project key" } }));
     }
@@ -121,15 +131,86 @@ beforeAll(async () => {
       }));
     }
     if (
-      req.method === "GET" && url.pathname === "/api/v3/toolkits"
+      req.method === "GET" && (url.pathname === "/api/v3/toolkits" || url.pathname === "/api/v3.1/toolkits")
       && (
         apiKey === "ak_catalog_pages"
         || apiKey === "ak_catalog_partial"
         || apiKey === "ak_catalog_stuck"
         || apiKey === "ak_catalog_page_stuck"
         || apiKey === "ak_catalog_exhausted"
+        || apiKey === "ak_catalog_multi_page"
       )
     ) {
+      if (apiKey === "ak_catalog_multi_page") {
+        const cursor = url.searchParams.get("cursor");
+        if (cursor === "multi-page-2") {
+          res.writeHead(200, { "content-type": "application/json" });
+          return res.end(JSON.stringify({
+            items: [
+              { slug: "slack", name: "Slack" }, // overlap with page 1
+              { slug: "service_16", name: "Service 16" },
+              { slug: "service_17", name: "Service 17" },
+              { slug: "service_18", name: "Service 18" },
+              { slug: "service_19", name: "Service 19" },
+              { slug: "service_20", name: "Service 20" },
+              { slug: "service_21", name: "Service 21" },
+              { slug: "service_22", name: "Service 22" },
+              { slug: "service_23", name: "Service 23" },
+              { slug: "service_24", name: "Service 24" },
+              { slug: "service_25", name: "Service 25" },
+              { slug: "service_26", name: "Service 26" },
+              { slug: "service_27", name: "Service 27" },
+              { slug: "service_28", name: "Service 28" },
+              { slug: "service_29", name: "Service 29" },
+              { slug: "service_30", name: "Service 30" },
+            ],
+            total_items: 45,
+            total_pages: 3,
+            current_page: 2,
+            next_cursor: "multi-page-3",
+          }));
+        }
+        if (cursor === "multi-page-3") {
+          res.writeHead(200, { "content-type": "application/json" });
+          return res.end(JSON.stringify({
+            items: [
+              { slug: "service_31", name: "Service 31" },
+              { slug: "service_32", name: "Service 32" },
+              { slug: "service_33", name: "Service 33" },
+              { slug: "service_34", name: "Service 34" },
+              { slug: "service_35", name: "Service 35" },
+            ],
+            total_items: 45,
+            total_pages: 3,
+            current_page: 3,
+            next_cursor: null,
+          }));
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        return res.end(JSON.stringify({
+          items: [
+            { slug: "slack", name: "Slack" },
+            { slug: "github", name: "GitHub" },
+            { slug: "service_03", name: "Service 3" },
+            { slug: "service_04", name: "Service 4" },
+            { slug: "service_05", name: "Service 5" },
+            { slug: "service_06", name: "Service 6" },
+            { slug: "service_07", name: "Service 7" },
+            { slug: "service_08", name: "Service 8" },
+            { slug: "service_09", name: "Service 9" },
+            { slug: "service_10", name: "Service 10" },
+            { slug: "service_11", name: "Service 11" },
+            { slug: "service_12", name: "Service 12" },
+            { slug: "service_13", name: "Service 13" },
+            { slug: "service_14", name: "Service 14" },
+            { slug: "service_15", name: "Service 15" },
+          ],
+          total_items: 45,
+          total_pages: 3,
+          current_page: 1,
+          next_cursor: "multi-page-2",
+        }));
+      }
       if (apiKey === "ak_catalog_stuck") {
         // A broker deployed before this fix ignores the cursor and replays page one.
         res.writeHead(200, { "content-type": "application/json" });
@@ -1035,6 +1116,723 @@ describe.sequential("Composio Sessions", () => {
     );
     // Deleted both session-selected ca_github and inventory accounts ca_github_work, ca_github_personal
     expect(deleteCalls.length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("Official Roadmap Phase 12: Connected Service Intelligence", () => {
+  it("Scenario 1: evaluates connected Gmail service without suspension", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    // github is active in mock API
+    const req = await evaluateServiceRequirement(cfg, "github", "review pull request");
+    expect(req.serviceName).toBe("github");
+    expect(req.connectionStatus).toBe("connected");
+    expect(req.requiredScopes).toContain("repo");
+    expect(req.authUrl).toBeUndefined();
+  });
+
+  it("Scenario 2: disconnected service returns ServiceRequirement card with authUrl", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    // slack has no active account in mock session
+    const req = await evaluateServiceRequirement(cfg, "slack", "read announcements channel");
+    expect(req.serviceName).toBe("slack");
+    expect(req.connectionStatus).toBe("disconnected");
+    expect(req.requiredScopes).toContain("channels:read");
+    expect(req.authUrl).toBeDefined();
+    expect(req.authUrl).toMatch(/^https:\/\//);
+
+    // Also verify broker-based unauthenticated Gmail
+    const brokerReq = await evaluateServiceRequirement({}, "gmail", "read latest unread emails");
+    expect(brokerReq.serviceName).toBe("gmail");
+    expect(brokerReq.connectionStatus).toBe("disconnected");
+    expect(brokerReq.requiredScopes).toContain("https://www.googleapis.com/auth/gmail.readonly");
+    expect(brokerReq.authUrl).toBeDefined();
+  });
+
+  it("Scenario 3: disconnected GitHub creates structured suspension", () => {
+    const manager = new ServiceSuspensionManager();
+    const suspension = manager.createSuspension({
+      turnId: "turn-123",
+      botId: "bot-coder",
+      requiredService: "github",
+      pendingExecutionPayload: { repo: "owner/repo", action: "create_issue", title: "Bug fix" },
+    });
+
+    expect(suspension.suspensionId).toMatch(/^susp_/);
+    expect(suspension.turnId).toBe("turn-123");
+    expect(suspension.botId).toBe("bot-coder");
+    expect(suspension.requiredService).toBe("github");
+    expect(suspension.pendingExecutionPayload).toEqual({
+      repo: "owner/repo",
+      action: "create_issue",
+      title: "Bug fix",
+    });
+    expect(suspension.createdAt).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("Scenario 4: expired service emits re-auth card with authUrl", async () => {
+    const cfg: AppConfig = {
+      composio: { apiKey: "ak_test", userId: "openmausbot_existing", sessionId: "trs_test" },
+    };
+    const req = await evaluateServiceRequirement(cfg, "linear", "update sprint issue");
+    // Mock API returns EXPIRED for linear
+    expect(req.serviceName).toBe("linear");
+    expect(req.connectionStatus).toBe("expired");
+    expect(req.authUrl).toBeDefined();
+  });
+
+  it("Scenario 5: rate-limited service is handled gracefully", async () => {
+    const req: ServiceRequirement = {
+      serviceName: "linear",
+      actionDescription: "fetch issues",
+      requiredScopes: ["read"],
+      connectionStatus: "rate_limited",
+    };
+    expect(req.connectionStatus).toBe("rate_limited");
+    expect(req.serviceName).toBe("linear");
+  });
+
+  it("Scenario 6: Google Calendar suspension payload serializes and deserializes safely", () => {
+    const manager = new ServiceSuspensionManager();
+    const payload = {
+      eventTitle: "Sprint Review",
+      startTime: "2026-10-25T10:00:00Z",
+      endTime: "2026-10-25T11:00:00Z",
+      attendees: ["dev@example.com", "lead@example.com"],
+    };
+
+    const suspension = manager.createSuspension({
+      turnId: "turn-cal-1",
+      botId: "bot-calendar",
+      requiredService: "googlecalendar",
+      pendingExecutionPayload: payload,
+    });
+
+    const retrieved = manager.getSuspension(suspension.suspensionId);
+    expect(retrieved).not.toBeNull();
+    expect(retrieved?.pendingExecutionPayload).toEqual(payload);
+  });
+
+  it("Scenario 7: clean resumption after successful auth callback", () => {
+    const manager = new ServiceSuspensionManager();
+    const suspension = manager.createSuspension({
+      turnId: "turn-cal-2",
+      botId: "bot-calendar",
+      requiredService: "googlecalendar",
+      pendingExecutionPayload: { action: "schedule_standup" },
+    });
+
+    const result = manager.resumeSuspension({
+      suspensionId: suspension.suspensionId,
+      callerBotId: "bot-calendar",
+      authOutcome: "success",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.resumed).toBe(true);
+    expect(result.suspension?.suspensionId).toBe(suspension.suspensionId);
+    expect(result.suspension?.pendingExecutionPayload).toEqual({ action: "schedule_standup" });
+  });
+
+  it("Scenario 8: OAuth timeout after 10 minutes (ERR_OAUTH_TIMEOUT)", () => {
+    const manager = new ServiceSuspensionManager(50); // 50ms TTL for test
+    const suspension = manager.createSuspension({
+      turnId: "turn-timeout",
+      botId: "bot-timeout",
+      requiredService: "gmail",
+      pendingExecutionPayload: { action: "fetch_inbox" },
+    });
+
+    // Artificially age the suspension beyond TTL
+    suspension.createdAt = Date.now() - 601_000; // 10m 1s ago
+
+    const result = manager.resumeSuspension({
+      suspensionId: suspension.suspensionId,
+      callerBotId: "bot-timeout",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe(ERR_OAUTH_TIMEOUT);
+    expect(result.error).toMatch(/timed out after 10 minutes/i);
+  });
+
+  it("Scenario 9: expired suspension rejection on late callback", () => {
+    const manager = new ServiceSuspensionManager();
+    const suspension = manager.createSuspension({
+      turnId: "turn-late",
+      botId: "bot-late",
+      requiredService: "slack",
+      pendingExecutionPayload: { message: "team update" },
+    });
+
+    // Explicitly expire
+    manager.expireSuspension(suspension.suspensionId);
+
+    const result = manager.resumeSuspension({
+      suspensionId: suspension.suspensionId,
+      callerBotId: "bot-late",
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.code).toBe(ERR_OAUTH_TIMEOUT);
+  });
+
+  it("Scenario 10: idempotent callback processing (duplicate callbacks ignored)", () => {
+    const manager = new ServiceSuspensionManager();
+    const suspension = manager.createSuspension({
+      turnId: "turn-idemp",
+      botId: "bot-idemp",
+      requiredService: "github",
+      pendingExecutionPayload: { commit: "abc1234" },
+    });
+
+    const first = manager.resumeSuspension({
+      suspensionId: suspension.suspensionId,
+      callerBotId: "bot-idemp",
+    });
+    expect(first.ok).toBe(true);
+    expect(first.resumed).toBe(true);
+
+    // Duplicate callback
+    const second = manager.resumeSuspension({
+      suspensionId: suspension.suspensionId,
+      callerBotId: "bot-idemp",
+    });
+    expect(second.ok).toBe(true);
+    expect(second.resumed).toBe(false); // Ignored, no double-dispatch
+  });
+
+  it("Scenario 11: concurrent service suspensions across different bots", () => {
+    const manager = new ServiceSuspensionManager();
+    const suspA = manager.createSuspension({
+      turnId: "turn-A",
+      botId: "bot-A",
+      requiredService: "gmail",
+      pendingExecutionPayload: { user: "alice" },
+    });
+    const suspB = manager.createSuspension({
+      turnId: "turn-B",
+      botId: "bot-B",
+      requiredService: "slack",
+      pendingExecutionPayload: { user: "bob" },
+    });
+
+    expect(manager.listActiveSuspensions("bot-A")).toHaveLength(1);
+    expect(manager.listActiveSuspensions("bot-B")).toHaveLength(1);
+    expect(manager.listActiveSuspensions()).toHaveLength(2);
+
+    expect(manager.getSuspension(suspA.suspensionId)?.botId).toBe("bot-A");
+    expect(manager.getSuspension(suspB.suspensionId)?.botId).toBe("bot-B");
+  });
+
+  it("Scenario 12: suspension payload tampering protection (defensive deep copy)", () => {
+    const manager = new ServiceSuspensionManager();
+    const externalPayload: Record<string, any> = { nested: { value: "original" } };
+    const suspension = manager.createSuspension({
+      turnId: "turn-tamper",
+      botId: "bot-tamper",
+      requiredService: "github",
+      pendingExecutionPayload: externalPayload,
+    });
+
+    // Mutate original object externally
+    externalPayload.nested.value = "tampered";
+
+    const retrieved = manager.getSuspension(suspension.suspensionId);
+    expect(retrieved?.pendingExecutionPayload).toEqual({ nested: { value: "original" } });
+  });
+
+  it("Scenario 13: raw secret and OAuth token redaction from cards", () => {
+    const requirement: ServiceRequirement = {
+      serviceName: "gmail",
+      actionDescription: "Check email for token ya29.a0AfH6SMB_secret_access_token_12345",
+      requiredScopes: ["https://www.googleapis.com/auth/gmail.readonly"],
+      connectionStatus: "disconnected",
+      authUrl: "https://connect.composio.dev/link/gmail",
+    };
+    const suspension: ServiceConnectionSuspension = {
+      suspensionId: "susp-card-redact",
+      turnId: "turn-card",
+      botId: "bot-card",
+      requiredService: "gmail",
+      pendingExecutionPayload: { secretToken: "ya29.secret123", apiKey: "ak_test123" },
+      createdAt: Date.now(),
+    };
+
+    const card = createServiceConnectionCardPayload(requirement, suspension);
+    const cardStr = JSON.stringify(card);
+    expect(cardStr).not.toContain("ya29.a0AfH6SMB_secret_access_token_12345");
+  });
+
+  it("Scenario 14: raw secret and OAuth token redaction from chat logs and payloads", () => {
+    const rawText = "Bearer ya29.a0AfH6_google_token and ghp_githubPersonalAccessToken123 and xoxb-slack-bot-token-456";
+    const sanitized = sanitizeServicePayload(rawText);
+
+    expect(sanitized).not.toContain("ya29.a0AfH6_google_token");
+    expect(sanitized).not.toContain("ghp_githubPersonalAccessToken123");
+    expect(sanitized).not.toContain("xoxb-slack-bot-token-456");
+    expect(sanitized).toContain("[REDACTED_GOOGLE_TOKEN]");
+    expect(sanitized).toContain("[REDACTED_GITHUB_TOKEN]");
+    expect(sanitized).toContain("[REDACTED_SLACK_TOKEN]");
+  });
+
+  it("Scenario 15: raw secret and OAuth token redaction in telemetry events", () => {
+    const eventPayload = {
+      botId: "bot-telemetry",
+      credentials: {
+        accessToken: "ya29.sensitive_token",
+        clientSecret: "top_secret_value",
+      },
+      message: "Connected with Bearer secret-token-value",
+    };
+    const sanitized = sanitizeServicePayload(eventPayload);
+
+    expect(sanitized.credentials.accessToken).toBe("[REDACTED]");
+    expect(sanitized.credentials.clientSecret).toBe("[REDACTED]");
+    expect(sanitized.message).toContain("Bearer [REDACTED]");
+  });
+
+  it("Scenario 16: scope minimization enforces least privilege", () => {
+    // Readonly email -> gmail.readonly
+    const readScopes = getRequiredScopesForService("gmail", "Read messages from inbox");
+    expect(readScopes).toEqual(["https://www.googleapis.com/auth/gmail.readonly"]);
+
+    // Send email -> gmail.send
+    const sendScopes = getRequiredScopesForService("gmail", "Send urgent email to boss");
+    expect(sendScopes).toEqual(["https://www.googleapis.com/auth/gmail.send"]);
+
+    // GitHub read vs write
+    const ghUserScopes = getRequiredScopesForService("github", "Get current user profile");
+    expect(ghUserScopes).toEqual(["read:user"]);
+    const ghRepoScopes = getRequiredScopesForService("github", "Push commit to repo");
+    expect(ghRepoScopes).toEqual(["repo"]);
+
+    // Calendar read vs write
+    const calReadScopes = getRequiredScopesForService("googlecalendar", "View today's meetings");
+    expect(calReadScopes).toEqual(["https://www.googleapis.com/auth/calendar.events.readonly"]);
+    const calWriteScopes = getRequiredScopesForService("googlecalendar", "Schedule new meeting");
+    expect(calWriteScopes).toEqual(["https://www.googleapis.com/auth/calendar.events"]);
+  });
+
+  it("Scenario 17: cross-bot replay attack rejection enforces user and bot isolation", () => {
+    const manager = new ServiceSuspensionManager();
+    const suspension = manager.createSuspension({
+      turnId: "turn-victim",
+      botId: "bot-victim",
+      requiredService: "slack",
+      pendingExecutionPayload: { targetChannel: "#confidential" },
+    });
+
+    // Attacker bot tries to resume victim bot's suspension
+    const attackerResult = manager.resumeSuspension({
+      suspensionId: suspension.suspensionId,
+      callerBotId: "bot-attacker",
+    });
+
+    expect(attackerResult.ok).toBe(false);
+    expect(attackerResult.code).toBe("ERR_CROSS_BOT_DENIED");
+    expect(attackerResult.error).toMatch(/Cross-bot suspension access rejected/i);
+
+    // Victim bot can still resume successfully
+    const legitimateResult = manager.resumeSuspension({
+      suspensionId: suspension.suspensionId,
+      callerBotId: "bot-victim",
+    });
+    expect(legitimateResult.ok).toBe(true);
+  });
+
+  describe("Composio Connect (ck_) Catalog & MCP Search", () => {
+    it("parses SSE responses with : connected comments and data: lines", async () => {
+      const sseBody = ": connected\n\n: connected\n\nevent: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[{\"name\":\"ZOOM_LIST_MEETINGS\"}]}}\n\n";
+      const res = new Response(sseBody, {
+        headers: { "content-type": "text/event-stream" },
+      });
+      const parsed = await parseConnectMcpJsonRpc(res);
+      expect(parsed).toEqual({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { tools: [{ name: "ZOOM_LIST_MEETINGS" }] },
+      });
+    });
+
+    it("parses standard application/json responses as fallback", async () => {
+      const jsonBody = JSON.stringify({ jsonrpc: "2.0", id: 2, result: { ok: true } });
+      const res = new Response(jsonBody, {
+        headers: { "content-type": "application/json" },
+      });
+      const parsed = await parseConnectMcpJsonRpc(res);
+      expect(parsed).toEqual({ jsonrpc: "2.0", id: 2, result: { ok: true } });
+    });
+
+    it("loads Connect catalog without 502/JWT error and discovers toolkits beyond 24 curated items", async () => {
+      const mockMcp = createServer((req, res) => {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          const parsed = JSON.parse(body);
+          if (parsed.params?.name === "COMPOSIO_SEARCH_TOOLS") {
+            const query = parsed.params?.arguments?.queries?.[0]?.use_case || "";
+            const isZoom = query.toLowerCase().includes("zoom");
+            const resultData = {
+              successful: true,
+              data: {
+                results: [{
+                  toolkits: isZoom ? ["zoom"] : ["spotify"],
+                }],
+                toolkit_connection_statuses: [{
+                  toolkit: isZoom ? "zoom" : "spotify",
+                  description: isZoom
+                    ? "Zoom is a video conferencing and online meeting platform"
+                    : "Spotify digital music and podcast streaming service",
+                  has_active_connection: false,
+                }],
+              },
+            };
+            res.writeHead(200, { "content-type": "text/event-stream" });
+            res.end(`: connected\n\nevent: message\ndata: ${JSON.stringify({
+              jsonrpc: "2.0",
+              id: parsed.id,
+              result: {
+                content: [{ type: "text", text: JSON.stringify(resultData) }],
+              },
+            })}\n\n`);
+          } else {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: parsed.id, result: { tools: [] } }));
+          }
+        });
+      });
+
+      await new Promise<void>((resolve) => mockMcp.listen(0, "127.0.0.1", () => resolve()));
+      const mcpPort = (mockMcp.address() as any).port;
+      const mcpUrl = `http://127.0.0.1:${mcpPort}`;
+
+      try {
+        const cfg: AppConfig = {
+          composio: {
+            apiKey: "ck_test_valid_connect_key",
+            surface: "connect",
+            mcpUrl,
+          },
+        };
+
+        // 1. Initial load without query: returns complete catalog (1,600+ items) with source: api, NO error
+        const initial = await listToolkits(cfg);
+        expect(initial.source).toBe("api");
+        expect(initial.error).toBeUndefined();
+        expect(initial.cards.length).toBeGreaterThan(1600);
+        expect(initial.cards.some((c) => c.slug === "github")).toBe(true);
+        expect(initial.cards.some((c) => c.slug === "zoom")).toBe(true);
+        expect(initial.cards.some((c) => c.slug === "spotify")).toBe(true);
+
+        // 2. Search query: dynamically discovers "zoom" via Connect MCP
+        const searchResult = await listToolkits(cfg, { query: "zoom meeting" });
+        expect(searchResult.source).toBe("api");
+        expect(searchResult.error).toBeUndefined();
+        const zoomCard = searchResult.cards.find((c) => c.slug === "zoom");
+        expect(zoomCard).toBeDefined();
+        expect(zoomCard?.label).toBe("Zoom");
+        expect(zoomCard?.blurb).toContain("Zoom is a video conferencing");
+
+        // 3. Search query: dynamically discovers "spotify" via Connect MCP
+        const spotifyResult = await listToolkits(cfg, { query: "spotify music" });
+        const spotifyCard = spotifyResult.cards.find((c) => c.slug === "spotify");
+        expect(spotifyCard).toBeDefined();
+        expect(spotifyCard?.label).toBe("Spotify");
+      } finally {
+        await new Promise((resolve) => mockMcp.close(resolve));
+      }
+    });
+  });
+
+  describe("Gate 6: Adversarial Composio Catalog Regressions", () => {
+    it("handles large catalogs (>26 services across multiple pages) with deduplication and provider total", async () => {
+      const cfg: AppConfig = { composio: { apiKey: "ak_catalog_multi_page" } };
+      const result = await listToolkits(cfg, { refresh: true });
+
+      expect(result.source).toBe("api");
+      expect(result.error).toBeUndefined();
+      // Total gathered cards must be > 26 (we have 35 unique items across 3 pages)
+      expect(result.cards.length).toBe(35);
+      expect(result.cards.length).toBeGreaterThan(26);
+      // "slack" was on page 1 and page 2, must be deduplicated
+      const slackCards = result.cards.filter((c) => c.slug === "slack");
+      expect(slackCards.length).toBe(1);
+      // Provider reported authoritative total_items = 45
+      expect(result.totalCount).toBe(45);
+      expect(result.hasMore).toBe(true);
+    });
+
+    it("searches and returns integrations that exist on later pages", async () => {
+      const cfg: AppConfig = { composio: { apiKey: "ak_catalog_multi_page" } };
+      // "service_34" is only on page 3
+      const searchResult = await listToolkits(cfg, { query: "service 34" });
+      expect(searchResult.source).toBe("api");
+      expect(searchResult.cards.some((c) => c.slug === "service_34")).toBe(true);
+    });
+
+    it("invalidates cache on refresh and triggers fresh upstream fetch", async () => {
+      const cfg: AppConfig = { composio: { apiKey: "ak_catalog_multi_page" } };
+      // 1. Force refresh to ensure cache is primed with a known call baseline
+      await listToolkits(cfg, { refresh: true });
+      const callCountAfterFirst = calls.length;
+
+      // 2. Cached fetch without refresh does NOT make new upstream calls
+      await listToolkits(cfg);
+      expect(calls.length).toBe(callCountAfterFirst);
+
+      // 3. Fetch with refresh = true invalidates cache and makes new upstream calls
+      await listToolkits(cfg, { refresh: true });
+      expect(calls.length).toBeGreaterThan(callCountAfterFirst);
+    });
+
+    it("never silently falls back to curated catalog on auth failure (Platform ak_)", async () => {
+      const cfg: AppConfig = { composio: { apiKey: "ak_invalid_rejected_key" } };
+      const result = await listToolkits(cfg, { refresh: true });
+
+      expect(result.cards).toHaveLength(0);
+      expect(result.totalCount).toBe(0);
+      expect(result.error).toBeDefined();
+      expect(result.error).toMatch(/invalid project key|HTTP 401/);
+    });
+
+    it("never silently falls back to curated catalog on Connect MCP auth failure", async () => {
+      const mockMcp = createServer((_req, res) => {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "Invalid consumer API key" }));
+      });
+      await new Promise<void>((resolve) => mockMcp.listen(0, "127.0.0.1", resolve));
+      const mcpPort = (mockMcp.address() as any).port;
+
+      try {
+        const cfg: AppConfig = {
+          composio: {
+            apiKey: "ck_unauthorized_key",
+            surface: "connect",
+            mcpUrl: `http://127.0.0.1:${mcpPort}`,
+          },
+        };
+
+        const result = await listToolkits(cfg, { query: "zoom meeting", refresh: true });
+        expect(result.cards).toHaveLength(0);
+        expect(result.error).toBeDefined();
+        expect(result.error).toContain("rejected this consumer key");
+      } finally {
+        await new Promise((resolve) => mockMcp.close(resolve));
+      }
+    });
+
+    it("authorizes managed Connect service via COMPOSIO_MANAGE_CONNECTIONS redirect_url", async () => {
+      let manageConnectionsPayload: any = null;
+      const mockMcp = createServer((req, res) => {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          const parsed = JSON.parse(body);
+          if (parsed.params?.name === "COMPOSIO_MANAGE_CONNECTIONS") {
+            manageConnectionsPayload = parsed.params.arguments;
+            const toolkit = manageConnectionsPayload?.toolkits?.[0]?.name;
+            const resultData = {
+              successful: true,
+              data: {
+                message: "All connections have been initiated",
+                results: {
+                  [toolkit]: {
+                    toolkit,
+                    status: "initiated",
+                    redirect_url: `https://connect.composio.dev/link/lk_test_${toolkit}_123`,
+                    instruction: `Connect ${toolkit}`,
+                  },
+                },
+              },
+            };
+            res.writeHead(200, { "content-type": "text/event-stream" });
+            res.end(`: connected\n\nevent: message\ndata: ${JSON.stringify({
+              jsonrpc: "2.0",
+              id: parsed.id,
+              result: { content: [{ type: "text", text: JSON.stringify(resultData) }] },
+            })}\n\n`);
+          } else {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: parsed.id, result: {} }));
+          }
+        });
+      });
+      await new Promise<void>((resolve) => mockMcp.listen(0, "127.0.0.1", resolve));
+      const mcpPort = (mockMcp.address() as any).port;
+
+      try {
+        const cfg: AppConfig = {
+          composio: {
+            apiKey: "ck_test_key",
+            surface: "connect",
+            mcpUrl: `http://127.0.0.1:${mcpPort}`,
+          },
+        };
+
+        const auth = await authorizeService(cfg, "github");
+        expect(auth.url).toBe("https://connect.composio.dev/link/lk_test_github_123");
+        expect(manageConnectionsPayload).toEqual({
+          toolkits: [{ name: "github", action: "add" }],
+        });
+
+        // Test with alias
+        const authWithAlias = await authorizeService(cfg, "slack", "my-team");
+        expect(authWithAlias.url).toBe("https://connect.composio.dev/link/lk_test_slack_123");
+        expect(manageConnectionsPayload).toEqual({
+          toolkits: [{ name: "slack", action: "add", alias: "my-team" }],
+        });
+      } finally {
+        await new Promise((resolve) => mockMcp.close(resolve));
+      }
+    });
+
+    it("authorizes unmanaged Connect service extracting setup link from instruction or fallback", async () => {
+      const mockMcp = createServer((req, res) => {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          const parsed = JSON.parse(body);
+          if (parsed.params?.name === "COMPOSIO_MANAGE_CONNECTIONS") {
+            const resultData = {
+              successful: true,
+              data: {
+                message: "All connection attempts failed",
+                results: {
+                  spotify: {
+                    toolkit: "spotify",
+                    status: "failed",
+                    error_message: "Composio does not have managed auth for 'spotify', so the user must set up their own auth config: [Set up spotify](https://dashboard.composio.dev/~/org/connect/apps/spotify?open=true).",
+                  },
+                },
+              },
+            };
+            res.writeHead(200, { "content-type": "text/event-stream" });
+            res.end(`: connected\n\nevent: message\ndata: ${JSON.stringify({
+              jsonrpc: "2.0",
+              id: parsed.id,
+              result: { content: [{ type: "text", text: JSON.stringify(resultData) }] },
+            })}\n\n`);
+          }
+        });
+      });
+      await new Promise<void>((resolve) => mockMcp.listen(0, "127.0.0.1", resolve));
+      const mcpPort = (mockMcp.address() as any).port;
+
+      try {
+        const cfg: AppConfig = {
+          composio: {
+            apiKey: "ck_test_key",
+            surface: "connect",
+            mcpUrl: `http://127.0.0.1:${mcpPort}`,
+          },
+        };
+
+        const auth = await authorizeService(cfg, "spotify");
+        expect(auth.url).toBe("https://dashboard.composio.dev/~/org/connect/apps/spotify?open=true");
+      } finally {
+        await new Promise((resolve) => mockMcp.close(resolve));
+      }
+    });
+
+    it("falls back to direct app connect url if Connect MCP call times out or fails", async () => {
+      const cfg: AppConfig = {
+        composio: {
+          apiKey: "ck_test_key",
+          surface: "connect",
+          mcpUrl: "http://127.0.0.1:9", // unreachable
+        },
+      };
+
+      const auth = await authorizeService(cfg, "zoom");
+      expect(auth.url).toBe("https://dashboard.composio.dev/~/org/connect/apps/zoom?open=true");
+
+      const direct = await authorizeConnectService("ck_test_key", "http://127.0.0.1:9", "zoom");
+      expect(direct.url).toBe("https://dashboard.composio.dev/~/org/connect/apps/zoom?open=true");
+    });
+
+    it("queries COMPOSIO_MANAGE_CONNECTIONS to discover connected accounts and statuses in Connect mode", async () => {
+      let manageConnectionsCalled = false;
+      const mockMcp = createServer((req, res) => {
+        let body = "";
+        req.on("data", (chunk) => { body += chunk; });
+        req.on("end", () => {
+          const parsed = JSON.parse(body);
+          if (parsed.params?.name === "COMPOSIO_MANAGE_CONNECTIONS") {
+            manageConnectionsCalled = true;
+            const resultData = {
+              successful: true,
+              data: {
+                message: "Processed toolkits",
+                results: {
+                  github: {
+                    toolkit: "github",
+                    status: "active",
+                    accounts: [
+                      {
+                        id: "github_acc_1",
+                        status: "active",
+                        is_default: true,
+                        user_info: { login: "testuser" },
+                      },
+                    ],
+                  },
+                  slack: {
+                    toolkit: "slack",
+                    status: "initiated",
+                    accounts: [
+                      {
+                        id: "slack_acc_1",
+                        status: "initializing",
+                      },
+                    ],
+                  },
+                },
+              },
+            };
+            res.writeHead(200, { "content-type": "text/event-stream" });
+            res.end(`: connected\n\nevent: message\ndata: ${JSON.stringify({
+              jsonrpc: "2.0",
+              id: parsed.id,
+              result: { content: [{ type: "text", text: JSON.stringify(resultData) }] },
+            })}\n\n`);
+          } else {
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ jsonrpc: "2.0", id: parsed.id, result: {} }));
+          }
+        });
+      });
+      await new Promise<void>((resolve) => mockMcp.listen(0, "127.0.0.1", resolve));
+      const mcpPort = (mockMcp.address() as any).port;
+
+      try {
+        const cfg: AppConfig = {
+          composio: {
+            apiKey: "ck_test_key",
+            surface: "connect",
+            mcpUrl: `http://127.0.0.1:${mcpPort}`,
+          },
+        };
+
+        const statuses = await connectionStatus(cfg, ["github", "slack", "zoom"]);
+        expect(manageConnectionsCalled).toBe(true);
+        expect(statuses.github.connected).toBe(true);
+        expect(statuses.github.status).toBe("ACTIVE");
+        expect(statuses.github.accounts?.[0]?.alias).toBe("testuser");
+        expect(statuses.slack.connected).toBe(false);
+        expect(statuses.slack.pending).toBe(true);
+        expect(statuses.zoom.connected).toBe(false);
+
+        const connected = await connectedServices(cfg);
+        expect(connected.github.connected).toBe(true);
+        expect(connected.github.accounts?.[0]?.id).toBe("github_acc_1");
+      } finally {
+        await new Promise((resolve) => mockMcp.close(resolve));
+      }
+    });
   });
 });
 

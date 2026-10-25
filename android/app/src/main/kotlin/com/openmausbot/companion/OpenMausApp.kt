@@ -13,6 +13,7 @@ import com.openmausbot.companion.host.AndroidHostFiles
 import com.openmausbot.companion.host.HarnessService
 import com.openmausbot.companion.host.HarnessHost
 import com.openmausbot.companion.host.HarnessHostPort
+import com.openmausbot.companion.host.MemorySignerClient
 import com.openmausbot.companion.host.StandaloneConnectionStore
 import com.openmausbot.companion.host.StandaloneTokenStore
 import com.openmausbot.companion.lifecycle.AlwaysOnConnectionService
@@ -105,10 +106,15 @@ class OpenMausApp : Application() {
         discovery = NsdDiscovery(this)
         permissions = CompanionPermissions(this)
         onboarding = OnboardingPreferences(this)
-        harnessHost = HarnessHost(appScope, AndroidHostFiles(this), HarnessHostPort)
+        // Bind the separate-UID signing authority *before* the host exists: the
+        // signer pins its trusted caller to the first process that binds it,
+        // and every agent shell is a descendant of the host spawned below.
+        MemorySignerClient.install(this)
+        val hostPort = HarnessHostPort(this)
+        harnessHost = HarnessHost(appScope, AndroidHostFiles(this), hostPort)
         session = Session(
             scope = appScope,
-            connectionStore = StandaloneConnectionStore(DataStoreConnectionStore(this)),
+            connectionStore = StandaloneConnectionStore(DataStoreConnectionStore(this), hostPort),
             tokenStore = StandaloneTokenStore(KeystoreTokenStore(this)),
             onboardingStore = onboarding,
             deviceNameProvider = {

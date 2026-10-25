@@ -324,11 +324,11 @@ describe("workspace", () => {
     writeFileSync(join(dir, "MEMORY.md"), `${lines.join("\n")}\n`);
     const memory = loadMemory(BOT);
     expect(memory).toMatchObject({ truncated: true, lines: MEMORY_MAX_LINES + 50 });
-    const managed = memorySystemPrompt(BOT, { managedWrites: true });
+    const managed = memorySystemPrompt(BOT, { managedWrites: true, includeRawMemory: true });
     expect(managed).toContain(`[MEMORY.md is ${MEMORY_MAX_LINES + 50} lines and ${memory!.bytes} bytes; only the first ${MEMORY_MAX_LINES} lines / ${MEMORY_MAX_BYTES} bytes are shown above`);
     expect(managed).toContain("Consolidate it now with memory_update");
     expect(managed).not.toContain("was cut off here — trim it");
-    expect(memorySystemPrompt(BOT)).toContain("Trim it with your file tools");
+    expect(memorySystemPrompt(BOT, { includeRawMemory: true })).toContain("Trim it with your file tools");
     // a file of exactly the budget with a final newline is not over it
     writeFileSync(join(dir, "MEMORY.md"), `${lines.slice(0, MEMORY_MAX_LINES).join("\n")}\n`);
     expect(loadMemory(BOT)?.truncated).toBe(false);
@@ -493,7 +493,11 @@ describe("workspace", () => {
 
     const dir = ensureWorkspace(BOT);
     writeFileSync(join(dir, "MEMORY.md"), "# Memory\n- deploy = `railway up`\n");
-    const withMemory = memorySystemPrompt(BOT);
+    const trusted = memorySystemPrompt(BOT);
+    expect(trusted).not.toContain("Your memory (MEMORY.md):");
+    expect(trusted).not.toContain("railway up");
+
+    const withMemory = memorySystemPrompt(BOT, { includeRawMemory: true });
     expect(withMemory).toContain("Your memory (MEMORY.md):");
     expect(withMemory).toContain("railway up");
   });
@@ -517,7 +521,7 @@ describe("workspace", () => {
     writeMemoryFile(BOT, "# Memory\n- The user prefers CSV exports.\n");
     for (const driver of ["grok", "openai-compat", "minimax", "boxAgent"]) {
       expect(supportsWorkspaceFiles(driver)).toBe(false);
-      const prompt = memorySystemPrompt(BOT, { fileTools: supportsWorkspaceFiles(driver) });
+      const prompt = memorySystemPrompt(BOT, { fileTools: supportsWorkspaceFiles(driver), includeRawMemory: true });
       expect(prompt).toContain("The user prefers CSV exports.");
       expect(prompt).not.toContain("update it with your file tools");
       expect(prompt).not.toContain("memory_update");
@@ -528,7 +532,7 @@ describe("workspace", () => {
 
   it("agents MCP enables targeted memory writes without promising native file reads", () => {
     writeMemoryFile(BOT, "# Memory\n- The user prefers CSV exports.\n");
-    const prompt = memorySystemPrompt(BOT, { managedWrites: true, fileTools: false });
+    const prompt = memorySystemPrompt(BOT, { managedWrites: true, fileTools: false, includeRawMemory: true });
     expect(prompt).toContain("The user prefers CSV exports.");
     expect(prompt).toContain("Use memory_update");
     expect(prompt).toContain("use session_search to find the current passage");

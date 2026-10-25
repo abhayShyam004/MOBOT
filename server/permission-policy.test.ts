@@ -31,6 +31,7 @@ describe("permission-policy", () => {
       expect(classifyTool("build_run").domain).toBe("terminal");
       expect(classifyTool("test_run").domain).toBe("terminal");
       expect(classifyTool("project_git_status").domain).toBe("terminal");
+      expect(classifyTool("port_forward_create").domain).toBe("terminal");
     });
 
     it("classifies filesystem tools correctly", () => {
@@ -43,6 +44,8 @@ describe("permission-policy", () => {
       expect(classifyTool("artifact_create").domain).toBe("filesystem");
       expect(classifyTool("project_create").domain).toBe("filesystem");
       expect(classifyTool("verify_file").domain).toBe("filesystem");
+      expect(classifyTool("resource_extract_pdf_text").domain).toBe("filesystem");
+      expect(classifyTool("resource_artifact_info").domain).toBe("filesystem");
     });
 
     it("classifies browser and network tools correctly", () => {
@@ -52,7 +55,11 @@ describe("permission-policy", () => {
       expect(classifyTool("WebSearch").domain).toBe("browser");
       expect(classifyTool("browser_open").domain).toBe("browser");
       expect(classifyTool("preview_start").domain).toBe("browser");
+      expect(classifyTool("preview_status").domain).toBe("browser");
       expect(classifyTool("deployment_create").domain).toBe("browser");
+      expect(classifyTool("deployment_logs").domain).toBe("browser");
+      expect(classifyTool("resource_download").domain).toBe("browser");
+      expect(classifyTool("resource_extract_links").domain).toBe("browser");
     });
 
     it("classifies composio tools correctly", () => {
@@ -73,6 +80,7 @@ describe("permission-policy", () => {
     });
 
     it("classifies dynamic device_capability_invoke based on capabilityId", () => {
+      expect(classifyTool("device_capability_invoke").domain).toBe("system");
       expect(classifyTool("device_capability_invoke", { capabilityId: "device.files" }).domain).toBe("filesystem");
       expect(classifyTool("device_capability_invoke", { capabilityId: "device.browser" }).domain).toBe("browser");
       expect(classifyTool("device_capability_invoke", { capabilityId: "device.clipboard" }).domain).toBe("system");
@@ -127,6 +135,77 @@ describe("permission-policy", () => {
       expect(checkToolPermission("http_fetch", { browser: "denied" }).allowed).toBe(false);
       expect(checkToolPermission("http_fetch", { browser: "denied" }).reason).toContain("Browser & Network is disabled");
       expect(checkToolPermission("http_fetch", { browser: "restricted" }).allowed).toBe(false);
+
+      // Android browser tools and namespaced MCP calls
+      expect(checkToolPermission("android_browser_browser_open", { browser: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("android_browser_browser_open", { browser: "denied" }).allowed).toBe(false);
+      expect(checkToolPermission("android_browser_browser_close", { browser: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("android_browser_browser_close", { browser: "denied" }).allowed).toBe(false);
+      expect(checkToolPermission("android_browser_browser_clear", { browser: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("android_browser_browser_clear", { browser: "denied" }).allowed).toBe(false);
+      expect(checkToolPermission("android_browser_browser_navigate", { browser: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("android_browser_browser_get_text", { browser: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("mcp__android_browser__browser_click", { browser: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("android_computer_web_search", { browser: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("android_computer_http_fetch", { browser: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("android_computer_workspace_read", { filesystem: "granted" }).allowed).toBe(true);
+      expect(checkToolPermission("android_computer_run_command", { terminal: "granted" }).allowed).toBe(true);
+    });
+
+    it("adversarial: blocks unknown/malicious tools fail-closed even with deceptive prefixes", () => {
+      const allGranted = {
+        terminal: "granted" as const,
+        filesystem: "granted" as const,
+        browser: "granted" as const,
+        composio: "granted" as const,
+      };
+
+      // Deceptive tools with android_browser_ prefix
+      expect(classifyTool("android_browser_fake").domain).toBe("unknown");
+      expect(checkToolPermission("android_browser_fake", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("android_browser_admin").domain).toBe("unknown");
+      expect(checkToolPermission("android_browser_admin", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("android_browser_shell").domain).toBe("unknown");
+      expect(checkToolPermission("android_browser_shell", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("android_browser_unknown_tool").domain).toBe("unknown");
+      expect(checkToolPermission("android_browser_unknown_tool", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("android_browser_unknown").domain).toBe("unknown");
+      expect(checkToolPermission("android_browser_unknown", allGranted).allowed).toBe(false);
+
+      // Deceptive tools with android_computer_ prefix
+      expect(classifyTool("android_computer_fake").domain).toBe("unknown");
+      expect(checkToolPermission("android_computer_fake", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("android_computer_admin").domain).toBe("unknown");
+      expect(checkToolPermission("android_computer_admin", allGranted).allowed).toBe(false);
+
+      // Deceptive tools without valid prefix structure
+      expect(classifyTool("unknown_android_browser_tool").domain).toBe("unknown");
+      expect(checkToolPermission("unknown_android_browser_tool", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("browser_fake").domain).toBe("unknown");
+      expect(checkToolPermission("browser_fake", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("browser_admin").domain).toBe("unknown");
+      expect(checkToolPermission("browser_admin", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("browser_shell").domain).toBe("unknown");
+      expect(checkToolPermission("browser_shell", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("mcp_android_browser_fake").domain).toBe("unknown");
+      expect(checkToolPermission("mcp_android_browser_fake", allGranted).allowed).toBe(false);
+
+      expect(classifyTool("mcp__android_browser__fake").domain).toBe("unknown");
+      expect(checkToolPermission("mcp__android_browser__fake", allGranted).allowed).toBe(false);
+
+      // Verify that blocked reasons clearly indicate security policy block
+      const blockedRes = checkToolPermission("android_browser_fake", allGranted);
+      expect(blockedRes.allowed).toBe(false);
+      expect(blockedRes.reason).toContain("blocked by security policy");
     });
 
     it("enforces composio permission states and configuration requirements", () => {

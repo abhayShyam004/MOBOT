@@ -359,7 +359,6 @@ export class ArtifactManager {
   private readonly registryPath = join(ATTACHMENTS_DIR, ".artifacts-registry.json");
 
   constructor() {
-    ensureAttachmentsDir();
     this.loadRegistry();
   }
 
@@ -392,6 +391,7 @@ export class ArtifactManager {
 
   private saveRegistry(): void {
     try {
+      ensureAttachmentsDir();
       const data = {
         artifacts: Array.from(this.artifacts.values()),
         deliveredFiles: Array.from(this.deliveredFiles.values()),

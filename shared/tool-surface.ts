@@ -12,8 +12,8 @@ export const SCREEN_TOUCHING_TOOLS: ReadonlySet<string> = new Set([
   "screenshot", "click", "type_text", "press_key", "scroll", "computer_batch", "open_url", "browser_click", "browser_fill",
   // built-in browser: the Electron surface's names, kept because a bot on an
   // older remote harness can still call them
-  "browser_navigate", "browser_type", "browser_press", "browser_scroll", "browser_hover", "browser_drag",
-  "browser_select_option", "browser_back", "browser_forward", "browser_screenshot",
+  "browser_open", "browser_navigate", "browser_type", "browser_press", "browser_scroll", "browser_hover", "browser_drag",
+  "browser_select_option", "browser_back", "browser_forward", "browser_screenshot", "browser_close", "browser_clear",
   // built-in browser: agent-browser's names
   "agent_browser_open", "agent_browser_click", "agent_browser_fill", "agent_browser_type", "agent_browser_press",
   "agent_browser_select", "agent_browser_check", "agent_browser_screenshot",
@@ -25,13 +25,24 @@ export const SCREEN_TOUCHING_TOOLS: ReadonlySet<string> = new Set([
 // MCP_NAME in mcp-registry.ts (lowercase letters, digits, underscores, hyphens).
 export const TOOL_NAMESPACE = /^(?:mcp__.+?|[a-z][a-z0-9_-]{0,31})__/;
 
+function stripPrefixes(toolName: string): string {
+  const lower = toolName.toLowerCase();
+  const withoutMcp = lower.replace(TOOL_NAMESPACE, "");
+  return withoutMcp
+    .replace(/^android_browser_/, "")
+    .replace(/^android_computer_/, "");
+}
+
 /** The same tool reaches the poke site as `mcp__computer__click`,
  * `computer__click`, bare `click`, or pi's `computer_click`. A single-underscore
  * server prefix is stripped at most once, so pi's `computer_computer_exec`
  * lands on `computer_exec` (still a shell) and never on a bare `exec`. */
 export function screenTouchingTool(toolName: string): boolean {
-  const bare = toolName.toLowerCase().replace(TOOL_NAMESPACE, "");
-  return SCREEN_TOUCHING_TOOLS.has(bare) || SCREEN_TOUCHING_TOOLS.has(bare.replace(/^(?:computer|browser)_/, ""));
+  const stripped = stripPrefixes(toolName);
+  return (
+    SCREEN_TOUCHING_TOOLS.has(stripped) ||
+    SCREEN_TOUCHING_TOOLS.has(stripped.replace(/^(?:computer|browser)_/, ""))
+  );
 }
 
 /** Which surface a screen-touching tool acted on. The computer server's
@@ -39,9 +50,10 @@ export function screenTouchingTool(toolName: string): boolean {
  * server identity is checked before prefixes are stripped. */
 export function screenSurfaceForTool(toolName: string): "browser" | "computer" {
   const name = toolName.toLowerCase();
+  if (name.startsWith("android_browser_") || name.startsWith("mcp__android_browser__")) return "browser";
   if (name.startsWith("mcp__computer__") || name.startsWith("computer_")) return "computer";
   if (name.startsWith("mcp__browser__") || name.startsWith("browser__")) return "browser";
-  const bare = name.replace(TOOL_NAMESPACE, "");
+  const bare = stripPrefixes(name);
   if (bare === "browser_click" || bare === "browser_fill") return "computer";
   return bare.startsWith("agent_browser_") || bare.startsWith("browser_") ? "browser" : "computer";
 }
@@ -51,9 +63,10 @@ export function screenSurfaceForTool(toolName: string): "browser" | "computer" {
  * screenSurfaceForTool this never guesses "computer" for an unrelated tool. */
 export function toolSurfaceKind(toolName: string): "browser" | "computer" | null {
   const name = toolName.toLowerCase();
+  if (name.startsWith("android_browser_") || name.startsWith("mcp__android_browser__")) return "browser";
   if (name.startsWith("mcp__browser__") || name.startsWith("browser__")) return "browser";
   if (name.startsWith("mcp__computer__") || name.startsWith("computer__") || name.startsWith("computer_")) return "computer";
-  const bare = name.replace(TOOL_NAMESPACE, "");
+  const bare = stripPrefixes(name);
   if (bare === "browser_click" || bare === "browser_fill") return "computer";
   if (bare.startsWith("agent_browser_") || bare.startsWith("browser_")) return "browser";
   return SCREEN_TOUCHING_TOOLS.has(bare) ? "computer" : null;

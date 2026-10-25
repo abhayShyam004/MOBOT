@@ -8,11 +8,14 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  realpathSync,
   renameSync,
   statSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, extname, join, resolve } from "node:path";
+
+import { isProtectedMemoryPath } from "../memory-integrity.ts";
 
 export interface FileMetadata {
   name: string;
@@ -40,13 +43,37 @@ export class DeviceFileManager {
   private readonly rootDir: string;
 
   constructor(rootDir?: string) {
-    this.rootDir = resolve(rootDir || process.env.DATA_DIR || process.cwd());
+    const raw = resolve(rootDir || process.env.DATA_DIR || process.cwd());
+    try {
+      this.rootDir = realpathSync(raw);
+    } catch {
+      this.rootDir = raw;
+    }
   }
 
   private safePath(relPath: string): string {
     const full = resolve(this.rootDir, relPath.replace(/^[/\\]+/, ""));
     if (!full.startsWith(this.rootDir)) {
       throw new Error("Access denied: path traversal attempt outside allowed boundary.");
+    }
+    // This generic file surface is for documents and downloads, not for the
+    // server's canonical memory store. The memory API is the only writer of
+    // records.json and its manifest; hiding them here keeps an agent from
+    // using “organize downloads” as an alternative mutation path. Resolve
+    // symlinks too: a link planted in a writable folder must not become a
+    // readable alias for the key or the record store.
+    let real = full;
+    try {
+      real = realpathSync(full);
+    } catch {
+      // A path that does not exist yet is judged by its literal name below;
+      // its parent must already be inside the root.
+    }
+    if (!real.startsWith(this.rootDir)) {
+      throw new Error("Access denied: path traversal attempt outside allowed boundary.");
+    }
+    if (isProtectedMemoryPath(full) || isProtectedMemoryPath(real)) {
+      throw new Error("Access denied: canonical memory records are managed by the memory store.");
     }
     return full;
   }
@@ -97,7 +124,9 @@ export class DeviceFileManager {
     const dir = this.safePath(subDir);
     if (!existsSync(dir)) return [];
 
-    const entries = readdirSync(dir, { withFileTypes: true });
+    const entries = readdirSync(dir, { withFileTypes: true }).filter(
+      (e) => !isProtectedMemoryPath(join(dir, e.name)),
+    );
     return entries.map((e) => {
       const full = join(dir, e.name);
       try {
@@ -148,6 +177,8 @@ export class DeviceFileManager {
               rel.toLowerCase().includes(t)
           );
 
+          if (isProtectedMemoryPath(full)) continue;
+
           if (match && !e.isDirectory()) {
             const s = statSync(full);
             results.push({
@@ -187,6 +218,7 @@ export class DeviceFileManager {
         for (const e of entries) {
           if (e.name.startsWith(".")) continue;
           const full = join(currentDir, e.name);
+          if (isProtectedMemoryPath(full)) continue;
           if (e.isDirectory()) {
             if (!e.name.includes("node_modules")) walk(full);
           } else {
@@ -240,6 +272,7 @@ export class DeviceFileManager {
 
     for (const e of entries) {
       if (e.isDirectory() || e.name.startsWith(".")) continue;
+      if (isProtectedMemoryPath(join(dir, e.name))) continue;
       const cat = this.categorize(e.name);
       if (cat === "other") continue;
 

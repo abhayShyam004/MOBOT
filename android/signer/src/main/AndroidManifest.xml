@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Signature-protected, and only that: an ordinary app installed beside
+      this one cannot bind the signer at all. The main app is signed with the
+      same certificate, so it holds the grant — which is also the limit of
+      what a permission can say, because it is a UID grant and every process of
+      the agent's app shares the main app's UID. Binding is therefore only
+      "somewhere in that app"; enrollment decides *which process*, and the
+      authorization lives in MemorySignerService / SignerAuthorization.
+    -->
+    <permission
+        android:name="com.openmausbot.companion.permission.MEMORY_SIGNER"
+        android:protectionLevel="signature" />
+
+    <!--
+      Declaring a permission does not grant it to the declaring app: this
+      package has to request it like anyone else, and it is the grant that
+      makes its enrollment broadcast acceptable to the app's receiver. Measured
+      on the SM-A075F: without this line the broadcast is skipped at enqueue
+      with "requires ...MEMORY_SIGNER", and enrollment never completes.
+    -->
+    <uses-permission android:name="com.openmausbot.companion.permission.MEMORY_SIGNER" />
+
+    <application
+        android:allowBackup="false"
+        android:label="MOBOT memory signer"
+        android:supportsRtl="false"
+        android:hasFragileUserData="false">
+
+        <!--
+          exported=true is required for the main app (a different UID) to bind
+          it; the permission above is what keeps every other app out. There is
+          no activity and no launcher icon: this package is an authority, not
+          something the person opens.
+        -->
+        <service
+            android:name=".MemorySignerService"
+            android:exported="true"
+            android:permission="com.openmausbot.companion.permission.MEMORY_SIGNER"
+            android:stopWithTask="false" />
+
+    </application>
+</manifest>

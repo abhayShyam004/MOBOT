@@ -65,4 +65,21 @@ class CompanionPermissionsTest {
         recordAudioGranted = true
         assertTrue(permissions.recordAudioGranted())
     }
+
+    @Test
+    fun locationGrantedReflectsPlatformLocationPermissions() {
+        val granted = mutableSetOf<String>()
+        val permissions = CompanionPermissions(
+            sdkInt = 36,
+            granted = { it in granted },
+        )
+        assertFalse(permissions.locationGranted(), "location must not be granted without fine or coarse permission")
+
+        granted += Manifest.permission.ACCESS_COARSE_LOCATION
+        assertTrue(permissions.locationGranted(), "coarse location satisfies location permission check")
+
+        granted -= Manifest.permission.ACCESS_COARSE_LOCATION
+        granted += Manifest.permission.ACCESS_FINE_LOCATION
+        assertTrue(permissions.locationGranted(), "fine location satisfies location permission check")
+    }
 }

@@ -874,10 +874,20 @@ export async function listenLoopbackOnce(ports: readonly number[]): Promise<Loop
 function landingPage(title: string, body: string): string {
   const esc = (text: string): string => text
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  const isApproved = title.toLowerCase().includes("approved");
+  const autoRedirect = isApproved
+    ? `<script>
+  setTimeout(function() {
+    window.location.href = "openmausbot://auth?status=success";
+  }, 400);
+</script>
+<p style="margin-top:1.5rem"><a href="openmausbot://auth?status=success" style="display:inline-block;padding:0.6rem 1.2rem;background:#000;color:#fff;border-radius:8px;text-decoration:none;font-weight:600">Return to MOBOT</a></p>`
+    : "";
   return `<!doctype html><html><head><meta charset="utf-8"><title>${esc(title)}</title>
 <body style="font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:90vh;margin:0">
 <div style="max-width:28rem;text-align:center;padding:2rem">
 <h1 style="font-size:1.25rem">${esc(title)}</h1>
 <p style="color:#555">${esc(body)}</p>
+${autoRedirect}
 </div></body></html>`;
 }

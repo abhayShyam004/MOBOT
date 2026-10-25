@@ -112,6 +112,24 @@ class StructuredAppErrorTest {
     }
 
     @Test
+    fun `ErrorClassifier classifies missing dashboard JWT as Connected Services Authentication failure`() {
+        val classified = ErrorClassifier.classify(
+            operation = "Application Operation",
+            rawMessage = "Missing dashboard JWT in Authorization header",
+            statusCode = 502,
+        )
+
+        assertEquals(ErrorCategory.PROVIDER, classified.category)
+        assertEquals("Connected Services Authentication", classified.operation)
+        assertEquals("Connected Services Authentication Failed", classified.headline)
+        assertEquals(CauseConfidence.CONFIRMED, classified.confidence)
+        assertFalse(classified.canRetry)
+        assertTrue(classified.actions.contains(ActionableRecovery.OPEN_SETTINGS))
+        assertTrue(classified.explanation.contains("Composio"))
+        assertTrue(classified.nextSteps.any { it.contains("Connected Services") })
+    }
+
+    @Test
     fun `ErrorClassifier classifies rate limit 429 error as retryable`() {
         val classified = ErrorClassifier.classify(
             operation = "Model Inference",

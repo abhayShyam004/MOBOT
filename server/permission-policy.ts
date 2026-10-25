@@ -2,6 +2,105 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentPermissionsConfig, AgentPermissionState } from "./config.ts";
 
+export const ERR_CROSS_BOT_MEMORY_LEAK = "ERR_CROSS_BOT_MEMORY_LEAK";
+
+export class CrossBotMemoryLeakError extends Error {
+  readonly code = ERR_CROSS_BOT_MEMORY_LEAK;
+  readonly category = "permission_denied" as const;
+  readonly requestingBotId: string;
+  readonly targetBotId: string;
+
+  constructor(requestingBotId: string, targetBotId: string, message?: string) {
+    super(
+      message ??
+        `${ERR_CROSS_BOT_MEMORY_LEAK}: Bot "${requestingBotId}" cannot access private memory partition of Bot "${targetBotId}".`,
+    );
+    this.name = "CrossBotMemoryLeakError";
+    this.requestingBotId = requestingBotId;
+    this.targetBotId = targetBotId;
+  }
+}
+
+export interface MemoryAccessRequest {
+  requestingBotId: string;
+  targetBotId: string;
+  operation: "read" | "write" | "query";
+  path?: string;
+}
+
+const VALID_BOT_ID = /^[\w-]{1,128}$/;
+
+/**
+ * Authoritative cross-bot memory permission boundary enforcement.
+ * Blocks any attempt by one bot to read, write, or query another bot's private memory partition.
+ * Defends against direct bot references, path traversals, and percent-encoded variations.
+ */
+export function checkMemoryAccessPermission(req: MemoryAccessRequest): {
+  allowed: boolean;
+  error?: string;
+  category?: "permission_denied";
+} {
+  const { requestingBotId, targetBotId, operation, path } = req;
+
+  if (!requestingBotId || !VALID_BOT_ID.test(requestingBotId)) {
+    return {
+      allowed: false,
+      error: `${ERR_CROSS_BOT_MEMORY_LEAK}: Invalid or unknown requesting botId "${requestingBotId}".`,
+      category: "permission_denied",
+    };
+  }
+
+  // Inspect path if specified
+  if (path) {
+    let clean: string;
+    try {
+      clean = decodeURIComponent(path).replace(/\\/g, "/");
+    } catch {
+      return {
+        allowed: false,
+        error: `${ERR_CROSS_BOT_MEMORY_LEAK}: Malformed encoded path "${path}".`,
+        category: "permission_denied",
+      };
+    }
+
+    // Traversal check
+    const segments = clean.split("/");
+    if (segments.some((s) => s === ".." || (s === "." && clean !== "."))) {
+      return {
+        allowed: false,
+        error: `${ERR_CROSS_BOT_MEMORY_LEAK}: Path traversal blocked in memory path "${path}".`,
+        category: "permission_denied",
+      };
+    }
+
+    // Explicit cross-bot path target check (e.g. bots/otherBot/... or workspaces/otherBot/...)
+    const botMatch = clean.match(/^(?:bots\/|workspaces\/)([\w-]+)\//);
+    if (botMatch && botMatch[1] !== requestingBotId && botMatch[1] !== "shared") {
+      return {
+        allowed: false,
+        error: `${ERR_CROSS_BOT_MEMORY_LEAK}: Cross-bot path access blocked from "${requestingBotId}" to "${botMatch[1]}".`,
+        category: "permission_denied",
+      };
+    }
+  }
+
+  // Shared target partition: universally readable by any bot
+  if (targetBotId === "shared") {
+    return { allowed: true };
+  }
+
+  // Private bot partition: Bot A cannot access Bot B's private partition under any circumstance
+  if (targetBotId !== requestingBotId) {
+    return {
+      allowed: false,
+      error: `${ERR_CROSS_BOT_MEMORY_LEAK}: Bot "${requestingBotId}" cannot ${operation} private memory partition of Bot "${targetBotId}".`,
+      category: "permission_denied",
+    };
+  }
+
+  return { allowed: true };
+}
+
 export type PermissionDomain = "terminal" | "filesystem" | "browser" | "composio";
 
 export interface PermissionCheckResult {
@@ -62,6 +161,9 @@ const TERMINAL_TOOL_NAMES = new Set([
   "process_signal",
   "project_run",
   "project_build",
+  "port_forward_create",
+  "port_forward_list",
+  "port_forward_close",
 ]);
 
 const PHONE_TOOL_NAMES = new Set([
@@ -104,6 +206,10 @@ const FILESYSTEM_TOOL_NAMES = new Set([
   "artifact_delete",
   "artifact_list",
   "project_create",
+  "resource_extract_pdf_text",
+  "resource_extract_pdf",
+  "resource_artifact_info",
+  "resource_list",
 ]);
 
 const BROWSER_TOOL_NAMES = new Set([
@@ -114,20 +220,54 @@ const BROWSER_TOOL_NAMES = new Set([
   "resource_inspect",
   "resource_fetch",
   "resource_download",
-  "resource_extract_pdf",
+  "resource_extract_links",
   "resource_extract_html",
   "resource_artifacts",
   "browser_open",
-  "browser_click",
-  "browser_screenshot",
   "browser_navigate",
+  "browser_status",
+  "browser_back",
+  "browser_forward",
+  "browser_get_text",
+  "browser_dom",
+  "browser_click",
+  "browser_type",
+  "browser_eval",
+  "browser_screenshot",
+  "browser_cookies",
+  "browser_clear",
+  "browser_close",
+  "browser_persist",
   "browser_scroll",
   "browser_fill",
-  "browser_close",
   "browser_tabs",
   "browser_press",
   "browser_hover",
   "browser_evaluate",
+]);
+
+const KNOWN_BROWSER_ACTIONS = new Set([
+  "open",
+  "navigate",
+  "status",
+  "back",
+  "forward",
+  "get_text",
+  "dom",
+  "click",
+  "type",
+  "eval",
+  "screenshot",
+  "cookies",
+  "clear",
+  "close",
+  "persist",
+  "scroll",
+  "fill",
+  "tabs",
+  "press",
+  "hover",
+  "evaluate",
 ]);
 
 const SYSTEM_TOOL_NAMES = new Set([
@@ -146,6 +286,22 @@ const SYSTEM_TOOL_NAMES = new Set([
 ]);
 
 /**
+ * Strip common adapter and MCP namespace prefixes to inspect the underlying tool operation.
+ */
+function stripMcpPrefix(name: string): string {
+  // mcp__<server>__<tool>
+  const mcpMatch = /^mcp__[a-zA-Z0-9_-]+__(.+)$/i.exec(name);
+  if (mcpMatch) return mcpMatch[1];
+  // android_browser_<tool>
+  const abMatch = /^android_browser_(.+)$/i.exec(name);
+  if (abMatch) return abMatch[1];
+  // android_computer_<tool>
+  const acMatch = /^android_computer_(.+)$/i.exec(name);
+  if (acMatch) return acMatch[1];
+  return name;
+}
+
+/**
  * Classify a tool call into its canonical permission domain, system status, or unknown.
  */
 export function classifyTool(
@@ -153,45 +309,97 @@ export function classifyTool(
   args?: Record<string, unknown>,
 ): { domain: PermissionDomain | "system" | "unknown"; label: string } {
   const normalized = toolName.trim();
+  const stripped = stripMcpPrefix(normalized);
 
-  if (SYSTEM_TOOL_NAMES.has(normalized) || /^(plan_|task_)/i.test(normalized)) {
+  if (
+    SYSTEM_TOOL_NAMES.has(normalized) ||
+    SYSTEM_TOOL_NAMES.has(stripped) ||
+    /^(plan_|task_)/i.test(normalized) ||
+    /^(plan_|task_)/i.test(stripped)
+  ) {
     return { domain: "system", label: "System Collaboration" };
   }
 
   // Handle dynamic device capability tool
-  if (normalized === "device_capability_invoke" && args) {
-    const capId = String(args.capabilityId || "");
-    if (capId === "device.files") return { domain: "filesystem", label: PERMISSION_DOMAINS.filesystem.title };
-    if (capId === "device.browser" || capId === "device.network") return { domain: "browser", label: PERMISSION_DOMAINS.browser.title };
-    if (capId.startsWith("device.")) return { domain: "system", label: "Device Native Capability" };
+  if (normalized === "device_capability_invoke" || stripped === "device_capability_invoke") {
+    if (args) {
+      const capId = String(args.capabilityId || "");
+      if (capId === "device.files") return { domain: "filesystem", label: PERMISSION_DOMAINS.filesystem.title };
+      if (capId === "device.browser" || capId === "device.network") return { domain: "browser", label: PERMISSION_DOMAINS.browser.title };
+      if (capId.startsWith("device.")) return { domain: "system", label: "Device Native Capability" };
+    }
+    return { domain: "system", label: "Device Native Capability" };
+  }
+
+  // Legitimate browser tools check:
+  // Must be in BROWSER_TOOL_NAMES, or have an authentic browser action suffix
+  const isAuthenticBrowser =
+    BROWSER_TOOL_NAMES.has(normalized) ||
+    BROWSER_TOOL_NAMES.has(stripped) ||
+    (stripped.startsWith("browser_") && KNOWN_BROWSER_ACTIONS.has(stripped.slice("browser_".length))) ||
+    KNOWN_BROWSER_ACTIONS.has(stripped) ||
+    /^(preview_|deployment_|verify_service)/i.test(normalized) ||
+    /^(preview_|deployment_|verify_service)/i.test(stripped);
+
+  // If a tool explicitly claims the android_browser namespace, verify it is an authentic browser tool
+  if (normalized.startsWith("android_browser_") || normalized.startsWith("mcp__android_browser__")) {
+    if (isAuthenticBrowser) {
+      return { domain: "browser", label: PERMISSION_DOMAINS.browser.title };
+    }
+    return { domain: "unknown", label: "Unclassified Tool" };
+  }
+
+  // Android computer namespace verification
+  if (normalized.startsWith("android_computer_") || normalized.startsWith("mcp__android_computer__")) {
+    if (isAuthenticBrowser) {
+      return { domain: "browser", label: PERMISSION_DOMAINS.browser.title };
+    }
+    if (
+      TERMINAL_TOOL_NAMES.has(stripped) ||
+      PHONE_TOOL_NAMES.has(stripped) ||
+      /^(bash|sh|terminal_|shell_|exec_|process_|build_|test_|project_git_|repair_|phone_)/i.test(stripped)
+    ) {
+      return { domain: "terminal", label: PERMISSION_DOMAINS.terminal.title };
+    }
+    if (
+      FILESYSTEM_TOOL_NAMES.has(stripped) ||
+      /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list)|verify_file|verify_artifact|verify_image)/i.test(stripped)
+    ) {
+      return { domain: "filesystem", label: PERMISSION_DOMAINS.filesystem.title };
+    }
+    return { domain: "unknown", label: "Unclassified Tool" };
+  }
+
+  if (isAuthenticBrowser) {
+    return { domain: "browser", label: PERMISSION_DOMAINS.browser.title };
   }
 
   if (
     TERMINAL_TOOL_NAMES.has(normalized) ||
+    TERMINAL_TOOL_NAMES.has(stripped) ||
     PHONE_TOOL_NAMES.has(normalized) ||
-    /^(bash|sh|terminal_|shell_|exec_|process_|build_|test_|project_git_|repair_|mcp__openmausbot-phone__|phone_)/i.test(normalized)
+    PHONE_TOOL_NAMES.has(stripped) ||
+    /^(bash|sh|terminal_|shell_|exec_|process_|build_|test_|project_git_|repair_|mcp__openmausbot-phone__|phone_)/i.test(normalized) ||
+    /^(bash|sh|terminal_|shell_|exec_|process_|build_|test_|project_git_|repair_|phone_)/i.test(stripped)
   ) {
     return { domain: "terminal", label: PERMISSION_DOMAINS.terminal.title };
   }
 
   if (
     FILESYSTEM_TOOL_NAMES.has(normalized) ||
-    /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list)|verify_file|verify_artifact|verify_image)/i.test(normalized)
+    FILESYSTEM_TOOL_NAMES.has(stripped) ||
+    /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list)|verify_file|verify_artifact|verify_image)/i.test(normalized) ||
+    /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list)|verify_file|verify_artifact|verify_image)/i.test(stripped)
   ) {
     return { domain: "filesystem", label: PERMISSION_DOMAINS.filesystem.title };
   }
 
   if (
-    BROWSER_TOOL_NAMES.has(normalized) ||
-    /^(browser_|web_|http_|fetch_|network_|preview_|deployment_|verify_service)/i.test(normalized)
-  ) {
-    return { domain: "browser", label: PERMISSION_DOMAINS.browser.title };
-  }
-
-  if (
     normalized.startsWith("mcp__composio") ||
     normalized.startsWith("composio_") ||
-    /^composio/i.test(normalized)
+    stripped.startsWith("composio_") ||
+    /^composio/i.test(normalized) ||
+    /^composio/i.test(stripped)
   ) {
     return { domain: "composio", label: PERMISSION_DOMAINS.composio.title };
   }
@@ -206,7 +414,7 @@ export function checkToolPermission(
   toolName: string,
   permissions?: AgentPermissionsConfig,
   args?: Record<string, unknown>,
-  extra?: { composioConfigured?: boolean },
+  extra?: { composioConfigured?: boolean; botId?: string; requestingBotId?: string },
 ): PermissionCheckResult {
   const classification = classifyTool(toolName, args);
 
@@ -262,6 +470,25 @@ export function checkToolPermission(
         domain: "filesystem",
         state: "restricted",
       };
+    }
+    // Authoritative cross-bot memory / workspace boundary verification
+    const requestingBot = extra?.requestingBotId ?? extra?.botId ?? (typeof args?.requestingBotId === "string" ? args.requestingBotId : undefined);
+    const pathArg = typeof args?.path === "string" ? args.path : (typeof args?.filePath === "string" ? args.filePath : undefined);
+    if (requestingBot && pathArg) {
+      const memCheck = checkMemoryAccessPermission({
+        requestingBotId: String(requestingBot),
+        targetBotId: String(requestingBot),
+        operation: "read",
+        path: pathArg,
+      });
+      if (!memCheck.allowed) {
+        return {
+          allowed: false,
+          reason: memCheck.error ?? `${ERR_CROSS_BOT_MEMORY_LEAK}: Cross-bot memory access blocked.`,
+          domain: "filesystem",
+          state: "denied",
+        };
+      }
     }
     return { allowed: true, reason: "", domain: "filesystem", state };
   }

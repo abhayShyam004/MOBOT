@@ -200,4 +200,18 @@ describe("shared sentences", () => {
       expect(ANDROID_COMPUTER_SYSTEM_PROMPT).not.toContain(leak);
     }
   });
+
+  it("integrates Authoritative Agent Contract section stably into buildSystemPrompt", async () => {
+    const { compileAgentContractPrompt, JOKE_TELLER_PRESET } = await import("../shared/agent-contract.ts");
+    const contractText = compileAgentContractPrompt(JOKE_TELLER_PRESET);
+    const built = buildSystemPrompt("You are Togepi.", "", [
+      { id: "contract", label: "Authoritative Agent Contract", text: contractText },
+    ]);
+    expect(built.text).toContain("=== AUTHORITATIVE AGENT CONTRACT ===");
+    expect(built.text).toContain("Role: Joke Teller [joke_teller]");
+    expect(built.text).toContain("Creativity Bias: DIVERGENT");
+    // Contract is a stable section, not volatile
+    expect(built.stable).toContain("=== AUTHORITATIVE AGENT CONTRACT ===");
+    expect(built.volatile).not.toContain("=== AUTHORITATIVE AGENT CONTRACT ===");
+  });
 });

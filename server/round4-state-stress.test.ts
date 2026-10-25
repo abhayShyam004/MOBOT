@@ -12,6 +12,18 @@ import {
   resolveEffectiveLocation,
   type UserLocation,
 } from "./location-context.ts";
+import {
+  ERR_MEMORY_HASH_MISMATCH,
+  MemoryStoreError,
+  createMemoryRecord,
+  loadMemoryRecords,
+  reconcileMemoryRecord,
+  retrieveMemoryRecords,
+  saveMemoryRecords,
+  verifyMemoryRecordHash,
+  type StoredMemoryRecord,
+} from "./memory-store.ts";
+import { flushMemoryJournal, readMemoryReconciliationJournal } from "./memory-journal.ts";
 import { parseMemoryPath } from "./memory-store.ts";
 
 describe("Round 4: Bots, Memory, Goals, Watches, Automations and Cross-Context State", () => {
@@ -331,5 +343,184 @@ describe("Round 4: Bots, Memory, Goals, Watches, Automations and Cross-Context S
       expect(wManager.resumeWatch("non-existent-id")).toBeNull();
       expect(await wManager.checkWatch("non-existent-id")).toBeNull();
     });
+  });
+});
+
+describe("Round 4 x Phase 5: reconciliation state stress", () => {
+  // This block is a sibling of the Round 4 suite, so it brings its own
+  // throwaway workspace rather than borrowing one it cannot see. Each test
+  // also gets its own bot id: the audit journal is per bot and lives under
+  // the shared test home, so a fixed id would see the previous test's rows.
+  let tempDir: string;
+  let bot: string;
+  let bots = 0;
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), "omb-round4-recon-"));
+    bot = `bot-recon-stress-${process.pid}-${bots++}`;
+  });
+  afterEach(() => {
+    try {
+      rmSync(tempDir, { recursive: true, force: true });
+    } catch {}
+  });
+
+  function seed(dir: string): StoredMemoryRecord {
+    const record = createMemoryRecord({
+      botId: bot,
+      category: "user_preference",
+      headline: "User prefers TypeScript",
+      detail: "The user prefers TypeScript for all projects.",
+      confidence: 0.95,
+      sourceTurnId: "turn-1",
+    });
+    saveMemoryRecords(bot, [record], { customWorkspaceDir: dir });
+    return record;
+  }
+
+  function change(dir: string, recordId: string, detail: string, confidence = 0.96) {
+    return reconcileMemoryRecord(
+      bot,
+      {
+        actionType: "update",
+        existingRecordId: recordId,
+        replacementDetail: detail,
+        justification: "explicit permanent change",
+        contradictionEvidence: detail,
+        confidenceScore: confidence,
+      },
+      { customWorkspaceDir: dir },
+    );
+  }
+
+  it("survives rapid contradictory preference changes with one active answer", () => {
+    const record = seed(tempDir);
+    let current = change(tempDir, record.id, "The user prefers Python.");
+    for (const detail of ["The user prefers Rust.", "The user prefers Go.", "The user prefers Kotlin."]) {
+      current = change(tempDir, current.record!.id, detail);
+    }
+    const active = loadMemoryRecords(bot, { customWorkspaceDir: tempDir });
+    expect(active).toHaveLength(1);
+    expect(active[0].detail).toBe("The user prefers Kotlin.");
+    expect(verifyMemoryRecordHash(active[0])).toBe(true);
+    const all = loadMemoryRecords(bot, { customWorkspaceDir: tempDir, includeArchived: true });
+    expect(all).toHaveLength(5);
+    expect(all.filter((row) => row.lifecycle === "archived")).toHaveLength(4);
+  });
+
+  it("keeps a concurrent unrelated write when a reconciliation re-reads a changed store", () => {
+    const record = seed(tempDir);
+    const other = createMemoryRecord({
+      botId: bot,
+      category: "stable_identity",
+      headline: "User name",
+      detail: "The user is Abhay.",
+      confidence: 0.99,
+      sourceTurnId: "turn-2",
+    });
+    // a stale snapshot, then another writer appends
+    const snapshot = loadMemoryRecords(bot, { customWorkspaceDir: tempDir, includeArchived: true, includeDeleted: true });
+    saveMemoryRecords(bot, [...snapshot, other], { customWorkspaceDir: tempDir });
+
+    const outcome = reconcileMemoryRecord(
+      bot,
+      {
+        actionType: "update",
+        existingRecordId: record.id,
+        replacementDetail: "The user prefers Python.",
+        justification: "explicit",
+        contradictionEvidence: "switched permanently",
+        confidenceScore: 0.96,
+      },
+      { customWorkspaceDir: tempDir, expectedFileHash: "0".repeat(64) },
+    );
+    expect(outcome.record?.detail).toContain("Python");
+    const active = loadMemoryRecords(bot, { customWorkspaceDir: tempDir });
+    expect(active.some((row) => row.id === other.id)).toBe(true);
+  });
+
+  it("refuses to resurrect a retired belief but keeps retain available on it", () => {
+    const record = seed(tempDir);
+    reconcileMemoryRecord(bot, {
+      actionType: "archive",
+      existingRecordId: record.id,
+      justification: "retired",
+      contradictionEvidence: "new preference",
+      confidenceScore: 0.9,
+    }, { customWorkspaceDir: tempDir });
+
+    expect(() =>
+      change(tempDir, record.id, "The user prefers Python."),
+    ).toThrow(/already archived/);
+
+    const retained = reconcileMemoryRecord(bot, {
+      actionType: "retain",
+      existingRecordId: record.id,
+      justification: "history is unchanged",
+      contradictionEvidence: "no new claim",
+      confidenceScore: 0.6,
+    }, { customWorkspaceDir: tempDir });
+    expect(retained.record?.lifecycle).toBe("archived");
+    expect(retrieveMemoryRecords(bot, "typescript", { customWorkspaceDir: tempDir })).toHaveLength(0);
+  });
+
+  it("surfaces a corrupted store instead of overwriting it", () => {
+    seed(tempDir);
+    writeFileSync(join(tempDir, "memory", "records.json"), "{ torn write");
+    expect(() => loadMemoryRecords(bot, { customWorkspaceDir: tempDir })).toThrowError(MemoryStoreError);
+    try {
+      loadMemoryRecords(bot, { customWorkspaceDir: tempDir });
+    } catch (error) {
+      expect((error as MemoryStoreError).message).toContain(ERR_MEMORY_HASH_MISMATCH);
+    }
+    expect(readFileSync(join(tempDir, "memory", "records.json"), "utf8")).toBe("{ torn write");
+  });
+
+  it("restores reconciled state from disk after a restart", () => {
+    const record = seed(tempDir);
+    change(tempDir, record.id, "The user prefers Python.");
+    // a fresh load is what a restarted process does
+    const active = loadMemoryRecords(bot, { customWorkspaceDir: tempDir });
+    expect(active).toHaveLength(1);
+    expect(active[0].detail).toContain("Python");
+    const archived = loadMemoryRecords(bot, { customWorkspaceDir: tempDir, includeArchived: true })
+      .filter((row) => row.lifecycle === "archived");
+    expect(archived).toHaveLength(1);
+    expect(archived[0].detail).toContain("TypeScript");
+    expect(verifyMemoryRecordHash(archived[0])).toBe(true);
+  });
+
+  it("keeps one audit row per reconciliation across concurrent decisions", async () => {
+    const record = seed(tempDir);
+    change(tempDir, record.id, "The user prefers Python.");
+    const python = loadMemoryRecords(bot, { customWorkspaceDir: tempDir })[0];
+    change(tempDir, python.id, "The user prefers Rust.");
+
+    await flushMemoryJournal(bot);
+    for (let attempt = 0; attempt < 100 && readMemoryReconciliationJournal(bot, 50).length < 2; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      await flushMemoryJournal(bot);
+    }
+    const rows = readMemoryReconciliationJournal(bot, 50);
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => row.action === "reconcile" && row.actionType === "update")).toBe(true);
+    expect(rows[0].priorDetail).toContain("Python");
+    expect(rows[1].priorDetail).toContain("TypeScript");
+  });
+
+  it("leaves no reconcilable state behind when a bot's workspace is removed", () => {
+    seed(tempDir);
+    const workspace = join(tempDir);
+    rmSync(join(workspace, "memory"), { recursive: true, force: true });
+    expect(loadMemoryRecords(bot, { customWorkspaceDir: workspace })).toEqual([]);
+    // a reconciliation for the gone record is a clear 404, not a crash
+    expect(() =>
+      reconcileMemoryRecord(bot, {
+        actionType: "retain",
+        existingRecordId: "gone",
+        justification: "j",
+        contradictionEvidence: "e",
+        confidenceScore: 0.5,
+      }, { customWorkspaceDir: workspace }),
+    ).toThrow(/no such memory record/);
   });
 });

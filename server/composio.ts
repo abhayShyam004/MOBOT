@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
+import { COMPOSIO_CATALOG } from "./composio-catalog.js";
 
 const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
 const DEFAULT_CONNECT_MCP_ENDPOINT = "https://connect.composio.dev/mcp";
@@ -16,7 +17,7 @@ function apiBase() {
 }
 
 function toolkitBase() {
-  return (process.env.OMB_COMPOSIO_TOOLKITS_API ?? `${DEFAULT_BACKEND_ORIGIN}/api/v3`).replace(/\/$/, "");
+  return (process.env.OMB_COMPOSIO_TOOLKITS_API ?? `${DEFAULT_BACKEND_ORIGIN}/api/v3.1`).replace(/\/$/, "");
 }
 
 export function connectMcpEndpoint(cfg?: AppConfig): string {
@@ -956,6 +957,41 @@ function allServiceStates(
   return Object.fromEntries(services);
 }
 
+export async function parseConnectMcpJsonRpc(res: Response): Promise<any> {
+  const raw = await res.text().catch(() => "");
+  if (!raw) return {};
+
+  if (raw.includes("data:")) {
+    const dataLines: string[] = [];
+    for (const line of raw.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("data:")) {
+        dataLines.push(trimmed.slice(5).trim());
+      }
+    }
+    if (dataLines.length > 0) {
+      for (let i = dataLines.length - 1; i >= 0; i--) {
+        try {
+          return JSON.parse(dataLines[i]);
+        } catch {
+          // continue
+        }
+      }
+      try {
+        return JSON.parse(dataLines.join("\n"));
+      } catch {
+        // continue
+      }
+    }
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return {};
+  }
+}
+
 async function queryConnectMcpTools(apiKey: string, endpoint: string): Promise<string[]> {
   const res = await fetch(endpoint, {
     method: "POST",
@@ -968,7 +1004,7 @@ async function queryConnectMcpTools(apiKey: string, endpoint: string): Promise<s
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) return [];
-  const json: any = await res.json().catch(() => ({}));
+  const json: any = await parseConnectMcpJsonRpc(res);
   const tools = json?.result?.tools ?? json?.tools ?? [];
   if (!Array.isArray(tools)) return [];
   return tools.map((t: any) => String(t.name ?? "")).filter(Boolean);
@@ -983,40 +1019,133 @@ function toolkitSlugsFromTools(toolNames: string[]): Set<string> {
   return slugs;
 }
 
-async function connectServicesFromMcp(apiKey: string, endpoint: string): Promise<Record<string, ConnectorServiceState>> {
-  const tools = await queryConnectMcpTools(apiKey, endpoint);
-  const slugs = toolkitSlugsFromTools(tools);
-  return Object.fromEntries(
-    [...slugs].map((slug) => [
-      slug,
-      {
-        connected: true,
-        pending: false,
-        status: "ACTIVE",
-        accounts: [{ id: `connect_${slug}`, status: "ACTIVE" }],
+const knownConnectSlugs = new Set<string>([
+  "github", "slack", "googlecalendar", "gmail", "googledrive", "googlesheets",
+  "notion", "linear", "jira", "discord", "zoom", "twitter", "spotify", "hubspot",
+  "salesforce", "clickup", "airtable", "asana", "trello", "intercom", "zendesk",
+  ...COMPOSIO_CATALOG.slice(0, 100).map((c) => c.slug),
+]);
+
+export async function queryConnectMcpStatuses(
+  apiKey: string,
+  endpoint: string,
+  slugs: string[],
+): Promise<Record<string, ConnectorServiceState>> {
+  const canonicalSlugs = [...new Set(slugs.map(canonicalToolkitSlug))].filter(Boolean);
+  if (canonicalSlugs.length === 0) return {};
+  for (const s of canonicalSlugs) knownConnectSlugs.add(s);
+
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-consumer-api-key": apiKey,
+        accept: "application/json, text/event-stream",
       },
-    ]),
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "COMPOSIO_MANAGE_CONNECTIONS",
+          arguments: {
+            toolkits: canonicalSlugs.map((name) => ({ name, action: "list" })),
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (res.ok) {
+      const json: any = await parseConnectMcpJsonRpc(res);
+      const contentText = json?.result?.content?.[0]?.text;
+      if (contentText && typeof contentText === "string") {
+        try {
+          const inner = JSON.parse(contentText);
+          const results = inner?.data?.results ?? {};
+          const out: Record<string, ConnectorServiceState> = {};
+          for (const slug of canonicalSlugs) {
+            const tkResult = results[slug];
+            const accounts = Array.isArray(tkResult?.accounts) ? tkResult.accounts : [];
+            const hasActiveAccount = accounts.some((a: any) => /^active$/i.test(a.status));
+            const isToolkitActive = /^active$/i.test(tkResult?.status);
+            const isConnected = hasActiveAccount || isToolkitActive;
+            const isPending = !isConnected && (/^initiat/i.test(tkResult?.status) || accounts.some((a: any) => /^(initiated|initializing|pending)$/i.test(a.status)));
+            const publicAccounts = accounts.map((a: any) => ({
+              id: String(a.id || `connect_${slug}`),
+              status: String(a.status || "ACTIVE").toUpperCase(),
+              alias: a.user_info?.login || a.user_info?.name || a.alias || undefined,
+            }));
+
+            if (isConnected) {
+              out[slug] = {
+                connected: true,
+                pending: false,
+                status: "ACTIVE",
+                accounts: publicAccounts.length > 0 ? publicAccounts : [{ id: `connect_${slug}`, status: "ACTIVE" }],
+              };
+            } else if (isPending) {
+              out[slug] = {
+                connected: false,
+                pending: true,
+                status: "INITIATED",
+                accounts: publicAccounts,
+              };
+            } else {
+              out[slug] = {
+                connected: false,
+                pending: false,
+                status: "not_connected",
+                accounts: [],
+              };
+            }
+          }
+          return out;
+        } catch {
+          // fallback
+        }
+      }
+    }
+  } catch {
+    // fallback
+  }
+
+  // Fallback: If COMPOSIO_MANAGE_CONNECTIONS fails or is not mocked in tests, fall back to queryConnectMcpTools
+  try {
+    const tools = await queryConnectMcpTools(apiKey, endpoint);
+    const connected = toolkitSlugsFromTools(tools);
+    return Object.fromEntries(
+      canonicalSlugs.map((slug) => {
+        const isConnected = connected.has(slug);
+        return [
+          slug,
+          {
+            connected: isConnected,
+            pending: false,
+            status: isConnected ? "ACTIVE" : "not_connected",
+            accounts: isConnected ? [{ id: `connect_${slug}`, status: "ACTIVE" }] : [],
+          },
+        ];
+      }),
+    );
+  } catch {
+    return Object.fromEntries(
+      canonicalSlugs.map((slug) => [slug, { connected: false, pending: false, status: "not_connected", accounts: [] }]),
+    );
+  }
+}
+
+async function connectServicesFromMcp(apiKey: string, endpoint: string): Promise<Record<string, ConnectorServiceState>> {
+  const allStatuses = await queryConnectMcpStatuses(apiKey, endpoint, [...knownConnectSlugs]);
+  const connected = Object.fromEntries(
+    Object.entries(allStatuses).filter(([, state]) => state.connected || state.pending),
   );
+  return connected;
 }
 
 async function connectStatusFromMcp(apiKey: string, slugs: string[], endpoint: string): Promise<Record<string, ConnectorServiceState>> {
-  const tools = await queryConnectMcpTools(apiKey, endpoint);
-  const connected = toolkitSlugsFromTools(tools);
-  return Object.fromEntries(
-    slugs.map((slug) => {
-      const canonical = canonicalToolkitSlug(slug);
-      const isConnected = connected.has(canonical);
-      return [
-        slug,
-        {
-          connected: isConnected,
-          pending: false,
-          status: isConnected ? "ACTIVE" : "not_connected",
-          accounts: isConnected ? [{ id: `connect_${canonical}`, status: "ACTIVE" }] : [],
-        },
-      ];
-    }),
-  );
+  return queryConnectMcpStatuses(apiKey, endpoint, slugs);
 }
 
 /**
@@ -1190,6 +1319,66 @@ export async function removeService(cfg: AppConfig, slug: string) {
   return { removed: 1 };
 }
 
+export async function authorizeConnectService(
+  apiKey: string,
+  endpoint: string,
+  toolkit: string,
+  alias?: string | null,
+): Promise<{ url: string }> {
+  const norm = canonicalToolkitSlug(toolkit);
+  knownConnectSlugs.add(norm);
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-consumer-api-key": apiKey,
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "COMPOSIO_MANAGE_CONNECTIONS",
+          arguments: {
+            toolkits: [{ name: norm, action: "add", ...(alias ? { alias } : {}) }],
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+
+    if (res.ok) {
+      const json: any = await parseConnectMcpJsonRpc(res);
+      const contentText = json?.result?.content?.[0]?.text;
+      if (contentText && typeof contentText === "string") {
+        try {
+          const inner = JSON.parse(contentText);
+          const results = inner?.data?.results;
+          const appResult = results?.[norm] ?? results?.[toolkit] ?? (results ? Object.values(results)[0] as any : undefined);
+          if (appResult?.redirect_url && typeof appResult.redirect_url === "string") {
+            return { url: trustedAuthUrl(appResult.redirect_url, norm) };
+          }
+          const textToScan = appResult?.error_message ?? appResult?.instruction ?? contentText;
+          if (typeof textToScan === "string") {
+            const match = textToScan.match(/https:\/\/(?:connect|dashboard)\.composio\.dev\/[^\s)\]]+/);
+            if (match) {
+              return { url: trustedAuthUrl(match[0], norm) };
+            }
+          }
+        } catch {
+          // continue to fallback
+        }
+      }
+    }
+  } catch {
+    // continue to fallback
+  }
+
+  return { url: `https://dashboard.composio.dev/~/org/connect/apps/${encodeURIComponent(norm)}?open=true` };
+}
+
 /** Disconnect exactly one account after proving it belongs to this user/toolkit. */
 export async function removeAccount(cfg: AppConfig, slug: string, accountId: string) {
   if (!validAccountId(accountId)) throw inputError("Invalid connected-account ID");
@@ -1203,6 +1392,35 @@ export async function removeAccount(cfg: AppConfig, slug: string, accountId: str
     if (!response.ok) await throwBrokerError(response, `Connected apps: HTTP ${response.status}`);
     transportSessionBackends.clear();
     return removalResponseSchema.parse(await response.json());
+  }
+  const surface = composioSurface(cfg);
+  if (surface === "connect") {
+    try {
+      await fetch(connectMcpEndpoint(cfg), {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-consumer-api-key": apiKey,
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "COMPOSIO_MANAGE_CONNECTIONS",
+            arguments: {
+              toolkits: [{ name: toolkit, action: "remove", account_id: accountId }],
+            },
+          },
+        }),
+        signal: AbortSignal.timeout(15_000),
+      });
+    } catch {
+      // safe fallback
+    }
+    transportSessionBackends.clear();
+    return { removed: 1 };
   }
   const session = await ensureProjectSession(cfg).catch(() => null);
   const userId = session?.config?.user_id ?? cfg.composio?.userId;
@@ -1244,7 +1462,7 @@ export async function authorizeService(cfg: AppConfig, slug: string, requestedAl
   }
   const surface = composioSurface(cfg);
   if (surface === "connect") {
-    return { url: "https://dashboard.composio.dev" };
+    return authorizeConnectService(apiKey, connectMcpEndpoint(cfg), toolkit, alias);
   }
   const session = await ensureProjectSession(cfg);
   const userId = session.config?.user_id ?? cfg.composio?.userId;
@@ -1344,22 +1562,209 @@ const CURATED: ToolkitCard[] = [
 
 let toolkitCache: { at: number; cards: ToolkitCard[]; identity: string } | null = null;
 
+export interface DiscoveredToolkit {
+  slug: string;
+  label: string;
+  blurb: string;
+}
+
+export async function searchConnectMcpToolkits(
+  apiKey: string,
+  endpoint: string,
+  query: string,
+): Promise<DiscoveredToolkit[]> {
+  const trimmed = query.trim();
+  if (!trimmed) return [];
+  try {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-consumer-api-key": apiKey,
+        accept: "application/json, text/event-stream",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: {
+          name: "COMPOSIO_SEARCH_TOOLS",
+          arguments: {
+            queries: [{ use_case: `find tools and integrations for ${trimmed}` }],
+            search_strategy: "auto",
+            session: { generate_id: true },
+          },
+        },
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (res.status === 401 || res.status === 403) {
+      throw new Error("Composio rejected this consumer key (invalid or unauthorized)");
+    }
+    if (!res.ok) return [];
+    const json = await parseConnectMcpJsonRpc(res);
+    const contentText = json?.result?.content?.[0]?.text;
+    if (!contentText || typeof contentText !== "string") return [];
+
+    let inner: any;
+    try {
+      inner = JSON.parse(contentText);
+    } catch {
+      return [];
+    }
+    const data = inner?.data;
+    if (!data) return [];
+
+    const discovered: DiscoveredToolkit[] = [];
+    const seen = new Set<string>();
+
+    const statuses = Array.isArray(data.toolkit_connection_statuses) ? data.toolkit_connection_statuses : [];
+    for (const item of statuses) {
+      if (!item?.toolkit) continue;
+      const slug = canonicalToolkitSlug(String(item.toolkit));
+      if (!slug || seen.has(slug)) continue;
+      seen.add(slug);
+      const desc = typeof item.description === "string" ? item.description.trim() : "";
+      discovered.push({
+        slug,
+        label: String(item.toolkit).replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+        blurb: desc.slice(0, 90) || "Connect this app so your bot can continue",
+      });
+    }
+
+    const results = Array.isArray(data.results) ? data.results : [];
+    for (const r of results) {
+      const toolkits = Array.isArray(r?.toolkits) ? r.toolkits : [];
+      for (const tk of toolkits) {
+        const slug = canonicalToolkitSlug(String(tk));
+        if (!slug || seen.has(slug)) continue;
+        seen.add(slug);
+        discovered.push({
+          slug,
+          label: String(tk).replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
+          blurb: "Connect this app so your bot can continue",
+        });
+      }
+    }
+
+    return discovered;
+  } catch (err: any) {
+    if (err?.message?.includes("invalid or unauthorized")) {
+      throw err;
+    }
+    return [];
+  }
+}
+
+export function clearToolkitCache(): void {
+  toolkitCache = null;
+}
+
 /**
  * Marketplace catalog. Tries the v3 toolkits API (official names,
  * descriptions, logos — cached 10 min); falls back to the curated list.
  */
-export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard[]; source: "api" | "curated" }> {
+export async function listToolkits(
+  cfg: AppConfig,
+  options?: { query?: string; cursor?: string; limit?: number; refresh?: boolean },
+): Promise<{ cards: ToolkitCard[]; source: "api" | "curated"; totalCount?: number; hasMore?: boolean; nextCursor?: string | null; error?: string }> {
+  if (options?.refresh) {
+    toolkitCache = null;
+  }
   const backendKey = projectApiKey(cfg);
   const broker = backendKey ? null : brokerAccess();
+  const surface = composioSurface(cfg);
+  const isConnect = surface === "connect";
+
+  // In Connect mode, use Connect MCP and curated base
+  if (isConnect && backendKey) {
+    const mcpUrl = connectMcpEndpoint(cfg);
+    const identity = backendFingerprint("connect-catalog", mcpUrl, backendKey);
+    let allCards: ToolkitCard[] = [];
+
+    if (toolkitCache?.identity === identity && Date.now() - toolkitCache.at < 10 * 60_000) {
+      allCards = toolkitCache.cards;
+    } else {
+      allCards = [...COMPOSIO_CATALOG];
+      toolkitCache = { at: Date.now(), cards: allCards, identity };
+    }
+
+    let filteredCards = allCards;
+    let upstreamError: string | undefined;
+
+    if (options?.query && options.query.trim()) {
+      const q = options.query.trim().toLowerCase();
+      filteredCards = allCards.filter(
+        (c) =>
+          c.slug.toLowerCase().includes(q) ||
+          c.label.toLowerCase().includes(q) ||
+          (c.blurb && c.blurb.toLowerCase().includes(q)),
+      );
+
+      // Dynamically discover matching toolkits via Connect MCP across 500+ apps
+      try {
+        const discovered = await searchConnectMcpToolkits(backendKey, mcpUrl, options.query);
+        for (const disc of discovered) {
+          const existingInFiltered = filteredCards.find((c) => c.slug === disc.slug);
+          if (!existingInFiltered) {
+            const newCard: ToolkitCard = {
+              slug: disc.slug,
+              label: disc.label,
+              blurb: disc.blurb,
+              logo: null,
+              domain: null,
+            };
+            filteredCards.push(newCard);
+            if (!allCards.find((c) => c.slug === disc.slug)) {
+              allCards.push(newCard);
+            }
+          }
+        }
+        toolkitCache = { at: Date.now(), cards: allCards, identity };
+      } catch (err: any) {
+        if (err?.message?.includes("invalid or unauthorized")) {
+          upstreamError = err.message;
+        }
+        // Fall back gracefully to filteredCards from curated if network glitch
+      }
+    }
+
+    if (upstreamError) {
+      return {
+        cards: [],
+        source: "api",
+        totalCount: 0,
+        hasMore: false,
+        nextCursor: null,
+        error: upstreamError,
+      };
+    }
+
+    return {
+      cards: filteredCards,
+      source: "api",
+      totalCount: options?.query ? filteredCards.length : allCards.length,
+      hasMore: false,
+      nextCursor: null,
+    };
+  }
+
   const identity = backendKey
     ? backendFingerprint("project-catalog", toolkitBase(), backendKey)
     : broker
       ? backendFingerprint("managed-catalog", broker.url, broker.token)
       : null;
-  if (identity && toolkitCache?.identity === identity && Date.now() - toolkitCache.at < 10 * 60_000) {
-    return { cards: toolkitCache.cards, source: "api" };
-  }
-  if (backendKey || broker) {
+
+  let allCards: ToolkitCard[] = [];
+  let source: "api" | "curated" = "curated";
+  let upstreamCatalogError: string | undefined;
+  let reportedTotalItems: number | undefined;
+
+  if (identity && toolkitCache?.identity === identity && Date.now() - toolkitCache.at < 10 * 60_000 && !options?.query) {
+    allCards = toolkitCache.cards;
+    source = "api";
+    reportedTotalItems = (toolkitCache as any)?.totalItems;
+  } else if (backendKey || broker) {
     try {
       // The marketplace runs to well over a thousand toolkits and the endpoint
       // is cursor-paginated, so one page stops partway through the alphabet.
@@ -1367,24 +1772,38 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
       // one fails — a partial catalog still beats the curated two dozen.
       const items: any[] = [];
       const seenCursors = new Set<string>();
-      let cursor: string | undefined;
+      let cursor: string | undefined = options?.cursor;
       let lastReportedPage: number | undefined;
+
+      const headers: Record<string, string> = backendKey
+        ? (backendKey.startsWith("ck_") ? { "x-consumer-api-key": backendKey } : { "x-api-key": backendKey })
+        : {};
+
       for (let page = 0; page < MAX_CONNECTED_ACCOUNT_PAGES; page += 1) {
-        const params = new URLSearchParams({ limit: "500", sort_by: "usage" });
+        const params = new URLSearchParams({ limit: String(options?.limit || 100), sort_by: "usage" });
         if (cursor) params.set("cursor", cursor);
+        if (options?.query && options.query.trim()) params.set("search", options.query.trim());
         const res = backendKey
           ? await fetch(`${toolkitBase()}/toolkits?${params}`, {
-              headers: { "x-api-key": backendKey },
+              headers,
               signal: AbortSignal.timeout(15_000),
             })
           : await brokerRequest(cursor ? `/v1/catalog?cursor=${encodeURIComponent(cursor)}` : "/v1/catalog", {
               signal: AbortSignal.timeout(15_000),
             });
-        if (!res.ok) break;
+        if (!res.ok) {
+          if (page === 0) {
+            upstreamCatalogError = await responseError(res, `Upstream catalog error (HTTP ${res.status})`);
+          }
+          break;
+        }
         const json: any = await res.json();
-        const pageItems = json.items ?? json.data ?? [];
+        const pageItems = json.items ?? json.data ?? json.toolkits ?? [];
         if (!Array.isArray(pageItems)) break;
         items.push(...pageItems);
+        if (typeof json.total_items === "number" && Number.isFinite(json.total_items)) {
+          reportedTotalItems = json.total_items;
+        }
         // Composio reports current_page and total_pages beside next_cursor.
         // A broker that drops the cursor (or an upstream regression) can replay
         // a page while minting fresh cursors, so trust page movement: once it
@@ -1420,20 +1839,62 @@ export async function listToolkits(cfg: AppConfig): Promise<{ cards: ToolkitCard
         const uniqueCards = cards.filter(
           (card, index) => card.slug && cards.findIndex((candidate) => candidate.slug === card.slug) === index,
         );
-        toolkitCache = { at: Date.now(), cards: uniqueCards, identity: identity! };
-        return { cards: uniqueCards, source: "api" };
+        if (!options?.query) {
+          toolkitCache = { at: Date.now(), cards: uniqueCards, identity: identity!, totalItems: reportedTotalItems } as any;
+        }
+        allCards = uniqueCards;
+        source = "api";
       }
-    } catch {
-      /* fall through to curated */
+    } catch (err: any) {
+      upstreamCatalogError = err instanceof Error ? err.message : String(err);
+      /* fall through to error / curated */
     }
   }
-  return { cards: CURATED, source: "curated" };
+
+  if (upstreamCatalogError && !allCards.length && (backendKey || broker)) {
+    return {
+      cards: [],
+      source: "api",
+      totalCount: 0,
+      hasMore: false,
+      nextCursor: null,
+      error: upstreamCatalogError,
+    };
+  }
+
+  if (!allCards.length) {
+    allCards = COMPOSIO_CATALOG;
+    source = "curated";
+  }
+
+  // Handle client-side search filtering across the complete discovered catalog
+  let filteredCards = allCards;
+  if (options?.query && options.query.trim()) {
+    const q = options.query.trim().toLowerCase();
+    filteredCards = allCards.filter(
+      (c) =>
+        c.slug.toLowerCase().includes(q) ||
+        c.label.toLowerCase().includes(q) ||
+        (c.blurb && c.blurb.toLowerCase().includes(q)),
+    );
+  }
+
+  return {
+    cards: filteredCards,
+    source,
+    totalCount: reportedTotalItems ?? (options?.query ? filteredCards.length : allCards.length),
+    hasMore: Boolean(reportedTotalItems && allCards.length < reportedTotalItems),
+    nextCursor: null,
+    error: upstreamCatalogError,
+  };
 }
+
 
 export async function toolkitCard(cfg: AppConfig, slug: string): Promise<ToolkitCard> {
   const normalized = canonicalToolkitSlug(slug);
   const { cards } = await listToolkits(cfg);
   return cards.find((card) => card.slug.toLowerCase() === normalized)
+    ?? COMPOSIO_CATALOG.find((card) => card.slug === normalized)
     ?? CURATED.find((card) => card.slug === normalized)
     ?? {
       slug: normalized,
@@ -1445,3 +1906,332 @@ export async function toolkitCard(cfg: AppConfig, slug: string): Promise<Toolkit
 }
 
 export const CURATED_SLUGS = CURATED.map((c) => c.slug);
+
+// ── Phase 12 Connected Service Intelligence ─────────────────────────────
+
+export interface ServiceRequirement {
+  serviceName: "gmail" | "github" | "googlecalendar" | "slack" | "linear";
+  actionDescription: string;
+  requiredScopes: string[];
+  connectionStatus: "connected" | "disconnected" | "expired" | "rate_limited";
+  authUrl?: string;
+}
+
+export interface ServiceConnectionSuspension {
+  suspensionId: string;
+  turnId: string;
+  botId: string;
+  requiredService: string;
+  pendingExecutionPayload: Record<string, unknown>;
+  createdAt: number;
+}
+
+export const ERR_OAUTH_TIMEOUT = "ERR_OAUTH_TIMEOUT";
+
+export function getRequiredScopesForService(
+  service: "gmail" | "github" | "googlecalendar" | "slack" | "linear" | string,
+  actionDescription?: string,
+): string[] {
+  const norm = canonicalToolkitSlug(service);
+  const action = (actionDescription ?? "").toLowerCase();
+  switch (norm) {
+    case "gmail":
+      if (action.includes("send") || action.includes("draft") || action.includes("write")) {
+        return ["https://www.googleapis.com/auth/gmail.send"];
+      }
+      return ["https://www.googleapis.com/auth/gmail.readonly"];
+    case "googlecalendar":
+      if (action.includes("create") || action.includes("update") || action.includes("schedule") || action.includes("write")) {
+        return ["https://www.googleapis.com/auth/calendar.events"];
+      }
+      return ["https://www.googleapis.com/auth/calendar.events.readonly"];
+    case "github":
+      if (/\b(?:repo(?:sitory)?|commit|pull(?:\s+request)?|push|branch)\b/i.test(action) || /\bpr\b/i.test(action)) {
+        return ["repo"];
+      }
+      return ["read:user"];
+    case "slack":
+      if (action.includes("post") || action.includes("send") || action.includes("write") || action.includes("chat")) {
+        return ["chat:write"];
+      }
+      return ["channels:read"];
+    case "linear":
+      if (action.includes("create") || action.includes("update") || action.includes("write")) {
+        return ["write"];
+      }
+      return ["read"];
+    default:
+      return [];
+  }
+}
+
+export function sanitizeServicePayload<T>(value: T): T {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") {
+    return value
+      .replace(/ya29\.[a-zA-Z0-9_-]+/g, "[REDACTED_GOOGLE_TOKEN]")
+      .replace(/ghp_[a-zA-Z0-9]+/g, "[REDACTED_GITHUB_TOKEN]")
+      .replace(/gho_[a-zA-Z0-9]+/g, "[REDACTED_GITHUB_OAUTH]")
+      .replace(/xox[baprs]-[a-zA-Z0-9_-]+/g, "[REDACTED_SLACK_TOKEN]")
+      .replace(/lin_api_[a-zA-Z0-9]+/g, "[REDACTED_LINEAR_TOKEN]")
+      .replace(/Bearer\s+[a-zA-Z0-9._~+/-]+=*/gi, "Bearer [REDACTED]")
+      .replace(/\b(ak|ck)_[a-zA-Z0-9]+/g, "[REDACTED_KEY]") as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeServicePayload(item)) as unknown as T;
+  }
+  if (typeof value === "object") {
+    const sensitiveKeys = new Set([
+      "token",
+      "secret",
+      "password",
+      "accesstoken",
+      "access_token",
+      "refreshtoken",
+      "refresh_token",
+      "clientsecret",
+      "client_secret",
+      "apikey",
+      "api_key",
+      "authorization",
+      "auth",
+    ]);
+    const cleaned: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      if (sensitiveKeys.has(k.toLowerCase().replace(/[-_]/g, ""))) {
+        cleaned[k] = "[REDACTED]";
+      } else {
+        cleaned[k] = sanitizeServicePayload(v);
+      }
+    }
+    return cleaned as T;
+  }
+  return value;
+}
+
+export interface CreateSuspensionParams {
+  turnId: string;
+  botId: string;
+  requiredService: "gmail" | "github" | "googlecalendar" | "slack" | "linear" | string;
+  pendingExecutionPayload: Record<string, unknown>;
+  ttlMs?: number;
+}
+
+export interface ResumeSuspensionParams {
+  suspensionId: string;
+  callerBotId: string;
+  authOutcome?: "success" | "cancelled" | "failed";
+}
+
+export interface ResumeSuspensionResult {
+  ok: boolean;
+  suspension?: ServiceConnectionSuspension;
+  error?: string;
+  code?: string;
+  resumed?: boolean;
+}
+
+export class ServiceSuspensionManager {
+  private suspensions = new Map<string, ServiceConnectionSuspension>();
+  private completed = new Set<string>();
+  private expired = new Set<string>();
+  private defaultTtlMs = 10 * 60_000; // 10 minutes
+
+  constructor(defaultTtlMs = 10 * 60_000) {
+    this.defaultTtlMs = defaultTtlMs;
+  }
+
+  createSuspension(params: CreateSuspensionParams): ServiceConnectionSuspension {
+    if (!params.turnId || typeof params.turnId !== "string") {
+      throw new TypeError("turnId is required for ServiceConnectionSuspension");
+    }
+    if (!params.botId || typeof params.botId !== "string") {
+      throw new TypeError("botId is required for ServiceConnectionSuspension");
+    }
+    if (!params.requiredService || typeof params.requiredService !== "string") {
+      throw new TypeError("requiredService is required for ServiceConnectionSuspension");
+    }
+
+    const suspensionId = `susp_${randomUUID()}`;
+    const sanitizedPayload = sanitizeServicePayload(params.pendingExecutionPayload ?? {});
+    const suspension: ServiceConnectionSuspension = {
+      suspensionId,
+      turnId: params.turnId,
+      botId: params.botId,
+      requiredService: canonicalToolkitSlug(params.requiredService),
+      pendingExecutionPayload: JSON.parse(JSON.stringify(sanitizedPayload)),
+      createdAt: Date.now(),
+    };
+
+    this.suspensions.set(suspensionId, suspension);
+    return suspension;
+  }
+
+  getSuspension(suspensionId: string, ttlMs?: number): ServiceConnectionSuspension | null {
+    const suspension = this.suspensions.get(suspensionId);
+    if (!suspension) return null;
+
+    const timeout = ttlMs ?? this.defaultTtlMs;
+    if (Date.now() - suspension.createdAt > timeout) {
+      this.expireSuspension(suspensionId);
+      return null;
+    }
+    return suspension;
+  }
+
+  expireSuspension(suspensionId: string): boolean {
+    const suspension = this.suspensions.get(suspensionId);
+    if (!suspension) return false;
+    this.expired.add(suspensionId);
+    // Sanitize and clear payload upon expiration
+    suspension.pendingExecutionPayload = {};
+    return true;
+  }
+
+  resumeSuspension(params: ResumeSuspensionParams, ttlMs?: number): ResumeSuspensionResult {
+    const { suspensionId, callerBotId, authOutcome = "success" } = params;
+    const suspension = this.suspensions.get(suspensionId);
+
+    if (!suspension) {
+      return {
+        ok: false,
+        error: `Suspension ${suspensionId} not found`,
+        code: "ERR_SUSPENSION_NOT_FOUND",
+      };
+    }
+
+    // Cross-bot replay protection
+    if (suspension.botId !== callerBotId) {
+      return {
+        ok: false,
+        error: `Cross-bot suspension access rejected: suspension belongs to ${suspension.botId}, not ${callerBotId}`,
+        code: "ERR_CROSS_BOT_DENIED",
+      };
+    }
+
+    // Check expiration
+    const timeout = ttlMs ?? this.defaultTtlMs;
+    if (this.expired.has(suspensionId) || Date.now() - suspension.createdAt > timeout) {
+      this.expireSuspension(suspensionId);
+      return {
+        ok: false,
+        error: `OAuth connection timed out after 10 minutes for ${suspension.requiredService}`,
+        code: ERR_OAUTH_TIMEOUT,
+      };
+    }
+
+    // Idempotency: duplicate callback check
+    if (this.completed.has(suspensionId)) {
+      return {
+        ok: true,
+        resumed: false,
+        suspension,
+        error: "Suspension has already been resumed",
+      };
+    }
+
+    if (authOutcome !== "success") {
+      this.expireSuspension(suspensionId);
+      return {
+        ok: false,
+        error: `Authentication failed or cancelled for ${suspension.requiredService}`,
+        code: "ERR_AUTH_FAILED",
+      };
+    }
+
+    this.completed.add(suspensionId);
+    return {
+      ok: true,
+      resumed: true,
+      suspension,
+    };
+  }
+
+  listActiveSuspensions(botId?: string): ServiceConnectionSuspension[] {
+    const now = Date.now();
+    const active: ServiceConnectionSuspension[] = [];
+    for (const [id, s] of this.suspensions) {
+      if (now - s.createdAt <= this.defaultTtlMs && !this.completed.has(id) && !this.expired.has(id)) {
+        if (!botId || s.botId === botId) {
+          active.push(s);
+        }
+      }
+    }
+    return active;
+  }
+
+  clear(): void {
+    this.suspensions.clear();
+    this.completed.clear();
+    this.expired.clear();
+  }
+}
+
+export const defaultServiceSuspensionManager = new ServiceSuspensionManager();
+
+export async function evaluateServiceRequirement(
+  cfg: AppConfig,
+  serviceName: "gmail" | "github" | "googlecalendar" | "slack" | "linear",
+  actionDescription: string,
+): Promise<ServiceRequirement> {
+  const norm = canonicalToolkitSlug(serviceName);
+  const requiredScopes = getRequiredScopesForService(norm, actionDescription);
+
+  let connectionStatusResult: "connected" | "disconnected" | "expired" | "rate_limited" = "disconnected";
+  let authUrl: string | undefined;
+
+  try {
+    const statusMap = await connectionStatus(cfg, [norm]);
+    const serviceState = statusMap[norm] ?? { connected: false, status: "not_connected" };
+
+    if (serviceState.connected || serviceState.status === "ACTIVE") {
+      connectionStatusResult = "connected";
+    } else if (serviceState.status === "EXPIRED") {
+      connectionStatusResult = "expired";
+    } else if (serviceState.status === "RATE_LIMITED" || serviceState.status === "rate_limited") {
+      connectionStatusResult = "rate_limited";
+    } else {
+      connectionStatusResult = "disconnected";
+    }
+
+    if (connectionStatusResult !== "connected") {
+      try {
+        const auth = await authorizeService(cfg, norm);
+        authUrl = auth.url;
+      } catch {
+        authUrl = `https://connect.composio.dev/link/${encodeURIComponent(norm)}`;
+      }
+    }
+  } catch {
+    connectionStatusResult = "disconnected";
+    authUrl = `https://connect.composio.dev/link/${encodeURIComponent(norm)}`;
+  }
+
+  return {
+    serviceName,
+    actionDescription,
+    requiredScopes,
+    connectionStatus: connectionStatusResult,
+    ...(authUrl ? { authUrl } : {}),
+  };
+}
+
+export function createServiceConnectionCardPayload(
+  requirement: ServiceRequirement,
+  suspension: ServiceConnectionSuspension,
+): Record<string, unknown> {
+  const payload = {
+    kind: "service_connection_card",
+    serviceName: requirement.serviceName,
+    actionDescription: requirement.actionDescription,
+    requiredScopes: requirement.requiredScopes,
+    connectionStatus: requirement.connectionStatus,
+    authUrl: requirement.authUrl,
+    suspensionId: suspension.suspensionId,
+    turnId: suspension.turnId,
+    botId: suspension.botId,
+    guidance: `${requirement.serviceName.toUpperCase()} isn't connected yet. ${requirement.actionDescription}`,
+    actionLabel: `Connect ${requirement.serviceName.charAt(0).toUpperCase() + requirement.serviceName.slice(1)}`,
+  };
+  return sanitizeServicePayload(payload);
+}

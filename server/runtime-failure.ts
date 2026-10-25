@@ -315,3 +315,359 @@ export function summarizeStopReason(stopReason: string | null | undefined): Fail
   }
   return summarizeRuntimeFailure({ message: "", terminal: true });
 }
+
+// ── Official Roadmap Phase 10: Autonomous Replanning Authority ──────────────
+
+export type FailureClassification =
+  | "TRANSIENT_NETWORK"
+  | "RATE_LIMIT"
+  | "AUTH_REQUIRED"
+  | "PERMISSION_BLOCKED"
+  | "INVALID_INPUT"
+  | "STRATEGY_INEFFECTIVE"
+  | "RESOURCE_EXHAUSTED";
+
+export interface ReplanDecision {
+  originalAction: string;
+  failureType: FailureClassification;
+  attemptCount: number;
+  maxAttempts: number;
+  recoveryStrategy: "retry_backoff" | "mutate_arguments" | "fallback_tool" | "escalate_to_user";
+  nextAction?: string;
+  userExplanationRequired: boolean;
+  delayMs?: number;
+  alternativeCapability?: { capabilityId: string; operation: string; params?: Record<string, unknown> };
+  userFacingExplanation?: string;
+}
+
+export function classifyFailure(
+  errorOrReport: unknown,
+  _context?: { action?: string; attempts?: number; capabilityId?: string }
+): FailureClassification {
+  const text =
+    typeof errorOrReport === "string"
+      ? errorOrReport
+      : errorOrReport instanceof Error
+        ? errorOrReport.message
+        : JSON.stringify(errorOrReport || "");
+
+  const normalized = text.toLowerCase();
+
+  // 1. Authentication Required
+  if (
+    /\b(?:401|unauthorized|invalid[ _]api[ _]key|api[ _]key[ _]missing|sign[ -]?in[ _]rejected|token[ _]expired|auth[ _]required)\b/i.test(
+      normalized
+    ) ||
+    /sign-in rejected/i.test(normalized) ||
+    /invalid credentials/i.test(normalized)
+  ) {
+    return "AUTH_REQUIRED";
+  }
+
+  // 2. Permission Blocked
+  if (
+    /\b(?:403|forbidden|permission[ _]denied|access[ _]denied|permission[ _]blocked|operation not permitted|eacces)\b/i.test(
+      normalized
+    ) ||
+    /disabled in settings -> permissions/i.test(normalized) ||
+    /not allowed to use/i.test(normalized)
+  ) {
+    return "PERMISSION_BLOCKED";
+  }
+
+  // 3. Rate Limit
+  if (
+    /\b(?:429|rate[ _]?limit|too many requests|slow down|tpm limit|rpm limit)\b/i.test(
+      normalized
+    )
+  ) {
+    return "RATE_LIMIT";
+  }
+
+  // 4. Resource Exhausted
+  if (
+    /\b(?:402|quota|out of credits|insufficient[ _]balance|budget[ _]exhausted|enospc|disk full|out of memory|oom|heap out of memory)\b/i.test(
+      normalized
+    )
+  ) {
+    return "RESOURCE_EXHAUSTED";
+  }
+
+  // 5. Transient Network
+  if (
+    /\b(?:econnrefused|econnreset|etimedout|socket hang up|fetch failed|network error|gateway timeout|bad gateway|502|503|504|stream.*timeout|connection refused)\b/i.test(
+      normalized
+    ) ||
+    /could not reach the provider/i.test(normalized) ||
+    /upstream server failed/i.test(normalized)
+  ) {
+    return "TRANSIENT_NETWORK";
+  }
+
+  // 6. Invalid Input
+  if (
+    /\b(?:400|invalid[ _]input|malformed[ _]request|syntaxerror|bad request|unparseable|invalid parameter|validation failed)\b/i.test(
+      normalized
+    ) ||
+    /the provider refused the request/i.test(normalized)
+  ) {
+    return "INVALID_INPUT";
+  }
+
+  // 7. Strategy Ineffective / Junk Payload / Search empty
+  if (
+    normalized.includes("err_empty_or_junk_payload") ||
+    /no results found/i.test(normalized) ||
+    /0 results/i.test(normalized) ||
+    /strategy.*ineffective/i.test(normalized) ||
+    /corrupted payload/i.test(normalized) ||
+    /empty \(0-byte\) file/i.test(normalized)
+  ) {
+    return "STRATEGY_INEFFECTIVE";
+  }
+
+  return "STRATEGY_INEFFECTIVE";
+}
+
+export function decideReplan(input: {
+  originalAction: string;
+  failureType: FailureClassification;
+  attemptCount: number;
+  maxAttempts?: number;
+  errorReport?: string;
+  availableFallbacks?: Array<{ capabilityId: string; operation: string; params?: Record<string, unknown> }>;
+  params?: Record<string, unknown>;
+  query?: string;
+}): ReplanDecision {
+  const attempt = input.attemptCount;
+
+  switch (input.failureType) {
+    case "TRANSIENT_NETWORK": {
+      const maxAttempts = 3;
+      if (
+        input.params?.port === 18800 ||
+        input.errorReport?.includes("18800")
+      ) {
+        const fallback =
+          input.availableFallbacks && input.availableFallbacks.length > 0
+            ? input.availableFallbacks[0]
+            : { capabilityId: "web.scraper", operation: "search" };
+        return {
+          originalAction: input.originalAction,
+          failureType: "TRANSIENT_NETWORK",
+          attemptCount: attempt,
+          maxAttempts,
+          recoveryStrategy: "fallback_tool",
+          alternativeCapability: fallback,
+          nextAction: `fallback_${fallback.capabilityId}_${fallback.operation}`,
+          userExplanationRequired: false,
+        };
+      }
+      if (attempt === 1) {
+        return {
+          originalAction: input.originalAction,
+          failureType: "TRANSIENT_NETWORK",
+          attemptCount: 1,
+          maxAttempts,
+          recoveryStrategy: "retry_backoff",
+          delayMs: 1000,
+          nextAction: `retry_${input.originalAction}_attempt_2`,
+          userExplanationRequired: false,
+        };
+      }
+      if (attempt === 2) {
+        return {
+          originalAction: input.originalAction,
+          failureType: "TRANSIENT_NETWORK",
+          attemptCount: 2,
+          maxAttempts,
+          recoveryStrategy: "retry_backoff",
+          delayMs: 4000,
+          nextAction: `retry_${input.originalAction}_attempt_3`,
+          userExplanationRequired: false,
+        };
+      }
+      return {
+        originalAction: input.originalAction,
+        failureType: "TRANSIENT_NETWORK",
+        attemptCount: attempt,
+        maxAttempts,
+        recoveryStrategy: "escalate_to_user",
+        userExplanationRequired: true,
+        userFacingExplanation:
+          "Network connection failed after 3 attempts. Please verify host and network connectivity.",
+      };
+    }
+
+    case "RATE_LIMIT": {
+      const maxAttempts = 3;
+      if (attempt < maxAttempts) {
+        return {
+          originalAction: input.originalAction,
+          failureType: "RATE_LIMIT",
+          attemptCount: attempt,
+          maxAttempts,
+          recoveryStrategy: "retry_backoff",
+          delayMs: 2000 * attempt,
+          nextAction: `retry_${input.originalAction}_rate_limit`,
+          userExplanationRequired: false,
+        };
+      }
+      return {
+        originalAction: input.originalAction,
+        failureType: "RATE_LIMIT",
+        attemptCount: attempt,
+        maxAttempts,
+        recoveryStrategy: "escalate_to_user",
+        userExplanationRequired: true,
+        userFacingExplanation:
+          "Rate limit exceeded repeatedly. Please wait a moment or switch provider in Settings.",
+      };
+    }
+
+    case "STRATEGY_INEFFECTIVE": {
+      const maxAttempts = 3;
+      if (
+        input.originalAction.startsWith("fallback_") &&
+        (!input.availableFallbacks || input.availableFallbacks.length === 0)
+      ) {
+        return {
+          originalAction: input.originalAction,
+          failureType: "STRATEGY_INEFFECTIVE",
+          attemptCount: 3,
+          maxAttempts,
+          recoveryStrategy: "escalate_to_user",
+          userExplanationRequired: true,
+          userFacingExplanation:
+            "Both primary and fallback capabilities failed to produce effective results. Terminating gracefully.",
+        };
+      }
+      if (
+        input.params?.port === 18800 ||
+        input.errorReport?.includes("18800")
+      ) {
+        const fallback =
+          input.availableFallbacks && input.availableFallbacks.length > 0
+            ? input.availableFallbacks[0]
+            : { capabilityId: "web.scraper", operation: "search" };
+        return {
+          originalAction: input.originalAction,
+          failureType: "STRATEGY_INEFFECTIVE",
+          attemptCount: 1,
+          maxAttempts,
+          recoveryStrategy: "fallback_tool",
+          alternativeCapability: fallback,
+          nextAction: `fallback_${fallback.capabilityId}_${fallback.operation}`,
+          userExplanationRequired: false,
+        };
+      }
+      if (attempt === 1) {
+        // Attempt 1: Mutate query / parameters
+        return {
+          originalAction: input.originalAction,
+          failureType: "STRATEGY_INEFFECTIVE",
+          attemptCount: 1,
+          maxAttempts,
+          recoveryStrategy: "mutate_arguments",
+          nextAction: `replan_query_reformulated_query_${input.originalAction}`,
+          userExplanationRequired: false,
+        };
+      }
+      if (attempt === 2) {
+        // Attempt 2: Use fallback tool if available, or mutate further
+        const fallback =
+          input.availableFallbacks && input.availableFallbacks.length > 0
+            ? input.availableFallbacks[0]
+            : undefined;
+        return {
+          originalAction: input.originalAction,
+          failureType: "STRATEGY_INEFFECTIVE",
+          attemptCount: 2,
+          maxAttempts,
+          recoveryStrategy: fallback ? "fallback_tool" : "mutate_arguments",
+          alternativeCapability: fallback,
+          nextAction: fallback
+            ? `fallback_${fallback.capabilityId}_${fallback.operation}`
+            : `fallback_strategy_${input.originalAction}`,
+          userExplanationRequired: false,
+        };
+      }
+      return {
+        originalAction: input.originalAction,
+        failureType: "STRATEGY_INEFFECTIVE",
+        attemptCount: attempt,
+        maxAttempts,
+        recoveryStrategy: "escalate_to_user",
+        userExplanationRequired: true,
+        userFacingExplanation:
+          "Action produced ineffective results across all attempted strategies. Please refine prompt instructions.",
+      };
+    }
+
+    case "AUTH_REQUIRED": {
+      // Immediate escalation without retry
+      return {
+        originalAction: input.originalAction,
+        failureType: "AUTH_REQUIRED",
+        attemptCount: attempt,
+        maxAttempts: 1,
+        recoveryStrategy: "escalate_to_user",
+        userExplanationRequired: true,
+        userFacingExplanation:
+          "Sign-in required: Credentials for this provider or service are missing or expired. Please update sign-in in Settings -> Model Providers.",
+      };
+    }
+
+    case "PERMISSION_BLOCKED": {
+      // Immediate escalation without retry
+      return {
+        originalAction: input.originalAction,
+        failureType: "PERMISSION_BLOCKED",
+        attemptCount: attempt,
+        maxAttempts: 1,
+        recoveryStrategy: "escalate_to_user",
+        userExplanationRequired: true,
+        userFacingExplanation:
+          "Permission required: This action was blocked by security policy. Please enable permission in Settings -> Permissions.",
+      };
+    }
+
+    case "INVALID_INPUT": {
+      const maxAttempts = 2;
+      if (attempt === 1) {
+        return {
+          originalAction: input.originalAction,
+          failureType: "INVALID_INPUT",
+          attemptCount: 1,
+          maxAttempts,
+          recoveryStrategy: "mutate_arguments",
+          nextAction: `corrected_input_${input.originalAction}`,
+          userExplanationRequired: false,
+        };
+      }
+      return {
+        originalAction: input.originalAction,
+        failureType: "INVALID_INPUT",
+        attemptCount: attempt,
+        maxAttempts,
+        recoveryStrategy: "escalate_to_user",
+        userExplanationRequired: true,
+        userFacingExplanation:
+          "Input parameters could not be validated or corrected. Please check the requested command arguments.",
+      };
+    }
+
+    case "RESOURCE_EXHAUSTED": {
+      return {
+        originalAction: input.originalAction,
+        failureType: "RESOURCE_EXHAUSTED",
+        attemptCount: attempt,
+        maxAttempts: 1,
+        recoveryStrategy: "escalate_to_user",
+        userExplanationRequired: true,
+        userFacingExplanation:
+          "Resource exhausted: Task budget or credits have been reached. Please check workspace spend cap or quota.",
+      };
+    }
+  }
+}

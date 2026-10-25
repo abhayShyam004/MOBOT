@@ -57,6 +57,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <termios.h>
 #include <unistd.h>
@@ -419,5 +421,121 @@ Java_com_openmausbot_companion_terminal_NativePty_nativeIsTerminal(JNIEnv* env, 
     (void)env;
     (void)cls;
     return isatty((int)fd) == 1 ? JNI_TRUE : JNI_FALSE;
+}
+
+/*
+ * class com.openmausbot.companion.host.NativeIpc
+ * static int listen(String name)  →  the listening descriptor, or <0 as -errno
+ *
+ * The harness end of the memory-integrity bridge: an abstract Unix socket
+ * with a fresh per-spawn name. Abstract because the namespace has no files —
+ * nothing for a same-UID process to unlink, replace, or squat from a stale
+ * boot. The previous channel was the host's stdio *pipes*, and open(2) on a
+ * /proc/<pid>/fd magic link that points at a pipe succeeds for any process
+ * in the same UID — measured on the target device, MAC-request injection and
+ * response reads included. A socket cannot be reopened through that link at
+ * all: open(2) answers ENXIO. What the protocol could never enforce, the
+ * kernel now does.
+ *
+ * SOCK_CLOEXEC: the listener must not outlive this process into anything the
+ * app forks later; it is closed as soon as the host has authenticated.
+ */
+JNIEXPORT jint JNICALL
+Java_com_openmausbot_companion_host_NativeIpc_nativeListen(JNIEnv* env, jclass cls, jstring name) {
+    (void)cls;
+    const char* text = (*env)->GetStringUTFChars(env, name, NULL);
+    if (text == NULL) return -ENOMEM;
+    size_t len = strlen(text);
+    int fd;
+    if (len == 0 || len + 1 > sizeof(((struct sockaddr_un*)0)->sun_path)) {
+        fd = -EINVAL;
+    } else if ((fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0)) < 0) {
+        fd = -errno;
+    } else {
+        struct sockaddr_un addr;
+        memset(&addr, 0, sizeof addr);
+        addr.sun_family = AF_UNIX;
+        memcpy(addr.sun_path + 1, text, len); /* abstract: leading NUL */
+        socklen_t addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + len);
+        if (bind(fd, (struct sockaddr*)&addr, addrlen) != 0 || listen(fd, 4) != 0) {
+            int err = -errno;
+            close(fd);
+            fd = err;
+        }
+    }
+    (*env)->ReleaseStringUTFChars(env, name, text);
+    return fd;
+}
+
+/* Result shape shared by the accept helper: { fd, pid, uid }, fd < 0 = -errno. */
+static jintArray omb_bridge_result(JNIEnv* env, jint fd, jint pid, jint uid) {
+    jintArray result = (*env)->NewIntArray(env, 3);
+    if (result == NULL) return NULL;
+    jint values[3] = { fd, pid, uid };
+    (*env)->SetIntArrayRegion(env, result, 0, 3, values);
+    return result;
+}
+
+/*
+ * static int[] acceptPeer(int listenFd, int timeoutMs, int myUid)
+ *   →  { acceptedFd, peerPid, peerUid }, acceptedFd < 0 = -errno (-EAGAIN =
+ *      the timeout elapsed with no connection, -EACCES = a caller outside
+ *      this UID, whose descriptor is already closed again).
+ *
+ * SO_PEERCRED is the whole point: the credentials come from the kernel at
+ * connect time and cannot be claimed, forged, or replayed. The caller keeps
+ * only the connection whose pid matches the process it just spawned — a
+ * wrong process that dials in is closed, and the accept loop continues.
+ */
+JNIEXPORT jintArray JNICALL
+Java_com_openmausbot_companion_host_NativeIpc_nativeAcceptPeer(JNIEnv* env, jclass cls,
+                                                            jint listenFd, jint timeoutMs, jint myUid) {
+    (void)cls;
+    struct pollfd target;
+    target.fd = (int)listenFd;
+    target.events = POLLIN;
+    target.revents = 0;
+    int ready;
+    do {
+        ready = poll(&target, 1, (int)timeoutMs);
+    } while (ready < 0 && errno == EINTR);
+    if (ready < 0) return omb_bridge_result(env, -errno, 0, 0);
+    if (ready == 0) return omb_bridge_result(env, -EAGAIN, 0, 0);
+    int fd = accept4((int)listenFd, NULL, NULL, SOCK_CLOEXEC);
+    if (fd < 0) return omb_bridge_result(env, -errno, 0, 0);
+    struct ucred peer;
+    socklen_t len = sizeof peer;
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &len) != 0) {
+        int err = -errno;
+        close(fd);
+        return omb_bridge_result(env, err, 0, 0);
+    }
+    if (peer.uid != (uid_t)myUid) {
+        close(fd);
+        return omb_bridge_result(env, -EACCES, 0, 0);
+    }
+    jintArray result = omb_bridge_result(env, (jint)fd, (jint)peer.pid, (jint)peer.uid);
+    if (result == NULL) close(fd);
+    return result;
+}
+
+/*
+ * static int setCloexec(int fd, boolean enabled)  →  0, or <0 as -errno
+ *
+ * The accepted bridge connection must not outlive this process into anything
+ * the app forks later — a PTY session, an MCP child — so the harness marks it
+ * close-on-exec the moment the host has authenticated and before anything
+ * else is spawned.
+ */
+JNIEXPORT jint JNICALL
+Java_com_openmausbot_companion_host_NativeIpc_nativeSetCloexec(JNIEnv* env, jclass cls,
+                                                           jint fd, jboolean enabled) {
+    (void)env;
+    (void)cls;
+    if (fd < 3) return -EINVAL;
+    int flags = fcntl((int)fd, F_GETFD);
+    if (flags < 0) return -errno;
+    flags = enabled ? (flags | FD_CLOEXEC) : (flags & ~FD_CLOEXEC);
+    return fcntl((int)fd, F_SETFD, flags) == 0 ? 0 : -errno;
 }
 

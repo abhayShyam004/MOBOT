@@ -6,6 +6,13 @@
 // The sentences that both the direct-turn and room-turn paths use live
 // here too, so neither path can drift from the other or from the preview.
 import { soulSystemPrompt } from "./bot-folder.ts";
+import { formatDynamicContextForPrompt, type DynamicContextFrame } from "./capabilities/context-pipeline.ts";
+export { compileAgentContractPrompt, resolveAgentContract, type AgentContract } from "../shared/agent-contract.ts";
+export { formatDynamicContextForPrompt, type DynamicContextFrame };
+
+export function dynamicContextPrompt(frame?: DynamicContextFrame): string {
+  return formatDynamicContextForPrompt(frame);
+}
 
 export type PromptPart = { id: string; label: string; text: string };
 export type PromptSection = PromptPart & { bytes: number };
@@ -21,7 +28,7 @@ export type PromptSection = PromptPart & { bytes: number };
  * contract, which relaunched the CLI — and the provider then re-uploaded the
  * entire conversation at the cache-write rate. Mentions did the same on any
  * turn that tagged a bot. */
-const VOLATILE_SECTIONS = new Set(["memory", "mentions", "outstanding", "time"]);
+const VOLATILE_SECTIONS = new Set(["memory", "mentions", "outstanding", "time", "dynamic-context", "capability-selection"]);
 
 export function buildSystemPrompt(
   persona: string,

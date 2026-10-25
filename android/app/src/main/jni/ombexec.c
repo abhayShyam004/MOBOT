@@ -31,16 +31,123 @@
  */
 #include <errno.h>
 #include <limits.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 #define MAX_ARGS 512
 
+/**
+ * Make this process — and the program it is about to exec — unreadable to
+ * other processes in the same UID.
+ *
+ * PR_SET_DUMPABLE=0 makes `/proc/<pid>/fd`, `/proc/<pid>/mem` and
+ * `/proc/<pid>/environ` go through the ptrace access check, which then needs
+ * CAP_SYS_PTRACE. Android app processes never hold that, so a bot's shell
+ * (same UID, no Yama on many devices) can no longer open the host's stdio
+ * pipes and ask the Keystore bridge for MACs. The flag survives a normal
+ * exec with unchanged credentials, which is the whole point of setting it
+ * here rather than inside the runtime.
+ */
+static void harden_process(void) {
+    const char* requested = getenv("OMB_EXEC_NONDUMPABLE");
+    if (requested == NULL || requested[0] != '1') return;
+    if (prctl(PR_SET_DUMPABLE, 0, 0, 0, 0) != 0) {
+        fprintf(stderr, "ombexec: could not disable process dumps: %s\n", strerror(errno));
+    }
+}
+
 static const char* base_name(const char* path) {
     const char* slash = strrchr(path, '/');
     return slash == NULL ? path : slash + 1;
+}
+
+/*
+ * Attach the memory-integrity bridge: dial the harness's abstract Unix
+ * socket (name in OMB_MEMORY_INTEGRITY_SOCK), prove with kernel-provided
+ * SO_PEERCRED that the listener really is this app's harness process (its
+ * pid arrives in OMB_HARNESS_PID, which nothing outside this spawn can
+ * change), then move the connected socket onto fd 0 for the runtime.
+ *
+ * Why a dial-in connection and not an inherited descriptor: Android's
+ * java.lang.Process closes descriptors beyond stdio in the child before
+ * exec, so a harness-created socketpair end never reaches this process —
+ * measured on the target device. A connection needs no inherited fd: the
+ * socket is created here, after the fork.
+ *
+ * Why the credentials check before anything is trusted: the abstract
+ * namespace has no file to replace, but a same-UID process could still bind
+ * this name first and wait for connections. It would then be the peer, and
+ * a peer that answers MAC requests is exactly the signing oracle this
+ * channel exists to prevent. The kernel tells us the listener's true pid;
+ * anything that is not the harness refuses the deal and stops the boot — a
+ * host with no channel must never run as if it had one.
+ *
+ * Returns 0 on success, -1 after writing one honest line to stderr.
+ */
+static int omb_attach_bridge(void) {
+    const char* name = getenv("OMB_MEMORY_INTEGRITY_SOCK");
+    if (name == NULL || name[0] == '\0') return 0; /* no channel requested */
+    const char* pidSpec = getenv("OMB_HARNESS_PID");
+    char* end = NULL;
+    long expected = pidSpec != NULL ? strtol(pidSpec, &end, 10) : -1;
+    if (pidSpec == NULL || end == pidSpec || *end != '\0' || expected <= 0) {
+        fprintf(stderr, "ombexec: OMB_HARNESS_PID is missing; the integrity bridge has no trusted peer\n");
+        return -1;
+    }
+    size_t len = strlen(name);
+    if (len == 0 || len + 1 > sizeof(((struct sockaddr_un*)0)->sun_path)) {
+        fprintf(stderr, "ombexec: OMB_MEMORY_INTEGRITY_SOCK is not a socket name\n");
+        return -1;
+    }
+    int sock = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (sock < 0) {
+        fprintf(stderr, "ombexec: could not create the integrity bridge socket: %s\n", strerror(errno));
+        return -1;
+    }
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof addr);
+    addr.sun_family = AF_UNIX;
+    /* Abstract namespace: sun_path[0] is NUL and the name follows. Nothing
+     * on disk, nothing to unlink or replace. */
+    memcpy(addr.sun_path + 1, name, len);
+    socklen_t addrlen = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + len);
+    if (connect(sock, (struct sockaddr*)&addr, addrlen) != 0) {
+        fprintf(stderr, "ombexec: could not reach the integrity bridge: %s\n", strerror(errno));
+        close(sock);
+        return -1;
+    }
+    struct ucred peer;
+    socklen_t peerLen = sizeof peer;
+    if (getsockopt(sock, SOL_SOCKET, SO_PEERCRED, &peer, &peerLen) != 0) {
+        fprintf(stderr, "ombexec: could not read the integrity bridge peer: %s\n", strerror(errno));
+        close(sock);
+        return -1;
+    }
+    if (peer.pid != (pid_t)expected || peer.uid != getuid()) {
+        fprintf(stderr, "ombexec: integrity bridge peer is pid %ld uid %ld, expected harness pid %ld — refusing the channel\n",
+                (long)peer.pid, (long)peer.uid, expected);
+        close(sock);
+        return -1;
+    }
+    /* fd 0 for the runtime: every process the host spawns replaces fd 0
+     * with its own pipes or PTY, so the channel can never be inherited. */
+    if (dup2(sock, STDIN_FILENO) < 0) {
+        fprintf(stderr, "ombexec: could not attach the integrity bridge to stdin: %s\n", strerror(errno));
+        close(sock);
+        return -1;
+    }
+    if (sock != STDIN_FILENO) close(sock);
+    if (setenv("OMB_MEMORY_INTEGRITY_FD", "0", 1) != 0) {
+        fprintf(stderr, "ombexec: could not publish the integrity bridge descriptor: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 /** Directory containing [path], or 0 when it has none. */
@@ -124,6 +231,36 @@ int main(int argc, char** argv) {
         }
     }
 
+    /* The harness starts the host itself through this launcher with
+     * OMB_EXEC_NODE=1: argv[1] is the JavaScript entry point and the rest is
+     * passed through to the runtime. This exists so the trusted host can be
+     * hidden from same-UID processes before its first line of JavaScript runs
+     * (see harden_process). It is not exposed as a bot command. */
+    if (getenv("OMB_EXEC_NODE") != NULL && strcmp(getenv("OMB_EXEC_NODE"), "1") == 0) {
+        if (argc < 2) {
+            fprintf(stderr, "ombexec: OMB_EXEC_NODE needs a script to run\n");
+            return 127;
+        }
+        char* nodeArgs[MAX_ARGS];
+        if ((size_t)argc > MAX_ARGS - 1) {
+            fprintf(stderr, "ombexec: too many arguments\n");
+            return 127;
+        }
+        nodeArgs[0] = (char*)runtime;
+        for (int i = 1; i < argc; i++) nodeArgs[i] = argv[i];
+        nodeArgs[argc] = NULL;
+
+        /* The integrity bridge comes up before the runtime's first line:
+         * connect, authenticate the harness by kernel peer credentials, and
+         * own fd 0 by the time execve lands. A channel that cannot be built
+         * stops the boot — never a silent downgrade to no Keystore path. */
+        if (omb_attach_bridge() != 0) return 127;
+        harden_process();
+        execv(runtime, nodeArgs);
+        fprintf(stderr, "ombexec: could not run the embedded runtime: %s\n", strerror(errno));
+        return 127;
+    }
+
     /* 2. What does this name mean? A caller-set mapping wins; npm and npx have
      *    built-in entries because the harness already exports their paths. */
     char envName[128];
@@ -135,6 +272,7 @@ int main(int argc, char** argv) {
     }
     if (strcmp(name, "node") == 0) {
         argv[0] = (char*)runtime;
+        harden_process();
         execv(runtime, argv);
         fprintf(stderr, "ombexec: could not run the embedded runtime: %s\n", strerror(errno));
         return 127;
@@ -178,11 +316,13 @@ int main(int argc, char** argv) {
         args[at++] = (char*)target;
         for (int i = 1; i < argc; i++) args[at++] = argv[i];
         args[at] = NULL;
+        harden_process();
         execv(runtime, args);
     } else {
         args[at++] = (char*)target;
         for (int i = 1; i < argc; i++) args[at++] = argv[i];
         args[at] = NULL;
+        harden_process();
         execv(target, args);
     }
     fprintf(stderr, "ombexec: could not run %s for `%s`: %s\n", target, name, strerror(errno));

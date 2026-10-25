@@ -582,4 +582,73 @@ describe("Round 6: Full-System Chaos & Cross-Subsystem Regression", () => {
       });
     });
   });
+
+  describe("8. Phase 9: Self-Evaluation Under System Chaos & Flaky Execution", () => {
+    it("resiliently traps chaos stream of empty, junk, disguised error, and malformed outputs", async () => {
+      const { AgentExecutionLoop } = await import("./capabilities/orchestration.ts");
+      const { ObservabilityBus } = await import("./capabilities/observability.ts");
+      const { ERR_EMPTY_OR_JUNK_PAYLOAD } = await import("./capabilities/safety-policy.ts");
+
+      const bus = new ObservabilityBus();
+      let iteration = 0;
+
+      // Chaotic sequence of failing/junk payloads followed by clean success
+      const chaosPayloads = [
+        { success: true, rawOutput: "", resultSummary: "" }, // empty string
+        { success: true, rawOutput: { results: [] }, resultSummary: "0 results returned" }, // empty search
+        { success: true, rawOutput: { error: "upstream timeout", status: 504 }, resultSummary: "HTTP 200" }, // disguised error
+        { success: true, rawOutput: { size: 0, path: "report.pdf" }, resultSummary: "Wrote report.pdf" }, // empty file
+        { success: true, rawOutput: '{"incomplete": true,', resultSummary: "diagnostics json" }, // corrupted json
+      ];
+
+      const loop = new AgentExecutionLoop({
+        objective: "Perform resilient system health diagnostics producing JSON summary",
+        maxTurns: 10,
+        observabilityBus: bus,
+        stepHandler: async (_plan) => {
+          iteration++;
+          if (iteration <= chaosPayloads.length) {
+            const chaos = chaosPayloads[iteration - 1];
+            return {
+              action: `chaos_step_${iteration}`,
+              success: chaos.success,
+              rawOutput: chaos.rawOutput,
+              resultSummary: chaos.resultSummary,
+            };
+          }
+          // Final clean step
+          return {
+            action: "clean_final_step",
+            success: true,
+            rawOutput: JSON.stringify({ status: "healthy", services: ["auth", "database", "storage"] }),
+            resultSummary: "Clean diagnostics completed successfully with all services healthy",
+          };
+        },
+      });
+
+      // Run until settled across all chaotic steps
+      const finalState = await loop.runUntilSettled();
+
+      expect(iteration).toBe(6);
+      expect(finalState.phase).toBe("complete");
+      expect(finalState.turnNumber).toBe(6);
+      expect(finalState.terminationReason).toBe("goal_achieved");
+
+      // Verify that every single chaos step was trapped as a semantic failure
+      const semanticFailures = bus.getEvents({ type: "AGENT_LOOP_SEMANTIC_FAILURE" });
+      expect(semanticFailures.length).toBe(5);
+
+      // Verify error codes logged for junk
+      const junkEvents = semanticFailures.filter((e) =>
+        String(e.payload.criticism).includes(ERR_EMPTY_OR_JUNK_PAYLOAD)
+      );
+      expect(junkEvents.length).toBe(4);
+
+      // Verify final self-evaluation succeeded
+      const lastEval = loop.getLastSelfEvaluation();
+      expect(lastEval?.semanticSuccess).toBe(true);
+      expect(lastEval?.objectiveCompleted).toBe(true);
+      expect(lastEval?.usefulnessScore).toBeGreaterThanOrEqual(8);
+    });
+  });
 });

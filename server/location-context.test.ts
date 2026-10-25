@@ -3,14 +3,25 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  checkProvenanceFreshness,
+  clearProvenanceDiagnostics,
   clearUserLocation,
+  createProvenanceRecord,
   formatLocationPromptBlock,
+  getLastProvenanceDiagnostic,
+  isProvenanceFresh,
   loadUserLocation,
   localizeSearchQuery,
+  ProvenanceContaminationError,
+  resolveDeviceLocationFromProvider,
   resolveEffectiveLocation,
   resolveLocationIntent,
   saveUserLocation,
+  ScopedLocationStore,
+  validateProvenanceRecord,
   validateUserLocation,
+  type ProvenanceRecord,
+  type ProvenanceSource,
   type UserLocation,
 } from "./location-context.ts";
 import { DATA_DIR } from "./config.ts";
@@ -720,6 +731,371 @@ describe("location-context", () => {
       // Saving must refuse fixtures
       expect(saveUserLocation(mockFixture, tempDir)).toBe(false);
       expect(loadUserLocation(tempDir)).toBeNull();
+    });
+  });
+
+  // =========================================================================
+  // CANONICAL 14 PROVENANCE BOUNDARY TESTS (PHASE 3)
+  // =========================================================================
+  describe("Phase 3 Canonical 14 Provenance Boundary Tests", () => {
+    beforeEach(() => {
+      clearProvenanceDiagnostics();
+    });
+
+    it("Canonical 1: DEVICE_LIVE valid GPS fix within 5-minute TTL", () => {
+      const now = 1700000000000;
+      const res = resolveDeviceLocationFromProvider({
+        permissionGranted: true,
+        rawCoordinates: {
+          latitude: 37.7749,
+          longitude: -122.4194,
+          accuracyMeters: 15,
+        },
+        city: "San Francisco",
+        region: "California",
+        country: "United States",
+        countryCode: "US",
+        collectedAtMs: now - 60_000, // 1 min old
+        ttlMs: 300_000, // 5 min TTL
+        referenceTimeMs: now,
+      });
+
+      expect(res).not.toBeNull();
+      expect(res!.source).toBe("DEVICE_LIVE");
+      expect(res!.confidenceScore).toBeGreaterThanOrEqual(0.95);
+      expect(res!.isSyntheticOrFixture).toBe(false);
+      expect(res!.value.city).toBe("San Francisco");
+      expect(res!.value.latitude).toBe(37.7749);
+      expect(res!.value.longitude).toBe(-122.4194);
+      expect(res!.value.provenance).toBe("DEVICE_LIVE");
+      expect(res!.verificationEvidence).toContain("hardware GPS");
+    });
+
+    it("Canonical 2: DEVICE_LIVE stale fix downgrades to UNKNOWN/UNAVAILABLE", () => {
+      const now = 1700000000000;
+      const staleCollectedAt = now - 301_000; // 5 min + 1 sec
+      const res = resolveDeviceLocationFromProvider({
+        permissionGranted: true,
+        rawCoordinates: {
+          latitude: 37.7749,
+          longitude: -122.4194,
+        },
+        city: "San Francisco",
+        collectedAtMs: staleCollectedAt,
+        ttlMs: 300_000,
+        referenceTimeMs: now,
+      });
+
+      expect(res).not.toBeNull();
+      expect(res!.source).toBe("UNKNOWN/UNAVAILABLE");
+      expect(res!.confidenceScore).toBe(0.0);
+      expect(res!.value.provenance).toBe("UNKNOWN/UNAVAILABLE");
+
+      const diag = getLastProvenanceDiagnostic();
+      expect(diag).not.toBeNull();
+      expect(diag!.code).toBe("ERR_PROVENANCE_STALE");
+      expect(diag!.source).toBe("DEVICE_LIVE");
+    });
+
+    it("Canonical 3: USER_EXPLICIT direct user statement takes precedence and has 1.00 confidence", () => {
+      const explicit = resolveLocationIntent("I am in Kyoto", null);
+      expect(explicit.scope).toBe("explicit_override");
+      expect(explicit.effectiveLocation?.city).toBe("Kyoto");
+      expect(explicit.effectiveLocation?.provenance).toBe("USER_EXPLICIT");
+      expect(explicit.effectiveLocation?.confidenceScore).toBe(1.0);
+
+      const tokyo = resolveLocationIntent("I'm in Tokyo right now", null);
+      expect(tokyo.scope).toBe("explicit_override");
+      expect(tokyo.effectiveLocation?.city).toBe("Tokyo");
+      expect(tokyo.effectiveLocation?.provenance).toBe("USER_EXPLICIT");
+    });
+
+    it("Canonical 4: SAVED_USER persistent profile setting loaded from disk storage", () => {
+      const savedProfile: UserLocation = {
+        city: "Denver",
+        region: "Colorado",
+        country: "United States",
+        provenance: "SAVED_USER",
+        confidenceScore: 0.90,
+        enabled: true,
+      };
+
+      expect(saveUserLocation(savedProfile, tempDir)).toBe(true);
+      const loaded = loadUserLocation(tempDir);
+      expect(loaded).not.toBeNull();
+      expect(loaded!.city).toBe("Denver");
+      expect(loaded!.provenance).toBe("SAVED_USER");
+      expect(loaded!.confidenceScore).toBe(0.90);
+    });
+
+    it("Canonical 5: CONVERSATION_CONTEXT active thread entity discussion does not persist to disk", () => {
+      const eventIntent = resolveLocationIntent("The conference is in Tokyo next month", null);
+      expect(eventIntent.scope).toBe("explicit_override");
+      expect(eventIntent.effectiveLocation?.city).toBe("Tokyo");
+      expect(eventIntent.effectiveLocation?.provenance).toBe("CONVERSATION_CONTEXT");
+
+      // Verify that conversation-only locations are never persisted as saved user location
+      expect(loadUserLocation(tempDir)).toBeNull();
+    });
+
+    it("Canonical 6: UNKNOWN/UNAVAILABLE missing location reports truthfully with zero fabrication", () => {
+      const query = resolveLocationIntent("Where am I?", null);
+      expect(query.scope).toBe("default");
+      expect(query.effectiveLocation).toBeNull();
+      expect(query.reason).toContain("unavailable");
+
+      const prompt = formatLocationPromptBlock(null);
+      expect(prompt).toContain("Status: UNKNOWN/UNAVAILABLE (Provenance: UNKNOWN/UNAVAILABLE)");
+      expect(prompt).toContain("Live device location: UNAVAILABLE");
+      expect(prompt).toContain("Saved default location: NONE");
+      expect(prompt).toContain("ZERO FABRICATION");
+    });
+
+    it("Canonical 7: Timezone strictly never yields physical city", () => {
+      const timezoneOnlyLocation: UserLocation = {
+        timezone: "Asia/Tokyo",
+        provenance: "SAVED_USER",
+        enabled: true,
+      };
+
+      // Asking "Where am I?" with only timezone configured must NOT resolve to Tokyo
+      const query = resolveLocationIntent("Where am I?", timezoneOnlyLocation);
+      expect(query.effectiveLocation).toBeNull();
+
+      // Passing timezone_inferred source must be rejected by validator
+      const inferredLoc: UserLocation = {
+        city: "Tokyo",
+        source: "timezone_inferred",
+        provenance: "SAVED_USER",
+        enabled: true,
+      };
+      expect(validateUserLocation(inferredLoc)).toBeNull();
+
+      // resolveEffectiveLocation must reject timezone-only records
+      const effective = resolveEffectiveLocation({
+        userText: "What city am I in?",
+        savedUserLocation: timezoneOnlyLocation,
+      });
+      expect(effective.effectiveLocation).toBeNull();
+    });
+
+    it("Canonical 8: Synthetic fixture detection and rejection (ERR_PROVENANCE_CONTAMINATION)", () => {
+      const syntheticLoc: UserLocation = {
+        city: "San Francisco",
+        latitude: 37.7749,
+        longitude: -122.4194,
+        provenance: "DEVICE_LIVE",
+        isSyntheticOrFixture: true,
+      };
+
+      // Must be rejected by validation
+      expect(validateUserLocation(syntheticLoc)).toBeNull();
+
+      // Must be rejected by saveUserLocation
+      expect(saveUserLocation(syntheticLoc, tempDir)).toBe(false);
+      expect(getLastProvenanceDiagnostic()?.code).toBe("ERR_PROVENANCE_CONTAMINATION");
+
+      // With throwOnError: true, throws ProvenanceContaminationError
+      expect(() => {
+        saveUserLocation(syntheticLoc, tempDir, { throwOnError: true });
+      }).toThrowError(ProvenanceContaminationError);
+
+      // Rejects from provider resolution
+      const providerRes = resolveDeviceLocationFromProvider({
+        permissionGranted: true,
+        city: "San Francisco",
+        rawCoordinates: { latitude: 37.7749, longitude: -122.4194 },
+        isSyntheticOrFixture: true,
+      });
+      expect(providerRes).toBeNull();
+      expect(getLastProvenanceDiagnostic()?.code).toBe("ERR_PROVENANCE_CONTAMINATION");
+    });
+
+    it("Canonical 9: Confidence score boundary validation ([0.00, 1.00]) and fail-closed rejection", () => {
+      // 1. Valid confidence values: 0, 1, 0.95, 0.5
+      for (const validScore of [0, 1, 0.95, 0.5]) {
+        const record = createProvenanceRecord({
+          value: "test",
+          source: "DEVICE_LIVE",
+          confidenceScore: validScore,
+        });
+        expect(record).not.toBeNull();
+        expect(record!.confidenceScore).toBe(validScore);
+
+        const validated = validateProvenanceRecord({
+          value: "test",
+          source: "DEVICE_LIVE",
+          confidenceScore: validScore,
+          collectedAtMs: Date.now(),
+          expiresAtMs: Date.now() + 1000,
+          isSyntheticOrFixture: false,
+        });
+        expect(validated).not.toBeNull();
+        expect(validated!.confidenceScore).toBe(validScore);
+      }
+
+      // 2. Invalid confidence values: must fail-closed (return null, never clamp)
+      const invalidScores = [
+        -0.001,
+        -1,
+        -999,
+        1.0001,
+        2,
+        999,
+        NaN,
+        Infinity,
+        -Infinity,
+        "0.95" as any,
+        null as any,
+        undefined as any,
+        {} as any,
+      ];
+
+      for (const invalidScore of invalidScores) {
+        // createProvenanceRecord must return null (never clamp to 0 or 1)
+        const record = createProvenanceRecord({
+          value: "test",
+          source: "DEVICE_LIVE",
+          confidenceScore: invalidScore,
+        });
+        expect(record).toBeNull();
+
+        // validateProvenanceRecord must return null
+        const validated = validateProvenanceRecord({
+          value: "test",
+          source: "DEVICE_LIVE",
+          confidenceScore: invalidScore,
+          collectedAtMs: Date.now(),
+          expiresAtMs: Date.now() + 1000,
+          isSyntheticOrFixture: false,
+        });
+        expect(validated).toBeNull();
+      }
+
+      // 3. Confirm diagnostic recorded on failure
+      const diag = getLastProvenanceDiagnostic();
+      expect(diag).not.toBeNull();
+      expect(diag!.code).toBe("ERR_PROVENANCE_INVALID");
+    });
+
+    it("Canonical 10: Expiry handling and isProvenanceFresh", () => {
+      const now = 1700000000000;
+      const record = createProvenanceRecord({
+        value: { city: "San Francisco", provenance: "DEVICE_LIVE" as ProvenanceSource },
+        source: "DEVICE_LIVE",
+        confidenceScore: 0.98,
+        collectedAtMs: now - 100_000,
+        expiresAtMs: now + 200_000,
+      });
+
+      expect(record).not.toBeNull();
+      expect(isProvenanceFresh(record!, now)).toBe(true);
+      expect(isProvenanceFresh(record!, now + 200_001)).toBe(false);
+
+      const freshnessCheck = checkProvenanceFreshness(record!, now + 200_001);
+      expect(freshnessCheck.fresh).toBe(false);
+      expect(freshnessCheck.record.source).toBe("UNKNOWN/UNAVAILABLE");
+      expect(freshnessCheck.record.confidenceScore).toBe(0.0);
+      expect(getLastProvenanceDiagnostic()?.code).toBe("ERR_PROVENANCE_STALE");
+    });
+
+    it("Canonical 11: Persistence provenance constraints prevent non-user-approved disk writes", () => {
+      // Direct attempt to persist synthetic record wrapped inside ProvenanceRecord
+      const wrappedSynthetic: ProvenanceRecord<UserLocation> = {
+        value: {
+          city: "San Francisco",
+          latitude: 37.7749,
+          longitude: -122.4194,
+          provenance: "DEVICE_LIVE",
+        },
+        source: "DEVICE_LIVE",
+        confidenceScore: 0.99,
+        collectedAtMs: Date.now(),
+        expiresAtMs: Date.now() + 300_000,
+        isSyntheticOrFixture: true,
+      };
+
+      expect(saveUserLocation(wrappedSynthetic, tempDir)).toBe(false);
+      expect(getLastProvenanceDiagnostic()?.code).toBe("ERR_PROVENANCE_CONTAMINATION");
+      expect(loadUserLocation(tempDir)).toBeNull();
+    });
+
+    it("Canonical 12: Hardware location permission revocation returns UNKNOWN/UNAVAILABLE", () => {
+      const revokedRes = resolveDeviceLocationFromProvider({
+        permissionGranted: false,
+        rawCoordinates: { latitude: 37.7749, longitude: -122.4194 },
+        city: "San Francisco",
+      });
+
+      expect(revokedRes).not.toBeNull();
+      expect(revokedRes!.source).toBe("UNKNOWN/UNAVAILABLE");
+      expect(revokedRes!.confidenceScore).toBe(0.0);
+      expect(revokedRes!.verificationEvidence).toContain("permission denied or revoked");
+    });
+
+    it("Canonical 13: Cross-thread and cross-bot isolation with ScopedLocationStore", () => {
+      const store = new ScopedLocationStore();
+
+      const locA: UserLocation = {
+        city: "Tokyo",
+        provenance: "CONVERSATION_CONTEXT",
+        enabled: true,
+      };
+
+      // Set for bot1 in thread1
+      store.setLocation("bot1", "thread1", locA);
+
+      // Accessible in bot1 thread1
+      const retrieved = store.getLocation("bot1", "thread1");
+      expect(retrieved).not.toBeNull();
+      expect(retrieved!.value.city).toBe("Tokyo");
+      expect(retrieved!.source).toBe("CONVERSATION_CONTEXT");
+
+      // Isolated from thread2
+      expect(store.getLocation("bot1", "thread2")).toBeNull();
+
+      // Isolated from bot2
+      expect(store.getLocation("bot2", "thread1")).toBeNull();
+
+      // Rejects synthetic fixture
+      store.setLocation("bot1", "thread3", {
+        city: "FakeCity",
+        provenance: "CONVERSATION_CONTEXT",
+        isFixture: true,
+      });
+      expect(store.getLocation("bot1", "thread3")).toBeNull();
+      expect(getLastProvenanceDiagnostic()?.code).toBe("ERR_PROVENANCE_CONTAMINATION");
+
+      // Clean clearing
+      store.clear("bot1", "thread1");
+      expect(store.getLocation("bot1", "thread1")).toBeNull();
+    });
+
+    it("Canonical 14: Natural language intent discrimination (negation, past-tense, third-person)", () => {
+      // 1. Negation with affirmative correction: "I am not in Kyoto. I'm in Osaka."
+      const correction = resolveLocationIntent("I am not in Kyoto. I'm in Osaka.", null);
+      expect(correction.scope).toBe("explicit_override");
+      expect(correction.effectiveLocation?.city).toBe("Osaka");
+      expect(correction.effectiveLocation?.provenance).toBe("USER_EXPLICIT");
+
+      // 2. Negation of default location without replacement drops effective location
+      const defaultLoc: UserLocation = {
+        city: "Denver",
+        provenance: "SAVED_USER",
+        enabled: true,
+      };
+      const negatedDefault = resolveLocationIntent("I am not in Denver right now", defaultLoc);
+      expect(negatedDefault.effectiveLocation).toBeNull();
+
+      // 3. Past-tense mention is omitted from current user location
+      const pastTense = resolveLocationIntent("I visited Kyoto last year", null);
+      expect(pastTense.effectiveLocation).toBeNull();
+      expect(pastTense.scope).toBe("unrelated");
+
+      // 4. Third-person mention is omitted from user location
+      const thirdPerson = resolveLocationIntent("My friend lives in Kyoto", null);
+      expect(thirdPerson.effectiveLocation).toBeNull();
+      expect(thirdPerson.scope).toBe("unrelated");
     });
   });
 });

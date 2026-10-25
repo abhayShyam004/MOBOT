@@ -150,10 +150,21 @@ import {
 import { ComputerControl } from "./computer-control.ts";
 import { sweepThreadEventLogs, type ThreadLogRetentionCandidate } from "./thread-retention.ts";
 import { CapabilitiesManager } from "./capabilities/capabilities-manager.ts";
+import {
+  AgentExecutionLoop,
+  CapabilityOrchestrator,
+  ExecutionLoopTimeoutError,
+  type ExecutionLoopState,
+  type AgentLoopStepPlan,
+  type AgentLoopStepResult,
+  type AgentLoopEvaluationResult,
+} from "./capabilities/orchestration.ts";
 import { defaultTaskEngine } from "./computer-agent/durable-task-engine.ts";
 import { DeviceFileManager } from "./capabilities/device-files.ts";
 import { SmartRecapService, DailyBriefingService, CompletionCardGenerator } from "./capabilities/delight-services.ts";
 import { UniversalSearchService, QuickCaptureService, SmartLinkService, SystemServicesBridge } from "./capabilities/system-services.ts";
+import { sharedDeviceStateRegistry, assembleDynamicContextFrame, formatDynamicContextForPrompt } from "./capabilities/context-pipeline.ts";
+import { sharedObservability } from "./capabilities/observability.ts";
 import { augmentedPath, findCliCandidates, resetPathCache } from "./env-path.ts";
 import { registerEnginesBinDir } from "./engine-install.ts";
 import { appendUsage, parseUsageRange, readUsage, summarizeUsage, usageCsv, USAGE_GROUPINGS, flushUsageLedger, type UsageGroupBy, type UsageTrigger } from "./usage-ledger.ts";
@@ -277,6 +288,7 @@ import { TurnWatchdog } from "./turn-watchdog.ts";
 import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
 import {
   ensureWorkspace,
+  ensureSharedWorkspace,
   ensureTaskWorkspace,
   workspaceLocationsPrompt,
   supportsWorkspaceFiles,
@@ -291,7 +303,14 @@ import {
   loadMemory,
 } from "./workspace.ts";
 import { readMemoryTopic } from "./workspace.ts";
-import { sharedGoalManager } from "./goals.ts";
+import {
+  sharedGoalManager,
+  type CanonicalGoalRecord,
+  type CanonicalGoalMilestone,
+  checkGoalDrift,
+  ERR_GOAL_DRIFT_DETECTED,
+  GOAL_DRIFT_THRESHOLD,
+} from "./goals.ts";
 import { sharedWatchManager } from "./watches.ts";
 import { sharedSwarmCoordinator } from "./specialist-swarm.ts";
 import {
@@ -301,7 +320,21 @@ import {
   memoryOverview,
   openMemoryLocation,
   readMemoryDoc,
+  ingestSharedMarkdown,
+  migrateSharedMarkdownOnce,
+  anchorMemoryIntegrityStores,
+  migrateMemoryIntegrityToNative,
+  loadMemoryRecords,
+  putMemoryRecord,
+  deleteMemoryRecord,
+  compactMemoryStore,
+  retrieveMemoryRecords,
+  queryPartitionedMemory,
+  putSharedMemoryRecord,
+  CrossBotMemoryLeakError,
+  checkMemoryAccessPermission,
 } from "./memory-store.ts";
+import { maybeCrashMemory } from "./memory-crash-point.ts";
 import {
   beginMemoryTurn,
   endMemoryTurn,
@@ -310,6 +343,7 @@ import {
   journalMemoryDelete,
   journalMemoryWrite,
   readMemoryJournal,
+  recordMemorySecurityViolation,
   revertMemoryChange,
   type MemoryJournalEntry,
 } from "./memory-journal.ts";
@@ -364,10 +398,19 @@ import {
   APP_BUILDER_SYSTEM_PROMPT,
   MOBOT_IDENTITY_PROMPT,
   GENERAL_AGENT_RELIABILITY_PROMPT,
+  compileAgentContractPrompt,
+  resolveAgentContract,
   type ComputerPromptKind,
 } from "./system-prompt.ts";
 import { getProjectManager, getRepairLoop, getDeploymentManager } from "./app-builder/app-builder-tools.ts";
-import { defaultCapabilityRegistry } from "./capabilities/capability-registry.ts";
+import { defaultCapabilityRegistry, normalizeCapabilityMatchRequest } from "./capabilities/capability-registry.ts";
+import {
+  verifyAndEnforceTurnTruthfulness,
+  recordActionReceipt,
+  checkLivePhoneControlAvailability,
+} from "./capabilities/action-truthfulness.ts";
+import { defaultReminderManager } from "./reminders.ts";
+
 import { artifactsFromToolOutput, defaultArtifactManager, isUserFacingArtifact } from "./computer-agent/artifact-manager.ts";
 import { readCuaConnection, gatedLocalComputer } from "./local-computer.ts";
 import { extractStructuredContent } from "./structured-extract.ts";
@@ -432,7 +475,7 @@ import {
   describeBrowserEngine,
 } from "./browser-engine.ts";
 import { createScreenFrameSource, type ScreenCapture } from "./screen-frame-source.ts";
-import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews } from "./screen-frame-gate.ts";
+import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews, shouldSurfaceBrowserScreenInChat } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
 import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
 import { ProfileRequestService } from "./profile-requests.ts";
@@ -1796,6 +1839,70 @@ const teamComputers = new TeamComputers(join(DATA_DIR, "team-computers.json"), E
 let followupsReady = false;
 const sendSequencer = new SendSequencer();
 bootSelection = await defaultSelection();
+// Shared memory has one trust boundary: canonical records. The markdown file
+// is a document the person edits, so it is ingested exactly once (a pre-Phase-6
+// upgrade) and on every authorized save — never on boot or at query time,
+// where an appended line would become team-wide context just by waiting for a
+// restart. A line that fails the gate is reported, not trusted.
+try {
+  ensureSharedWorkspace();
+  const migratedShared = migrateSharedMarkdownOnce();
+  if (migratedShared.migrated) {
+    console.log(
+      `shared memory: migrated ${migratedShared.ingested.length} markdown line(s), rejected ${migratedShared.rejected.length}`,
+    );
+  }
+} catch (error) {
+  console.error("shared memory: could not migrate the shared document:", error instanceof Error ? error.message : error);
+}
+// Android: the HMAC authority moved from a wrapped file key into the Keystore.
+// On the one boot that still receives the retired key, verify every store with
+// it and re-seal the manifests under the Keystore authority. A store the old
+// key cannot authenticate is recorded as refused and left untouched (it stays
+// fail-closed); an operational failure keeps the old key in place so nothing
+// becomes unreadable over a transient disk error.
+try {
+  const nativeMigration = migrateMemoryIntegrityToNative(store.bots.map((bot) => bot.id));
+  if (nativeMigration.migrated.length > 0) {
+    console.log(
+      `memory integrity: re-sealed ${nativeMigration.migrated.length} store(s) under the Android Keystore provider`,
+    );
+  }
+  for (const refusal of nativeMigration.refused) {
+    console.error(
+      `memory integrity: refused ${refusal.botId} — the retired key did not authenticate it: ${refusal.reason}`,
+    );
+  }
+  if (nativeMigration.blocked.length > 0) {
+    for (const failure of nativeMigration.blocked) {
+      console.error(`memory integrity: could not migrate ${failure.botId}: ${failure.reason}`);
+    }
+  }
+} catch (error) {
+  console.error(
+    `memory integrity: native provider migration failed: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
+// Android: the freshness anchor is new. One boot is authorized to establish the
+// first anchor for stores that were sealed before it existed; walk the roster
+// while that permission is still held, because a store left unanchored here
+// fails closed on the next boot by design.
+try {
+  const anchored = anchorMemoryIntegrityStores(store.bots.map((bot) => bot.id));
+  if (anchored.anchored.length > 0) {
+    console.log(`memory integrity: anchored ${anchored.anchored.length} store(s) for rollback detection`);
+  }
+  for (const refusal of anchored.refused) {
+    console.error(`memory integrity: anchor refused for ${refusal.botId}: ${refusal.reason}`);
+  }
+  if (!anchored.complete) {
+    console.error("memory integrity: anchor migration did not finish; the next boot retries it");
+  }
+} catch (error) {
+  console.error(
+    `memory integrity: anchor migration failed: ${error instanceof Error ? error.message : String(error)}`,
+  );
+}
 // MOBOT begins with zero bots until explicitly created by the user during onboarding.
 // A committed profile cleanup means both its config deletion and bot-reference
 // cleanup were intended to be durable. Reconcile stale secondary references
@@ -1925,8 +2032,10 @@ function previewSystemPrompt(bot: BotRecord) {
     browserOn: caps?.browserMcp === true && builtInBrowserEnabled(cfg) && bot.browser !== false,
   });
   const privateWorkspace = instance && supportsWorkspaceFiles(instance.driverKind);
+  const previewContract = bot.contract ?? resolveAgentContract(bot);
   const built = buildSystemPrompt(persona, bot.soul ?? "", [
     { id: "reliability", label: "Reliability & Verification", text: GENERAL_AGENT_RELIABILITY_PROMPT },
+    { id: "contract", label: "Authoritative Agent Contract", text: compileAgentContractPrompt(previewContract) },
     {
       id: "setup",
       label: "Setup",
@@ -1949,6 +2058,7 @@ function previewSystemPrompt(bot: BotRecord) {
     { id: "android-computer", label: "This phone", text: caps?.customMcp && customMcpServers(cfg, bot.mcpServers).android_computer ? ANDROID_COMPUTER_SYSTEM_PROMPT : "" },
     { id: "app-builder", label: "App builder", text: caps?.customMcp && customMcpServers(cfg, bot.mcpServers).android_computer ? APP_BUILDER_SYSTEM_PROMPT : "" },
     { id: "browser", label: "Browser", text: previewPlan.browser ? BUILT_IN_BROWSER_SYSTEM_PROMPT : "" },
+    { id: "android-browser", label: "Browser", text: caps?.customMcp && customMcpServers(cfg, bot.mcpServers).android_browser ? ANDROID_BROWSER_SYSTEM_PROMPT : "" },
     { id: "coordination", label: "Team", text: agentsMounted && coordination ? ` ${coordination}` : "" },
     { id: "credential", label: "Credentials", text: agentsMounted ? CREDENTIAL_PROMPT : "" },
     { id: "ask", label: "Questions", text: ASK_PROMPT },
@@ -1956,7 +2066,7 @@ function previewSystemPrompt(bot: BotRecord) {
     { id: "profile", label: "Profile changes", text: agentsMounted ? PROFILE_PROMPT : "" },
     { id: "user-location", label: "User location context", text: formatLocationPromptBlock(loadUserLocation(DATA_DIR)) },
     { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
-    { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: agentsMounted, fileTools: Boolean(privateWorkspace) }) },
+    { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: agentsMounted, fileTools: Boolean(privateWorkspace), includeRawMemory: false }) },
     { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
   ]);
   const totalBytes = built.sections.reduce((n, s) => n + s.bytes, 0);
@@ -3631,6 +3741,19 @@ function notify(notification: Notification | null) {
   if (notification) broadcast({ kind: "notify", notification });
 }
 
+defaultReminderManager.setFilePath(join(DATA_DIR, "reminders.json"));
+defaultReminderManager.setNotificationSender(async (reminder) => {
+  const bot = store.bot(reminder.botId);
+  if (!bot) return true;
+  store.appendMessage(reminder.threadId, {
+    role: "bot",
+    kind: "text",
+    text: `🔔 Reminder: ${reminder.text}`,
+  });
+  notify(buildNotification("done", bot, reminder.threadId, `Reminder: ${reminder.text}`));
+  return true;
+});
+
 // Group threads: the fold needs to know WHO is talking — the turn engine
 // records the active member here before dispatching its turn.
 const groupSpeakers = new Map<string, { botId: string; name: string; color: string }>();
@@ -4633,9 +4756,18 @@ bus.subscribe((event: RuntimeEvent) => {
     let sanitized = m.text ? { ...m, text: stripEmojis(m.text) } : m;
     if (sanitized.role === "bot" && sanitized.text) {
       const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
+      const truthfulness = verifyAndEnforceTurnTruthfulness({
+        threadId: event.threadId,
+        turnId: m.turnId ?? event.turnId,
+        assistantText: sanitized.text,
+        userText: lastUserPrompt,
+      });
+      if (truthfulness.corrected) {
+        console.warn(`[TruthfulnessGuard] Intercepted false action claim in pushMessage (thread ${event.threadId}): ${truthfulness.violations.join("; ")}`);
+      }
       sanitized = {
         ...sanitized,
-        text: enforceResponseLength(sanitized.text, { userPrompt: lastUserPrompt }),
+        text: enforceResponseLength(truthfulness.text, { userPrompt: lastUserPrompt }),
       };
     }
     const message = store.appendMessage(event.threadId, group && m.role === "bot" ? { ...sanitized, from: speaker } : sanitized);
@@ -4707,7 +4839,17 @@ bus.subscribe((event: RuntimeEvent) => {
         }
         const { cleanText, structured } = extractStructuredContent(text);
         const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
-        const boundedText = cleanText ? enforceResponseLength(cleanText, { userPrompt: lastUserPrompt }) : cleanText;
+        const truthfulnessResult = verifyAndEnforceTurnTruthfulness({
+          threadId: event.threadId,
+          turnId: event.turnId,
+          assistantText: cleanText,
+          userText: lastUserPrompt,
+        });
+        if (truthfulnessResult.corrected) {
+          console.warn(`[TruthfulnessGuard] Intercepted false action claim in thread ${event.threadId}: ${truthfulnessResult.violations.join("; ")}`);
+        }
+        const textToEmit = truthfulnessResult.text;
+        const boundedText = textToEmit ? enforceResponseLength(textToEmit, { userPrompt: lastUserPrompt }) : textToEmit;
         pushMessage({
           role: "bot",
           kind: structured && !boundedText ? "structured" : "text",
@@ -4715,6 +4857,7 @@ bus.subscribe((event: RuntimeEvent) => {
           ...(structured ? { structured } : {}),
           turnId: event.turnId,
         });
+
         // kept so "finished" can say what it finished with, rather than
         // just that something ended
         lastReply.set(event.threadId, boundedText);
@@ -5226,7 +5369,14 @@ bus.subscribe((event: RuntimeEvent) => {
             new Promise<null>((resolve) => { timeout = setTimeout(() => resolve(null), SCREEN_SETTLE_TIMEOUT_MS); }),
           ]).then((frame) => {
             if (frame && isCurrent()) {
-              store.insertMessageAfter(event.threadId, settleLeafId, { role: "bot", kind: "screen", png: frame.png, mime: frame.mime });
+              const shouldSurface = frame.surface !== "browser" || shouldSurfaceBrowserScreenInChat({
+                userPrompt: [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text,
+                taskTitle: store.taskByThread(bot.id, event.threadId)?.title,
+              });
+              if (shouldSurface) {
+                settledScreenHashes.set(event.threadId, screenFrameHash(frame.png));
+                store.insertMessageAfter(event.threadId, settleLeafId, { role: "bot", kind: "screen", png: frame.png, mime: frame.mime });
+              }
             }
           }).catch(() => {}).finally(() => {
             clearTimeout(timeout);
@@ -5927,6 +6077,7 @@ async function startOrQueueOpenedThread(
 // Frames stream to clients as SSE {kind:'screen'} (the "Bot's screen"
 // panel); the final frame is folded into the transcript on turn end.
 type Frame = { png: string; mime: string };
+const latestScreens = new Map<string, Frame & { botId: string; threadId: string }>();
 const screenPollers = new Map<
   string,
   {
@@ -5970,9 +6121,10 @@ function startScreenPoller(
   const computer = turnComputerResources.get(threadId);
   const browserSession = currentBrowserSession(botId, botForThread(botId, threadId)?.browserProfile);
   const guarded = (capture: ScreenCapture | undefined, resource: string | undefined): ScreenCapture | undefined =>
-    capture && owner && resource ? async () => {
+    capture && owner ? async () => {
       const isCurrent = () => turnResourceOwners.get(threadId)?.generation === owner.generation &&
-        turnResources.owns(resource, owner) && Boolean(store.taskByThread(botId, threadId) || store.groupByThread(threadId));
+        (!resource || turnResources.owns(resource, owner)) &&
+        Boolean(store.taskByThread(botId, threadId) || store.groupByThread(threadId));
       if (!isCurrent()) throw new Error("this thread does not own that screen");
       const frame = await capture();
       if (!isCurrent()) throw new Error("this thread no longer owns that screen");
@@ -5989,7 +6141,10 @@ function startScreenPoller(
       held: botComputerControlSnapshot(botId, teamComputerTurns.get(threadId)?.computerId).held,
       revision: computerControlRevision.get(botId) ?? 0,
     }),
-    onFrame: (frame) => broadcast({ kind: "screen", botId, threadId, ...frame }),
+    onFrame: (frame) => {
+      latestScreens.set(botId, { png: frame.png, mime: frame.mime, botId, threadId });
+      broadcast({ kind: "screen", botId, threadId, ...frame });
+    },
     minGapMs: SCREEN_MIN_GAP_MS,
   }), {
     timer: null as ReturnType<typeof setInterval> | null,
@@ -6054,10 +6209,11 @@ function shownScreenHash(threadId: string): string | undefined {
  * screen work, so without this its shell-only replies would all end in the
  * same idle desktop. Either way the poller is torn down here, so no
  * per-turn state survives the turn. */
-async function finalScreenFrame(_botId: string, threadId: string): Promise<Frame | null> {
+async function finalScreenFrame(_botId: string, threadId: string): Promise<(Frame & { surface: "browser" | "computer" }) | null> {
   const entry = screenPollers.get(threadId);
   const owner = turnResourceOwners.get(threadId);
   if (!entry) return null;
+  const surface = entry.surface;
   if (entry.timer) clearInterval(entry.timer);
   screenPollers.delete(threadId);
   if (!entry.touched) return null;
@@ -6066,8 +6222,7 @@ async function finalScreenFrame(_botId: string, threadId: string): Promise<Frame
       !store.taskByThread(_botId, threadId)) return null;
   const frame = entry.last;
   if (!frame || !settledFrameIsNews(shownScreenHash(threadId), frame.png)) return null;
-  settledScreenHashes.set(threadId, screenFrameHash(frame.png));
-  return frame;
+  return { png: frame.png, mime: frame.mime, surface };
 }
 
 /** A short title for a fresh thread, from the provider's cheap one-shot
@@ -6554,6 +6709,271 @@ async function startTurn(
     opts?.replyTo,
     cfg.profile?.name?.trim() || "User",
   );
+
+  // Context-aware multi-turn objective normalization
+  let effectiveObjective = userTurnText;
+  const activePathMsgs = store.activePath(threadId);
+  const lastAssistantMsg = activePathMsgs.slice(-2).find((m) => m.role === "bot" || (m.role as string) === "assistant");
+  const previousUserMsg = activePathMsgs.slice(-4, -1).reverse().find((m) => m.role === "user");
+
+  if (
+    /^\s*(?:\d+\s*(?:minutes?|mins?|hours?|hrs?)|half an hour|one hour)\b/i.test(userTurnText) &&
+    (lastAssistantMsg?.text?.match(/duration|how long|calendar|meeting|event/i) ||
+     previousUserMsg?.text?.match(/calendar|schedule|meeting|team sync/i))
+  ) {
+    const origQuery = previousUserMsg?.text || "Schedule team sync meeting on Google Calendar";
+    effectiveObjective = `${origQuery} with duration ${userTurnText}`;
+  }
+
+  // Official Roadmap Phase 11: Intelligent Capability Selection (mobot_54_phases_prompt.md:740-804)
+  const capabilityMatchReq = normalizeCapabilityMatchRequest({
+    objective: effectiveObjective,
+    contextKeywords: [],
+    targetDevice: "android_local",
+    activeBotId: bot.id,
+  });
+  const capabilityResolution = defaultCapabilityRegistry.matchCapability(capabilityMatchReq);
+  sharedObservability.emit("AGENT_LOOP_CAPABILITY_SELECTED", {
+    threadId,
+    botId: bot.id,
+    chosenModality: capabilityResolution.chosenModality,
+    primaryCapabilityId: capabilityResolution.primaryCapabilityId,
+    confidenceScore: capabilityResolution.confidenceScore,
+    justification: capabilityResolution.justification,
+  });
+
+  let capabilityGroundingContext = "";
+  if (capabilityResolution.chosenModality === "web_search") {
+    // Freshness-sensitive factual web query: execute search capability to ground the answer
+    const query = userTurnText
+      .replace(/^(?:what|tell me|who|find|lookup|show|search)\s+(?:were|was|is|are|for)?\s*/i, "")
+      .replace(/[?!.]+$/, "")
+      .trim() || userTurnText;
+    const searchToolId = capabilityResolution.primaryCapabilityId || "web.scraper";
+    try {
+      const searchRes = await defaultCapabilityRegistry.invoke(
+        defaultCapabilityRegistry.has(searchToolId) ? searchToolId : "web.scraper",
+        "search",
+        { query }
+      );
+      if (searchRes.success && searchRes.data) {
+        const data = searchRes.data as any;
+        const results = Array.isArray(data.results) ? data.results : [];
+        if (results.length > 0) {
+          capabilityGroundingContext =
+            `\n\n[Verified Real-Time Search Results via ${searchToolId} for "${query}"]:\n` +
+            results
+              .slice(0, 5)
+              .map((r: any, idx: number) => `${idx + 1}. ${r.title} — ${r.url}\n   ${r.snippet || r.text || ""}`)
+              .join("\n");
+        } else {
+          capabilityGroundingContext =
+            `\n\n[Real-Time Search Attempted via ${searchToolId}]: No search results returned for "${query}". You must truthfully inform the user that live search returned no results rather than generating unverified headlines.`;
+        }
+      } else {
+        capabilityGroundingContext =
+          `\n\n[Real-Time Search Notice]: Search retrieval failed (${searchRes.error?.message || "unavailable"}). You must truthfully inform the user of the retrieval limitation rather than hallucinating search results.`;
+      }
+    } catch (err: any) {
+      capabilityGroundingContext =
+        `\n\n[Real-Time Search Notice]: Search error (${err?.message || String(err)}). Inform the user truthfully that live search could not be executed.`;
+    }
+  } else if (capabilityResolution.chosenModality === "composio_service") {
+    // SaaS service integration: determine required service (gmail, github, googlecalendar, slack, linear)
+    const lowerText = effectiveObjective.toLowerCase();
+    let service: "gmail" | "github" | "googlecalendar" | "slack" | "linear" = "gmail";
+    if (lowerText.includes("calendar") || lowerText.includes("meeting") || lowerText.includes("event") || lowerText.includes("schedule")) {
+      service = "googlecalendar";
+    } else if (lowerText.includes("github") || lowerText.includes("repo") || lowerText.includes("pull request") || lowerText.includes("issue")) {
+      service = "github";
+    } else if (lowerText.includes("slack") || lowerText.includes("channel")) {
+      service = "slack";
+    } else if (lowerText.includes("linear")) {
+      service = "linear";
+    } else if (lowerText.includes("gmail") || lowerText.includes("email") || lowerText.includes("mail")) {
+      service = "gmail";
+    }
+
+    try {
+      const requirement = await composio.evaluateServiceRequirement(cfg, service, effectiveObjective);
+      if (requirement.connectionStatus !== "connected") {
+        const suspension = composio.defaultServiceSuspensionManager.createSuspension({
+          turnId: dispatchClaimId,
+          botId: bot.id,
+          requiredService: service,
+          pendingExecutionPayload: {
+            userTurnText: effectiveObjective,
+            threadId,
+            actionDescription: requirement.actionDescription,
+            requiredScopes: requirement.requiredScopes,
+          },
+        });
+        store.appendMessage(threadId, {
+          role: "bot",
+          kind: "connector",
+          connector: {
+            slug: service,
+            label: service === "googlecalendar" ? "Google Calendar" : service.charAt(0).toUpperCase() + service.slice(1),
+            description: `${service.toUpperCase()} isn't connected yet. Authenticate to proceed with: "${effectiveObjective}".`,
+            status: "required",
+            resumeKey: suspension.suspensionId,
+            authUrl: requirement.authUrl,
+          },
+        });
+        sharedObservability.emit("CONNECTED_SERVICE_SUSPENDED", {
+          suspensionId: suspension.suspensionId,
+          serviceName: service,
+          turnId: dispatchClaimId,
+          botId: bot.id,
+          status: requirement.connectionStatus,
+        });
+
+        recordActionReceipt({
+          operationId: dispatchClaimId,
+          botId: bot.id,
+          threadId,
+          turnId: dispatchClaimId,
+          actionType: service === "googlecalendar" ? "calendar.create_event" : `service.${service}`,
+          status: "UNAVAILABLE",
+          error: {
+            code: "ERR_OAUTH_REQUIRED",
+            message: `${requirement.serviceName} is not connected. Authentication required before proceeding.`,
+          },
+          attemptedAt: Date.now(),
+        });
+
+        capabilityGroundingContext =
+          `\n\n[Connected Service Guidance]: ${requirement.serviceName} is currently ${requirement.connectionStatus}. A connection card with auth URL has been presented in chat. You MUST NOT claim you completed the action. Explain clearly to the user that authentication is required to proceed with their request, and invite them to connect using the card.`;
+      } else {
+        capabilityGroundingContext =
+          `\n\n[Connected Service Verified]: ${requirement.serviceName} is connected and ready for action.`;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      capabilityGroundingContext =
+        `\n\n[Connected Service Notice]: Failed to verify connection for ${service}: ${msg}.`;
+    }
+  } else if (capabilityResolution.chosenModality === "device_gesture" && capabilityResolution.primaryCapabilityId === "device.reminders") {
+    // Schedule reminder through durable ReminderManager
+    let delayMs = 5 * 60 * 1000;
+    const minMatch = userTurnText.match(/(\d+)\s*(?:minutes?|mins?)/i);
+    if (minMatch) delayMs = parseInt(minMatch[1], 10) * 60 * 1000;
+    const secMatch = userTurnText.match(/(\d+)\s*(?:seconds?|secs?)/i);
+    if (secMatch) delayMs = parseInt(secMatch[1], 10) * 1000;
+
+    const textMatch = userTurnText.match(/remind(?:\s+me)?(?:\s+of|\s+to|\s+about)?\s+['"‘“]?([^'”’\n]+?)['"’”]?\s+(?:\d+\s*(?:minutes?|seconds?|hours?)|in\s+\d+|from now)/i);
+    const reminderText = textMatch ? textMatch[1].trim() : userTurnText.replace(/remind(?:\s+me)?/i, "").trim() || "Reminder";
+
+    try {
+      const remRes = await defaultCapabilityRegistry.invoke(
+        "device.reminders",
+        "schedule_reminder",
+        { text: reminderText, delayMs, threadId },
+        { botId: bot.id }
+      );
+
+      if (remRes.success && remRes.data) {
+        const rem = remRes.data as any;
+        recordActionReceipt({
+          operationId: dispatchClaimId,
+          botId: bot.id,
+          threadId,
+          turnId: dispatchClaimId,
+          actionType: "reminder.schedule",
+          status: "SUCCEEDED",
+          evidence: {
+            resourceId: rem.id,
+            metadata: {
+              scheduledFor: rem.scheduledFor,
+              scheduledForFormatted: new Date(rem.scheduledFor).toLocaleTimeString(),
+              text: rem.text,
+            },
+          },
+          attemptedAt: Date.now(),
+        });
+        capabilityGroundingContext = `\n\n[Reminder Scheduled]: Reminder for "${rem.text}" has been successfully scheduled for ${new Date(rem.scheduledFor).toLocaleTimeString()} (ID: ${rem.id}). Inform the user truthfully that it has been scheduled and will be delivered at the target time.`;
+      } else {
+        const errCode = remRes.error?.code || "ERR_SCHEDULE_FAILED";
+        const errMsg = remRes.error?.message || "Failed to schedule reminder";
+        const isUnavailable = remRes.error?.category === "unavailable";
+        recordActionReceipt({
+          operationId: dispatchClaimId,
+          botId: bot.id,
+          threadId,
+          turnId: dispatchClaimId,
+          actionType: "reminder.schedule",
+          status: isUnavailable ? "UNAVAILABLE" : "FAILED",
+          error: { code: errCode, message: errMsg },
+          attemptedAt: Date.now(),
+        });
+        capabilityGroundingContext = `\n\n[Reminder Limitation]: ${errMsg}. Inform the user truthfully of this limitation and provide actionable remediation (such as enabling notification permissions in Android Settings) or a practical alternative.`;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      recordActionReceipt({
+        operationId: dispatchClaimId,
+        botId: bot.id,
+        threadId,
+        turnId: dispatchClaimId,
+        actionType: "reminder.schedule",
+        status: "FAILED",
+        error: { code: "ERR_EXCEPTION", message: msg },
+        attemptedAt: Date.now(),
+      });
+      capabilityGroundingContext = `\n\n[Reminder Error]: ${msg}. Inform the user truthfully.`;
+    }
+  } else if (capabilityResolution.chosenModality === "user_clarification" && capabilityResolution.justification.includes("ERR_NO_CAPABLE_TOOL")) {
+    capabilityGroundingContext = `\n\n[Capability Limitation Notice]: ${capabilityResolution.justification} Inform the user honestly of this limitation.`;
+  }
+
+  // Live Phone Control Status Grounding & Receipt Check
+  const phoneDriverStatus = checkLivePhoneControlAvailability();
+  if (/(?:access|control).*phone|open.*whatsapp|take.*screenshot|capture.*screenshot/i.test(userTurnText)) {
+    if (!phoneDriverStatus.operational) {
+      recordActionReceipt({
+        operationId: dispatchClaimId,
+        botId: bot.id,
+        threadId,
+        turnId: dispatchClaimId,
+        actionType: "device.phone_control",
+        status: "UNAVAILABLE",
+        error: {
+          code: "ERR_DRIVER_OFFLINE",
+          message: phoneDriverStatus.reason || "Device automation driver is offline",
+        },
+        attemptedAt: Date.now(),
+      });
+      capabilityGroundingContext += `\n\n[Phone Control Live Status]: UNAVAILABLE (${phoneDriverStatus.reason || "driver offline"}). The device automation driver is offline in this session. You CANNOT access the user's phone, tap, type, inspect other apps, or open WhatsApp. You must truthfully state that phone control is currently unavailable.`;
+    }
+  }
+
+
+  const dynamicContextFrame = assembleDynamicContextFrame({
+    turnId: dispatchClaimId,
+    botId: bot.id,
+    threadId,
+    query: userTurnText,
+    immediate: {
+      transcript: transcript.map((t) => ({ role: t.role, text: t.text })),
+      attachments: resolvedFiles.files.map((f) => ({
+        id: f.metadata.attachmentId,
+        mimeType: f.metadata.mime,
+        title: f.displayName,
+        content: f.context,
+      })),
+    },
+    persistent: {
+      userPreferences: cfg.profile?.name ? { userName: cfg.profile.name } : {},
+      activeProjectSummary: bot.section ? `Team Section: ${bot.section}` : undefined,
+      stableFacts: bot.description ? [bot.description] : [],
+    },
+    environmental: {
+      deviceState: sharedDeviceStateRegistry.get(),
+      activeWorkspaceRoot: workspaceDir(bot.id),
+      openBrowserTabUrl: undefined,
+    },
+  });
+
   // Decided again at dispatch when setup outlasted a soul edit (config).
   const decideContext = (config: string) => {
     const handedStale = Boolean(handed && (!unseen || (externalUpdate && handed.config !== config)));
@@ -6565,6 +6985,7 @@ async function startTurn(
       fresh,
       externallyUpdated: Boolean(externalContextMarker) || handedStale,
       replaysNatively: instance.driverKind === "grok",
+      contextFrame: dynamicContextFrame,
     });
     // Snapshot the cursor alongside the context decision. An external result
     // can arrive during async computer/setup work and clear the task cursor;
@@ -6585,7 +7006,7 @@ async function startTurn(
     const carried = [...skipTranscript];
     const windowIds = replayable.slice(-40).map((m) => m.id);
     return {
-      turnText: withUnseenMessages(unseenBlock, contextTurnText),
+      turnText: withUnseenMessages(unseenBlock, contextTurnText + capabilityGroundingContext),
       resumeCursor, recoveryText, recoveryIsReplay,
       handoff: strictResume ? {
         botId: bot.id, instanceId, config, resumeCursor: typeof resumeCursor === "string" ? resumeCursor : undefined,
@@ -6669,6 +7090,18 @@ async function startTurn(
       // never pre-allowed, so every call rides the normal permission flow.
       if (instance.adapter.capabilities.customMcp === true) {
         const custom = customMcpServers(cfg, bot.mcpServers);
+        if (custom.android_browser && "env" in custom.android_browser) {
+          custom.android_browser = {
+            ...custom.android_browser,
+            env: { ...custom.android_browser.env, OMB_BOT_ID: bot.id },
+          };
+        }
+        if (custom.android_computer && "env" in custom.android_computer) {
+          custom.android_computer = {
+            ...custom.android_computer,
+            env: { ...custom.android_computer.env, OMB_BOT_ID: bot.id },
+          };
+        }
         if (Object.keys(custom).length) integrations.custom = custom;
       }
       // CLI engines work inside the bot's own workspace directory rather
@@ -7201,15 +7634,38 @@ async function startTurn(
           browserCapture = () => browserRuntime.withAgentAction(session, () => agentBrowserFrame(frame));
         }
       }
+      if (!browserCapture) {
+        const androidBrowserPort = Number(process.env.AB_DRIVER_PORT ?? "0");
+        const androidBrowserToken = process.env.AB_DRIVER_TOKEN ?? "";
+        if (androidBrowserPort > 0 && androidBrowserToken && liveBot?.browser !== false && bot.browser !== false) {
+          const digest = createHash("sha256").update(bot.id).digest("hex").slice(0, 32);
+          const session = `omb-${digest}`;
+          const sessionUrl = `http://127.0.0.1:${androidBrowserPort}/session/${session}/screenshot`;
+          browserCapture = async () => {
+            const res = await fetch(sessionUrl, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                Authorization: `Bearer ${androidBrowserToken}`,
+              },
+            });
+            if (!res.ok) throw new Error(`android browser driver HTTP ${res.status}`);
+            const buf = Buffer.from(await res.arrayBuffer());
+            return { png: buf.toString("base64"), format: "jpeg" };
+          };
+          const browserSession = currentBrowserSession(bot.id, liveBot?.browserProfile ?? bot.browserProfile);
+          claimTurnResource(resourceOwner, `browser:${browserSession}`);
+        }
+      }
       // An Auto conversation remembers where its first turn landed, so later
       // turns stay there and the composer can show it. Explicit settings are
       // not recorded: changing the bot's Works on should move its threads.
       if (bot.computer === undefined && !teamComputer && opts?.runOn !== "cloud" && !plan.pinned) {
-        const used = mountedComputer ?? (integrations.browser ? "browser" : null);
+        const used = mountedComputer ?? (integrations.browser || browserCapture || integrations.custom?.android_browser ? "browser" : null);
         if (used) store.patchTask(bot.id, threadId, { surface: used });
       }
       const computerSelection = computerSelectionTurns.get(threadId);
-      if (computerSelection) computerSelection.mounted = mountedComputer ?? (integrations.browser ? "browser" : undefined);
+      if (computerSelection) computerSelection.mounted = mountedComputer ?? (integrations.browser || browserCapture || integrations.custom?.android_browser ? "browser" : undefined);
       // A cancelled adapter can be between accepting sendTurn and revealing
       // its provider turn id. Never overlap a replacement with that ambiguous
       // pre-id window: wait for the old handshake to settle or for its bounded
@@ -7234,8 +7690,11 @@ async function startTurn(
         coordinationNode.parentId ? roomHandoffs.nodes.get(coordinationNode.parentId) : undefined))) {
         throw new DirectTurnSetupCancelled("Coordination access changed before dispatch");
       }
+      const turnBot = liveBot ?? bot;
+      const turnContract = turnBot.contract ?? resolveAgentContract(turnBot);
       const prompt = buildSystemPrompt(persona, liveBot?.soul ?? bot.soul ?? "", [
         { id: "reliability", label: "Reliability & Verification", text: GENERAL_AGENT_RELIABILITY_PROMPT },
+        { id: "contract", label: "Authoritative Agent Contract", text: compileAgentContractPrompt(turnContract) },
         // first after the soul: the block names agent tools, so it only goes
         // to a turn whose engine actually mounted them (setupMode is already
         // false when they are not — see agentsMounted above)
@@ -7266,15 +7725,21 @@ async function startTurn(
         { id: "user-location", label: "User location context", text: formatLocationPromptBlock(loadUserLocation(DATA_DIR)) },
         { id: "learn", label: "Skill authoring", text: learnPrompt },
         { id: "section-context", label: "Section context", text: sectionContextSystemPrompt(bot.section) },
+        { id: "dynamic-context", label: "Dynamic Context", text: formatDynamicContextForPrompt(dynamicContextFrame) },
         // what the bot said lately in its other conversations, so a task
         // never redoes — or forgets — what another one already did
         { id: "recent", label: "Recent work", text: recentWorkPrompt(recentWork(store, bot, { userName: cfg.profile?.name?.trim() || "User", currentThreadId: threadId })) },
-        { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: Boolean(integrations.agents), fileTools: worksInWorkspace }) },
+        { id: "memory", label: "Memory", text: memorySystemPrompt(bot.id, { managedWrites: Boolean(integrations.agents), fileTools: worksInWorkspace, includeRawMemory: false }) },
         { id: "skills", label: "Skills index", text: privateWorkspace ? skillsSystemPrompt(bot.id) : "" },
         { id: "skill-instructions", label: "Skill instructions", text: skillInstructions },
         { id: "playbooks", label: "Playbooks", text: packagePlaybooks },
         { id: "webhook", label: "Webhook provenance", text: opts?.automationSource === "webhook" ? WEBHOOK_PROMPT : "" },
         { id: "mentions", label: "Mentions", text: boundedCoordination && tagged.length ? `The user named these existing teammates: ${tagged.map(b => `${peerName(b.name)} (${b.id})`).join(", ")}. Use coordinate_bots when their contribution is needed; do not substitute native helper agents for these bots.` : mentionPrompt(tagged) },
+        {
+          id: "capability-selection",
+          label: "Capability Selection",
+          text: ` Capability Selection: Modality resolved to ${capabilityResolution.chosenModality} (confidence: ${capabilityResolution.confidenceScore}). ${capabilityResolution.justification}`,
+        },
       ]);
       runningTurnEngines.set(threadId, instance);
       // The prompt carries the soul as saved now. If it changed during setup,
@@ -8922,7 +9387,7 @@ async function runGroupMemberTurn(
     const drift = checkSoulDrift(bot.id, bot.soul ?? "", bot.soulHash ?? "");
     if (drift.drift !== Boolean(bot.soulDrift)) store.patchBot(bot.id, { soulDrift: drift.drift });
   }
-  const roomMemory = memorySystemPrompt(bot.id, { managedWrites: Boolean(integrations.agents), fileTools: worksInWorkspace });
+  const roomMemory = memorySystemPrompt(bot.id, { managedWrites: Boolean(integrations.agents), fileTools: worksInWorkspace, includeRawMemory: false });
   // The same brief a 1:1 turn gets: what this member said lately in its
   // other conversations, so a standup is answered from what happened. A
   // brief can carry a private chat into the room; as with session_search
@@ -8940,8 +9405,11 @@ async function runGroupMemberTurn(
       });
     }
   }
-  const roomSystem = buildSystemPrompt(system, store.bot(bot.id)?.soul ?? bot.soul ?? "", [
+  const roomBot = store.bot(bot.id) ?? bot;
+  const roomContract = roomBot.contract ?? resolveAgentContract(roomBot);
+  const roomSystem = buildSystemPrompt(system, roomBot.soul ?? bot.soul ?? "", [
     { id: "reliability", label: "Reliability & Verification", text: GENERAL_AGENT_RELIABILITY_PROMPT },
+    { id: "contract", label: "Authoritative Agent Contract", text: compileAgentContractPrompt(roomContract) },
     { id: "files", label: "File locations", text: workspace ? workspaceLocationsPrompt(bot.id, cwd, readyBot.cwd) : "" },
     { id: "mcp", label: "MCP servers", text: customMcpPrompt(Object.keys(integrations.custom ?? {})) },
     { id: "computer", label: "Computer", text: computerPrompt(roomTeamComputer ? instance.driverKind === "boxAgent" ? "box-agent" : "box" : roomVmTarget ? localVmMode(cfg) === "per-bot" ? "vm-private" : "vm-shared" : null) },
@@ -11001,6 +11469,7 @@ function wellKnownDocsUrl(instanceId: string): string | undefined {
 
 async function describeInstances() {
   const configs = instanceConfigs(cfg);
+  const preferredDefault = cfg.defaultModelSelection;
   return (await registry.describe()).map((instance) => {
     const entry = configs[instance.instanceId];
     const docsUrl = instance.install?.docsUrl ?? wellKnownDocsUrl(instance.instanceId);
@@ -11010,14 +11479,23 @@ async function describeInstances() {
       ...described, readOnly: true, managed: managedDesktop.info(instance.instanceId),
       install: undefined, authentication: undefined, cli: undefined, cliCandidates: [],
     };
-    if (entry?.driver !== "claudeAgent") return described;
+    const isPreferredInstance = preferredDefault?.instanceId === instance.instanceId;
+    const selectedModel = isPreferredInstance && preferredDefault?.model && instance.models.options.some((o) => o.id === preferredDefault.model)
+      ? preferredDefault.model
+      : undefined;
+    const withDefaultModel = {
+      ...described,
+      ...(selectedModel ? { models: { ...described.models, default: selectedModel } } : {}),
+      isDefault: isPreferredInstance,
+    };
+    if (entry?.driver !== "claudeAgent") return withDefaultModel;
     try {
       const claudeAccount = claudeAccountInfo(instance.instanceId, entry, instance.cli ?? instance.cliDefault ?? "claude");
-      return { ...described, claudeAccount, install: { ...instance.install, signInCommand: claudeAccount.signInCommand } };
+      return { ...withDefaultModel, claudeAccount, install: { ...withDefaultModel.install, signInCommand: claudeAccount.signInCommand } };
     } catch {
       // A malformed saved config remains a repairable shadow, never takes
       // the model picker down or offers a login for the wrong directory.
-      return { ...described, install: { ...instance.install, signInCommand: undefined } };
+      return { ...withDefaultModel, install: { ...withDefaultModel.install, signInCommand: undefined } };
     }
   });
 }
@@ -11269,11 +11747,34 @@ function json(res: ServerResponse, status: number, body: unknown) {
  * the editor can show the bot's version instead of guessing. Anything else
  * is a real failure and goes to the handler's catch-all. */
 function replyMemoryError(res: ServerResponse, error: unknown) {
+  if (error instanceof CrossBotMemoryLeakError || (error as { code?: string })?.code === "ERR_CROSS_BOT_MEMORY_LEAK") {
+    return json(res, 403, {
+      error: (error as Error).message,
+      code: "ERR_CROSS_BOT_MEMORY_LEAK",
+      category: "permission_denied",
+    });
+  }
   if (!(error instanceof MemoryStoreError)) throw error;
   if (error.code === "conflict") {
     return json(res, error.status, { error: error.message, code: error.code, currentHash: error.currentHash, current: error.current });
   }
   return json(res, error.status, { error: error.message, code: error.code });
+}
+
+/** One refusal path for a declared requester reaching another bot's memory.
+ * The store already audits its own denials; a route that refuses before the
+ * store is called must audit too, or the same attempt would be recorded or
+ * not depending on which URL it was aimed at. */
+function refuseCrossBotMemory(
+  res: ServerResponse,
+  requestingBotId: string,
+  targetBotId: string,
+  operation: "read" | "write" | "query",
+  path?: string,
+) {
+  const permission = checkMemoryAccessPermission({ requestingBotId, targetBotId, operation, path });
+  recordMemorySecurityViolation({ requestingBotId, targetBotId, operation, path, reason: permission.error });
+  return replyMemoryError(res, new CrossBotMemoryLeakError(requestingBotId, targetBotId, permission.error));
 }
 
 /** The journal row as the panel shows it: the full prior text stays on
@@ -13732,6 +14233,31 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       }
 
       sseClients.add(client);
+      if (client.screens) {
+        const sentBots = new Set<string>();
+        for (const [threadId, entry] of screenPollers) {
+          const last = entry.last;
+          if (last) {
+            sentBots.add(entry.botId);
+            const seq = ++lastSeq;
+            const payload = { kind: "screen", botId: entry.botId, threadId, ...last, seq };
+            try {
+              res.write(`id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify(payload)}\n\n`);
+            } catch {}
+          } else {
+            void entry.capture();
+          }
+        }
+        for (const [botId, screen] of latestScreens) {
+          if (!sentBots.has(botId)) {
+            const seq = ++lastSeq;
+            const payload = { kind: "screen", botId, threadId: screen.threadId, png: screen.png, mime: screen.mime, seq };
+            try {
+              res.write(`id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify(payload)}\n\n`);
+            } catch {}
+          }
+        }
+      }
       // Keep this long-lived response out of socket idle-timeout handling
       // without weakening timeouts for every other API request.
       req.socket.setTimeout(0);
@@ -14197,6 +14723,24 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const body = (await readBody(req)) || {};
       const target = typeof body.dir === "string" ? body.dir : "downloads";
       return json(res, 200, { report: dev.organizeDownloads(target) });
+    }
+
+    if (method === "GET" && path === "/api/device/state") {
+      const state = sharedDeviceStateRegistry.get();
+      return json(res, 200, {
+        state,
+        fresh: sharedDeviceStateRegistry.isFresh(),
+      });
+    }
+
+    if (method === "POST" && path === "/api/device/state") {
+      const body = (await readBody(req)) || {};
+      const updated = sharedDeviceStateRegistry.update({
+        batteryLevel: typeof body.batteryLevel === "number" ? body.batteryLevel : undefined,
+        isCharging: typeof body.isCharging === "boolean" ? body.isCharging : undefined,
+        networkType: ["wifi", "cellular", "none"].includes(body.networkType) ? body.networkType : undefined,
+      });
+      return json(res, 200, { state: updated });
     }
 
     // ── Phase 5: Self-Updating MOBOT & Official Release Update System ──
@@ -16562,6 +17106,80 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 200, { goal: updated });
     }
 
+    // ── Bot Canonical Goals (Official Phase 8: mobot_54_phases_prompt.md:592-640) ──
+    m = path.match(/^\/api\/bots\/([\w-]+)\/canonical-goals$/);
+    if (m) {
+      const botId = m[1];
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      if (method === "GET") {
+        return json(res, 200, { canonicalGoals: sharedGoalManager.listCanonicalGoals(botId) });
+      }
+      if (method === "POST") {
+        const body = await readBody(req);
+        if (!body || typeof body.originatingPrompt !== "string" || !body.formalObjective) {
+          return json(res, 400, { error: "originatingPrompt and formalObjective are required" });
+        }
+        const record = sharedGoalManager.createCanonicalGoal({
+          id: body.id,
+          botId,
+          originatingPrompt: body.originatingPrompt,
+          formalObjective: body.formalObjective,
+          constraints: body.constraints,
+          successCriteria: body.successCriteria,
+          milestones: body.milestones,
+        });
+        return json(res, 201, { canonicalGoal: record });
+      }
+    }
+
+    m = path.match(/^\/api\/bots\/([\w-]+)\/canonical-goals\/([\w-]+)$/);
+    if (m) {
+      const [, botId, goalId] = m;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const record = sharedGoalManager.getCanonicalGoal(goalId);
+      if (!record || record.botId !== botId) return json(res, 404, { error: "no such canonical goal" });
+      if (method === "GET") {
+        return json(res, 200, { canonicalGoal: record });
+      }
+      if (method === "PUT") {
+        const body = await readBody(req);
+        try {
+          const updated = sharedGoalManager.updateCanonicalGoal(goalId, body);
+          return json(res, 200, { canonicalGoal: updated });
+        } catch (err: any) {
+          return json(res, 400, { error: err.message });
+        }
+      }
+      if (method === "DELETE") {
+        sharedGoalManager.deleteCanonicalGoal(goalId);
+        return json(res, 200, { ok: true });
+      }
+    }
+
+    m = path.match(/^\/api\/bots\/([\w-]+)\/canonical-goals\/([\w-]+)\/milestones\/([\w-]+)$/);
+    if (m && method === "PUT") {
+      const [, botId, goalId, milestoneId] = m;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const record = sharedGoalManager.getCanonicalGoal(goalId);
+      if (!record || record.botId !== botId) return json(res, 404, { error: "no such canonical goal" });
+      const body = await readBody(req);
+      const status = body?.status || "completed";
+      const updated = sharedGoalManager.updateCanonicalMilestone(goalId, milestoneId, status, body?.verifiedAt);
+      if (!updated) return json(res, 404, { error: "no such canonical goal or milestone" });
+      return json(res, 200, { canonicalGoal: updated });
+    }
+
+    m = path.match(/^\/api\/bots\/([\w-]+)\/canonical-goals\/([\w-]+)\/resume$/);
+    if (m && method === "GET") {
+      const [, botId, goalId] = m;
+      if (!store.bot(botId)) return json(res, 404, { error: "no such bot" });
+      const record = sharedGoalManager.getCanonicalGoal(goalId);
+      if (!record || record.botId !== botId) return json(res, 404, { error: "no such canonical goal" });
+      const resumed = sharedGoalManager.resumeCanonicalGoal(goalId);
+      if (!resumed) return json(res, 404, { error: "no such canonical goal" });
+      return json(res, 200, resumed);
+    }
+
     // ── Bot Watches (Part 3: World Awareness / Watch System) ──────────────
     m = path.match(/^\/api\/bots\/([\w-]+)\/watches$/);
     if (m) {
@@ -16690,6 +17308,122 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       return json(res, 200, { bot: visible });
     }
 
+    // ── Phase 6 Partitioned Memory Routes ────────────────────────────────
+    // Phase 6: one query, two partitions, never merged. The limits are bounded
+    // here as well as in the store, so a caller cannot ask for a whole-partition
+    // dump by passing a large or negative number.
+    m = path.match(/^\/api\/memory\/partitioned\/query$/);
+    if (m && method === "POST") {
+      const parsed = z
+        .object({
+          botId: z.string().min(1).max(128),
+          queryText: z.string().default(""),
+          includeShared: z.boolean().default(true),
+          maxSharedSnippets: z.number().int().min(0).max(50).default(5),
+          maxSpecializedSnippets: z.number().int().min(0).max(50).default(5),
+          // A caller that says it is a bot is held to that identity instead of
+          // having the claim ignored: asking for another bot's partition as
+          // Bot A is a cross-bot read and fails closed. The person's own admin
+          // console simply omits it.
+          requestingBotId: z.string().min(1).max(128).optional(),
+        })
+        .safeParse(await readBody(req));
+      if (!parsed.success) {
+        return json(res, 400, { error: "Invalid partitioned query payload: " + (parsed.error.issues[0]?.message ?? "") });
+      }
+      const { requestingBotId, ...queryInput } = parsed.data;
+      if (!store.bot(queryInput.botId)) return json(res, 404, { error: "no such bot" });
+      try {
+        const result = queryPartitionedMemory(queryInput, {
+          store,
+          ...(requestingBotId ? { requestingBotId } : {}),
+        });
+        return json(res, 200, { ok: true, ...result });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+
+    m = path.match(/^\/api\/memory\/shared$/);
+    if (m && method === "GET") {
+      try {
+        ensureSharedWorkspace();
+        const overview = memoryOverview("shared");
+        return json(res, 200, {
+          ...overview,
+          text: readMemoryDoc("shared", MEMORY_INDEX).text,
+          truncated: overview.index.truncated,
+        });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+    if (m && method === "PUT") {
+      const parsed = z
+        .object({ text: z.string(), expectedHash: z.string().optional() })
+        .safeParse(await readBody(req));
+      if (!parsed.success) return json(res, 400, { error: "text must be a string" });
+      try {
+        ensureSharedWorkspace();
+        // The person owns the shared partition, and a save carries the hash it
+        // read for the same reason the bot editor's does: a bot may have
+        // written a shared record between the read and the save.
+        const { doc } = journalMemoryWrite("shared", MEMORY_INDEX, parsed.data.text, {
+          actor: "person",
+          via: "api",
+          ...(parsed.data.expectedHash ? { expectedHash: parsed.data.expectedHash } : {}),
+        });
+        // The person is authorized to edit this document, but a line still has
+        // to clear the shared gate to become model context. The write above
+        // already ingested the saved text; this second pass only collects the
+        // lines the gate refused (they are skipped as already-known otherwise),
+        // so the reply can name them instead of silently reinterpreting a save.
+        const ingestedShared = ingestSharedMarkdown(doc.text, {
+          sourceTurnId: "person-edit",
+        });
+        return json(res, 200, {
+          ok: true,
+          hash: doc.hash,
+          truncated: memoryCapacity(doc.text).truncated,
+          ...(ingestedShared.rejected.length > 0
+            ? { rejected: ingestedShared.rejected.map((entry) => entry.line) }
+            : {}),
+        });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+
+    m = path.match(/^\/api\/memory\/shared\/records$/);
+    if (m && method === "GET") {
+      try {
+        ensureSharedWorkspace();
+        const records = loadMemoryRecords("shared", { includeArchived: url.searchParams.get("archived") === "true" });
+        return json(res, 200, { ok: true, partition: "shared", records, count: records.length });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+    if (m && method === "POST") {
+      const parsed = z
+        .object({
+          category: z.enum(["stable_identity", "user_preference", "active_project", "episodic_event"]),
+          headline: z.string().min(1).max(300),
+          detail: z.string().min(1).max(2500),
+          confidence: z.number().min(0).max(1),
+          sourceTurnId: z.string().default("api"),
+        })
+        .safeParse(await readBody(req));
+      if (!parsed.success) return json(res, 400, { error: parsed.error.issues[0]?.message ?? "Invalid memory record payload" });
+      try {
+        ensureSharedWorkspace();
+        const result = putSharedMemoryRecord(parsed.data);
+        return json(res, 200, { ok: true, ...result });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+
     // ── bot memory: MEMORY.md + memory/ topic and log files ──────────────
     // The files already belong to the person (plain markdown in the bot's
     // workspace). server/memory-store.ts decides which paths can be reached
@@ -16730,14 +17464,19 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/file$/);
     if (m && method === "GET") {
       if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      const requestingBotId = typeof req.headers["x-requesting-bot-id"] === "string" ? req.headers["x-requesting-bot-id"] : undefined;
       try {
-        return json(res, 200, readMemoryDoc(m[1], url.searchParams.get("path") ?? MEMORY_INDEX));
+        return json(res, 200, readMemoryDoc(m[1], url.searchParams.get("path") ?? MEMORY_INDEX, { requestingBotId }));
       } catch (error) {
         return replyMemoryError(res, error);
       }
     }
     if (m && method === "PUT") {
       if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      const requestingBotId = typeof req.headers["x-requesting-bot-id"] === "string" ? req.headers["x-requesting-bot-id"] : undefined;
+      if (requestingBotId && requestingBotId !== m[1]) {
+        return refuseCrossBotMemory(res, requestingBotId, m[1], "write");
+      }
       const parsed = z
         .object({ path: z.string().default(MEMORY_INDEX), text: z.string(), expectedHash: z.string().optional() })
         .safeParse(await readBody(req));
@@ -16795,6 +17534,93 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
       const opened = await openMemoryLocation(m[1], parsed.data.target);
       if (!opened.ok) return json(res, 500, { error: opened.error, workspacePath: opened.workspacePath });
       return json(res, 200, opened);
+    }
+    // ── Phase 4 Structured Memory Records ──
+    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/records$/);
+    if (m && method === "GET") {
+      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      const requestingBotId = typeof req.headers["x-requesting-bot-id"] === "string" ? req.headers["x-requesting-bot-id"] : undefined;
+      if (requestingBotId && requestingBotId !== m[1]) {
+        return refuseCrossBotMemory(res, requestingBotId, m[1], "read");
+      }
+      try {
+        const records = loadMemoryRecords(m[1], { includeArchived: url.searchParams.get("archived") === "true" });
+        return json(res, 200, { ok: true, botId: m[1], records, count: records.length });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+    if (m && method === "POST") {
+      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      const requestingBotId = typeof req.headers["x-requesting-bot-id"] === "string" ? req.headers["x-requesting-bot-id"] : undefined;
+      if (requestingBotId && requestingBotId !== m[1]) {
+        return refuseCrossBotMemory(res, requestingBotId, m[1], "write");
+      }
+      const parsed = z
+        .object({
+          category: z.enum(["stable_identity", "user_preference", "active_project", "episodic_event"]),
+          headline: z.string().min(1).max(300),
+          detail: z.string().min(1).max(2500),
+          confidence: z.number().min(0).max(1),
+          sourceTurnId: z.string().default("api"),
+        })
+        .safeParse(await readBody(req));
+      if (!parsed.success) return json(res, 400, { error: parsed.error.issues[0]?.message ?? "Invalid memory record payload" });
+      try {
+        const result = putMemoryRecord(m[1], parsed.data, { requestingBotId });
+        // Crash-injection boots (preview device tests only): die once the
+        // answer is on the wire, which is the one transition the store itself
+        // cannot produce. No effect when the variable is unset.
+        setImmediate(() => maybeCrashMemory("after-response"));
+        return json(res, 200, { ok: true, ...result });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/records\/([\w-]+)$/);
+    if (m && method === "DELETE") {
+      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      const requestingBotId = typeof req.headers["x-requesting-bot-id"] === "string" ? req.headers["x-requesting-bot-id"] : undefined;
+      if (requestingBotId && requestingBotId !== m[1]) {
+        return refuseCrossBotMemory(res, requestingBotId, m[1], "write");
+      }
+      try {
+        const deleted = deleteMemoryRecord(m[1], m[2], { requestingBotId });
+        return json(res, 200, { ok: true, deleted, recordId: m[2] });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/records\/compact$/);
+    if (m && method === "POST") {
+      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      try {
+        const result = compactMemoryStore(m[1]);
+        return json(res, 200, { ok: true, ...result });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
+    }
+    m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/records\/query$/);
+    if (m && method === "POST") {
+      if (!store.bot(m[1])) return json(res, 404, { error: "no such bot" });
+      const parsed = z
+        .object({
+          query: z.string().default(""),
+          limit: z.number().min(1).max(20).optional(),
+          category: z.enum(["stable_identity", "user_preference", "active_project", "episodic_event"]).optional(),
+        })
+        .safeParse(await readBody(req));
+      if (!parsed.success) return json(res, 400, { error: "Invalid query payload" });
+      try {
+        const results = retrieveMemoryRecords(m[1], parsed.data.query, {
+          limit: parsed.data.limit,
+          category: parsed.data.category,
+        });
+        return json(res, 200, { ok: true, results, count: results.length });
+      } catch (error) {
+        return replyMemoryError(res, error);
+      }
     }
     m = path.match(/^\/api\/bots\/([\w-]+)\/memory\/topics\/([^/]+)$/);
     if (m && method === "GET") {
@@ -17866,7 +18692,16 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
     // child proves it is OURS by echoing its pid (a stray dev server has
     // the same API shape but a different pid)
     if (method === "GET" && path === "/api/health") {
-      return json(res, 200, { app: "openmausbot", pid: process.pid, static: Boolean(STATIC_DIR) });
+      // The Android harness compares this pid with the pid its kernel proved
+      // when it accepted this host on the integrity bridge. There is no token:
+      // a secret in a same-UID process was measurable through /proc, while the
+      // bridge fd cannot be reopened or handed to another process.
+      return json(res, 200, {
+        app: "openmausbot",
+        pid: process.pid,
+        port: Number(process.env.OMB_PORT ?? 0),
+        static: Boolean(STATIC_DIR),
+      });
     }
     // The bots' browser engine: install it on this machine (agent-browser +
     // a Chrome for Testing, a one-time download), or ask how that is going.
@@ -19075,8 +19910,29 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     // ── connectors (Composio) ──
     if (method === "GET" && path === "/api/connectors/catalog") {
-      const { cards, source } = await composio.listToolkits(cfg);
-      return json(res, 200, { configured: composio.configured(cfg), mode: composio.connectionMode(cfg), source, cards });
+      const q = url.searchParams.get("query") || url.searchParams.get("q") || undefined;
+      const cursor = url.searchParams.get("cursor") || undefined;
+      const limit = url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : undefined;
+      const refresh = url.searchParams.get("refresh") === "true";
+      const isConfigured = composio.configured(cfg);
+      const result = await composio.listToolkits(cfg, { query: q, cursor, limit, refresh });
+      if (result.error && isConfigured) {
+        return json(res, 502, {
+          error: result.error,
+          configured: true,
+          mode: composio.connectionMode(cfg),
+          source: "error",
+        });
+      }
+      return json(res, 200, {
+        configured: isConfigured,
+        mode: composio.connectionMode(cfg),
+        source: result.source,
+        cards: result.cards,
+        totalCount: result.totalCount ?? result.cards.length,
+        hasMore: result.hasMore ?? false,
+        nextCursor: result.nextCursor ?? null,
+      });
     }
     if (method === "GET" && path === "/api/connectors/connected") {
       const availability = composio.connectorAvailability(cfg);
@@ -19659,3 +20515,18 @@ const gracefulShutdown = createGracefulShutdown({
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, gracefulShutdown);
 }
+
+export {
+  AgentExecutionLoop,
+  CapabilityOrchestrator,
+  ExecutionLoopTimeoutError,
+  type ExecutionLoopState,
+  type AgentLoopStepPlan,
+  type AgentLoopStepResult,
+  type AgentLoopEvaluationResult,
+  type CanonicalGoalRecord,
+  type CanonicalGoalMilestone,
+  checkGoalDrift,
+  ERR_GOAL_DRIFT_DETECTED,
+  GOAL_DRIFT_THRESHOLD,
+};

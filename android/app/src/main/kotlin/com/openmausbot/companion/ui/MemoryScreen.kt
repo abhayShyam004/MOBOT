@@ -60,6 +60,9 @@ fun MemoryScreen(botId: String, onBack: () -> Unit) {
     val bot = remember(state, botId) { state.bot(botId) }
 
     var overview by remember { mutableStateOf<MemoryOverview?>(null) }
+    var shared by remember { mutableStateOf<MemoryOverview?>(null) }
+    var sharedDraft by remember { mutableStateOf("") }
+    var sharedSaving by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
     var doc by remember { mutableStateOf<MemoryDoc?>(null) }
     var draft by remember { mutableStateOf("") }
@@ -80,6 +83,11 @@ fun MemoryScreen(botId: String, onBack: () -> Unit) {
     LaunchedEffect(botId) {
         loading = true
         overview = session.memoryOverview(botId)
+        // The shared partition is the same for every bot on this page: it is
+        // read from the team's workspace, not from this bot's, which is what
+        // makes it survive a bot switch instead of being copied per bot.
+        shared = session.sharedMemory()
+        sharedDraft = shared?.text ?: ""
         load("MEMORY.md")
         loading = false
     }
@@ -87,6 +95,11 @@ fun MemoryScreen(botId: String, onBack: () -> Unit) {
     fun reload() {
         scope.launch {
             overview = session.memoryOverview(botId)
+            val refreshed = session.sharedMemory()
+            if (refreshed != null) {
+                shared = refreshed
+                sharedDraft = refreshed.text
+            }
             doc?.let { load(it.path) }
         }
     }
@@ -122,6 +135,63 @@ fun MemoryScreen(botId: String, onBack: () -> Unit) {
             SettingsSection(title = "Memory Capacity & Index") {
                 Box(modifier = Modifier.padding(16.dp)) {
                     MemoryCapacityBar(current)
+                }
+            }
+        }
+
+        // The other half of the partition: facts that are true for the whole
+        // team. Read here, beside this bot's private index, so a bot switch
+        // can be seen to change one and leave the other in place.
+        val sharedPartition = shared
+        if (sharedPartition != null) {
+            val facts = sharedPartition.text
+                .lineSequence()
+                .map { it.trim() }
+                .filter { it.startsWith("- ") || it.startsWith("* ") }                .map { it.removePrefix("- ").removePrefix("* ").trim() }
+                .filter { it.isNotEmpty() }
+                .toList()
+            SettingsSection(title = "Shared Memory (every bot)") {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Text(
+                        "Team-wide facts: user preferences, cross-cutting projects, stable identity. Every bot reads them; none of them belongs to one bot, and switching bots leaves them in place.",
+                        fontSize = 13.sp,
+                        color = AppTheme.colors.textSecondary,
+                    )
+                    if (facts.isEmpty() && sharedDraft == sharedPartition.text) {
+                        Text("Nothing shared yet.", fontSize = 14.sp, color = AppTheme.colors.textTertiary)
+                    }
+                    AppTextField(
+                        value = sharedDraft,
+                        onValueChange = { sharedDraft = it },
+                        singleLine = false,
+                        minLines = 5,
+                        enabled = !sharedSaving,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 120.dp),
+                    )
+                    Button(
+                        enabled = !sharedSaving && sharedDraft != sharedPartition.text,
+                        shape = RoundedCornerShape(12.dp),
+                        onClick = {
+                            sharedSaving = true
+                            error = null
+                            scope.launch {
+                                val ok = session.saveSharedMemory(sharedDraft, sharedPartition.index.hash)
+                                sharedSaving = false
+                                if (ok) reload() else {
+                                    error = session.actionError ?: "Couldn't save shared memory."
+                                    session.actionError = null
+                                    reload()
+                                }
+                            }
+                        },
+                    ) {
+                        Text(if (sharedSaving) "Saving…" else "Save Shared Memory")
+                    }
                 }
             }
         }

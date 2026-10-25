@@ -47,6 +47,10 @@ class CompanionPermissions(
     /** Composer mic — checked at the button, never at cold start. */
     fun recordAudioGranted(): Boolean = granted(Manifest.permission.RECORD_AUDIO)
 
+    /** Location — checked before querying device location providers. */
+    fun locationGranted(): Boolean =
+        granted(Manifest.permission.ACCESS_FINE_LOCATION) || granted(Manifest.permission.ACCESS_COARSE_LOCATION)
+
     private fun read(): Snapshot {
         val missingDiscovery = buildList {
             if (sdkInt >= 33 && !granted(Manifest.permission.NEARBY_WIFI_DEVICES)) {

@@ -1,4 +1,6 @@
 import { peerName } from "./peer-roster.ts";
+import type { DynamicContextFrame } from "./capabilities/context-pipeline.ts";
+export type { DynamicContextFrame };
 
 // Building the text a driver actually receives. Three situations force an
 // inline replay of the active branch: a rewind (the visible branch changed),
@@ -21,6 +23,8 @@ export interface TurnContextInput {
   externallyUpdated: boolean;
   /** transcript-replay drivers get history via SendTurnInput.transcript instead */
   replaysNatively: boolean;
+  /** Phase 2: Dynamic context frame with multi-layered state */
+  contextFrame?: DynamicContextFrame;
 }
 
 /** Does this engine need the thread replayed to it? True when a DIFFERENT
@@ -87,11 +91,12 @@ export function buildTurnContext(input: TurnContextInput): {
   turnText: string;
   /** false when the native session must not be resumed */
   resume: boolean;
+  contextFrame?: DynamicContextFrame;
 } {
-  const { text, transcript, rewound, fresh, externallyUpdated, replaysNatively } = input;
+  const { text, transcript, rewound, fresh, externallyUpdated, replaysNatively, contextFrame } = input;
   const resume = !rewound && !fresh && !externallyUpdated;
   const replay = !resume && !replaysNatively && transcript.length > 0;
-  if (!replay) return { turnText: text, resume };
+  if (!replay) return { turnText: text, resume, contextFrame };
   return {
     turnText: [
       rewound ? REWOUND_PREAMBLE : externallyUpdated ? EXTERNAL_UPDATE_PREAMBLE : FRESH_PREAMBLE,
@@ -103,5 +108,6 @@ export function buildTurnContext(input: TurnContextInput): {
       text,
     ].join("\n"),
     resume,
+    contextFrame,
   };
 }

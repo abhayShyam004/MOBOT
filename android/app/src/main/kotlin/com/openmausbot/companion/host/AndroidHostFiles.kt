@@ -42,4 +42,20 @@ class AndroidHostFiles(private val context: Context) : HarnessHost.Files {
     }.getOrDefault("1.0.0")
 
     fun serverEntry(): File = File(serverRoot, HostFiles.SERVER_ENTRY)
+
+    /**
+     * Crash-injection switch, read **only** in a preview build.
+     *
+     * `adb shell settings put global omb_crash_point after-manifest` makes the
+     * next canonical write die at that transition, which is how the commit
+     * protocol is verified against the real writer on the device. The setting
+     * is ignored by every other package — the official app never reads it —
+     * and the host does nothing with a value it does not recognise.
+     */
+    override fun crashPoint(): String? {
+        if (!context.packageName.endsWith(".preview")) return null
+        return runCatching {
+            android.provider.Settings.Global.getString(context.contentResolver, "omb_crash_point")
+        }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+    }
 }

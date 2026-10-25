@@ -2732,6 +2732,33 @@ class Session(
         }
     }
 
+    /** The shared partition, or null when the host could not be reached. */
+    suspend fun sharedMemory(): MemoryOverview? {
+        val activeClient = client ?: return null
+        return try {
+            activeClient.sharedMemory()
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            null
+        }
+    }
+
+    /** Save the shared partition. Returns true on success; a hash conflict
+     * leaves `actionError` explaining it so the page reloads instead of
+     * overwriting a shared record the team wrote in between. */
+    suspend fun saveSharedMemory(text: String, expectedHash: String): Boolean {
+        val activeClient = client ?: return false
+        return try {
+            activeClient.saveSharedMemory(text, expectedHash)
+            true
+        } catch (error: Throwable) {
+            if (error is kotlinx.coroutines.CancellationException) throw error
+            _actionError.value = error.message
+            false
+        }
+    }
+
     suspend fun memoryFile(botId: String, path: String): MemoryDoc? {
         val activeClient = client ?: return null
         return try {
@@ -2785,10 +2812,10 @@ class Session(
         }
     }
 
-    suspend fun loadConnectorCatalog(): ConnectorCatalog? {
+    suspend fun loadConnectorCatalog(query: String? = null, refresh: Boolean = false): ConnectorCatalog? {
         val activeClient = client ?: return null
         return try {
-            activeClient.connectorCatalog()
+            activeClient.connectorCatalog(query = query, refresh = refresh)
         } catch (error: Throwable) {
             if (error is kotlinx.coroutines.CancellationException) throw error
             _actionError.value = error.message

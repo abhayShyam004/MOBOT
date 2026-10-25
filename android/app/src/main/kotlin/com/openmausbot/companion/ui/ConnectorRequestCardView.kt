@@ -4,6 +4,8 @@ import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import androidx.browser.customtabs.CustomTabsIntent
+import com.openmausbot.companion.MainActivity
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -88,7 +90,29 @@ internal fun ConnectorRequestCardView(
         haptics.play(TactileAction.CHOOSE_APPROVAL)
         scope.launch {
             val url = session.authorizeConnectorCard(botId, message.id, threadId)
-            if (url != null) openConnectorAuthorization(context, session, url)
+            if (url != null) {
+                openConnectorAuthorization(context, session, url)
+                // Auto-return polling for card authorization in chat
+                scope.launch {
+                    val startTime = System.currentTimeMillis()
+                    val timeoutMs = 120_000L
+                    while (System.currentTimeMillis() - startTime < timeoutMs) {
+                        kotlinx.coroutines.delay(2000L)
+                        try {
+                            val status = session.connectorCardStatus(botId, message.id, threadId)
+                            if (status?.connected == true) {
+                                try {
+                                    val returnIntent = Intent(context, MainActivity::class.java).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                                    }
+                                    context.startActivity(returnIntent)
+                                } catch (_: Exception) {}
+                                break
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+            }
             busy = false
         }
     }
@@ -177,11 +201,22 @@ internal fun ConnectorRequestCardView(
  * fail the same way.
  */
 internal fun openConnectorAuthorization(context: Context, session: Session, url: URI) {
+    val uri = Uri.parse(url.toASCIIString())
     try {
-        context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url.toASCIIString())))
-    } catch (_: ActivityNotFoundException) {
-        session.actionError = "This phone has no browser available to open the authorization page."
-    } catch (_: SecurityException) {
-        session.actionError = "The authorization page could not be opened. Check your browser restrictions and try again."
+        val customTabsIntent = CustomTabsIntent.Builder()
+            .setShowTitle(true)
+            .build()
+        customTabsIntent.launchUrl(context, uri)
+    } catch (_: Exception) {
+        try {
+            val intent = Intent(Intent.ACTION_VIEW, uri).apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            context.startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            session.actionError = "This phone has no browser available to open the authorization page."
+        } catch (_: SecurityException) {
+            session.actionError = "The authorization page could not be opened. Check your browser restrictions and try again."
+        }
     }
 }

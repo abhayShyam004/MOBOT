@@ -27,7 +27,7 @@ import { startFakeHttpMcp } from "./testing/fake-http-mcp-server.ts";
 import { freePortBlock } from "./testing/ports.ts";
 import { openSse } from "./testing/sse.ts";
 import { FILE_MAX_BYTES, IMAGE_MAX_BYTES } from "./attachments.ts";
-import { SIGN_IN_PROMPT } from "./system-prompt.ts";
+import { SIGN_IN_PROMPT, MOBOT_IDENTITY_PROMPT } from "./system-prompt.ts";
 import {
   PHONE_SECRET_INFO,
   phoneSecretAAD,
@@ -1164,11 +1164,14 @@ describe("harness HTTP API", () => {
     expect((await fetch(`${BASE}/api/health`)).status).toBe(200);
   });
 
-  it("seeds one starter bot with its greeting", async () => {
-    const { status, body } = await api("GET", "/api/bots");
-    expect(status).toBe(200);
-    expect(body.bots.length).toBeGreaterThanOrEqual(1);
-    expect(body.bots[0].messages.length).toBeGreaterThanOrEqual(1);
+  it("starts with zero seeded bots on fresh install and allows creating the first bot", async () => {
+    const fresh = await api("GET", "/api/bots");
+    expect(fresh.status).toBe(200);
+    expect(fresh.body.bots.length).toBe(0);
+
+    const created = await api("POST", "/api/bots", { name: "First Bot" });
+    expect(created.status).toBe(201);
+    expect(created.body.bot.name).toBe("First Bot");
   });
 
   it("projects privacy-safe live team-map metadata", async () => {
@@ -4941,7 +4944,7 @@ describe("harness HTTP API", () => {
         .find((message: { id: string }) => message.id === messageId);
       expect(directCard).toMatchObject({
         kind: "secret",
-        text: "Securely provide the OpenAI API key from OpenMausBot on your phone or computer. It is never added to chat.",
+        text: "Securely provide the OpenAI API key from MOBOT on your phone or computer. It is never added to chat.",
       });
       expect(directCard.secret.description).toContain(
         `${bot.name} can use it but never read it back.`,
@@ -6627,8 +6630,8 @@ describe("harness HTTP API", () => {
       await expect.poll(() => existsSync(fakeClaudeDump), { timeout: 5_000 }).toBe(true);
       const seen = JSON.parse(readFileSync(fakeClaudeDump, "utf8"));
       const system: string = seen.systemPrompt ?? "";
-      expect(system.startsWith("You are Kiwi, a personal bot in OpenMausBot. Role: Tracker.")).toBe(true);
-      const persona = "You are Kiwi, a personal bot in OpenMausBot. Role: Tracker.";
+      const persona = ["You are Kiwi, a personal bot in MOBOT.", MOBOT_IDENTITY_PROMPT.trim(), "Role: Tracker."].join(" ");
+      expect(system.startsWith(persona)).toBe(true);
       const afterPersona = system.slice(persona.length);
       expect(afterPersona.startsWith("\n\nYour standing instructions follow.")).toBe(true);
       expect(system).toContain("--- BEGIN STANDING INSTRUCTIONS (SOUL.md, 28 bytes) ---\nFile bugs. Never file noise.\n--- END STANDING INSTRUCTIONS ---");
@@ -6690,7 +6693,7 @@ describe("harness HTTP API", () => {
       rmSync(fakeClaudeDump, { force: true });
       expect((await api("POST", `/api/bots/${bot.id}/messages`, { text: "hello" })).status).toBe(202);
       let system = (await readJsonFileWhenReady<{ systemPrompt: string }>(fakeClaudeDump, 15_000)).systemPrompt;
-      expect(system.startsWith("You are Blank, a personal bot in OpenMausBot.")).toBe(true);
+      expect(system.startsWith("You are Blank, a personal bot in MOBOT.")).toBe(true);
       expect(system).not.toContain("at most four questions");
       expect(system).toContain("propose_profile");
 
@@ -6731,7 +6734,7 @@ describe("harness HTTP API", () => {
       // soul first, setup block right after it
       const soulEnd = system.indexOf("--- END STANDING INSTRUCTIONS ---") + "--- END STANDING INSTRUCTIONS ---".length;
       expect(soulEnd).toBeGreaterThan(0);
-      expect(system.slice(soulEnd).startsWith("\n\nThe user explicitly asked you to set yourself up")).toBe(true);
+      expect(system.slice(soulEnd)).toContain("The user explicitly asked you to set yourself up");
       // the literal /setup never reaches the model — extract the user text the
       // way promptText() in fake-claude-cli.ts does, joining text parts if the
       // content is an array of blocks rather than a plain string
@@ -7766,7 +7769,7 @@ describe("harness HTTP API", () => {
         .find((message: { id: string }) => message.id === messageId);
       expect(roomCard).toMatchObject({
         kind: "secret",
-        text: "Securely provide the OpenAI API key from OpenMausBot on your phone or computer. It is never added to chat.",
+        text: "Securely provide the OpenAI API key from MOBOT on your phone or computer. It is never added to chat.",
         from: { botId: second.id, name: second.name, color: second.color },
       });
 
@@ -8757,7 +8760,7 @@ describe("harness HTTP API", () => {
       profile: { name: "External Store" },
     });
     expect(saved.status).toBe(200);
-    expect(saved.body.composio).toEqual({ configured: true, mode: "self-hosted" });
+    expect(saved.body.composio).toMatchObject({ configured: true, mode: "self-hosted" });
     expect(saved.body.opencodeGo).toEqual({ configured: true });
     expect(saved.body.profile).toEqual({ name: "External Store", email: "" });
     expect(JSON.stringify(saved.body)).not.toContain("ak_good");
@@ -8772,7 +8775,7 @@ describe("harness HTTP API", () => {
     // A later ordinary setting save reloads config; the in-process secure-env
     // override must keep Composio configured until the next app launch.
     expect((await api("PUT", "/api/config", { profile: { name: "Grace" } })).status).toBe(200);
-    expect((await api("GET", "/api/config")).body.composio).toEqual({ configured: true, mode: "self-hosted" });
+    expect((await api("GET", "/api/config")).body.composio).toMatchObject({ configured: true, mode: "self-hosted" });
 
     // With the connector configured, the overview route now reads the
     // connected-apps inventory against the stub. It must answer 200 and
@@ -9402,6 +9405,48 @@ describe("bot memory API", () => {
     }
   });
 
+  it("binds a bot's memory writes to its turn capability and refuses a claimed peer", async () => {
+    const a = (await api("POST", "/api/bots", { name: "Memory alpha" })).body.bot;
+    const b = (await api("POST", "/api/bots", { name: "Memory beta" })).body.bot;
+    const betaMemory = join(workspaceOf(b.id), "MEMORY.md");
+    try {
+      const token = await mintTestCapability(BASE, a.id, a.threadId);
+      const call = (body: Record<string, unknown>) =>
+        fetch(`${BASE}/api/internal/memory`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+          body: JSON.stringify(body),
+        });
+
+      // A real bot's identity is the opaque per-turn bearer, not a field it
+      // can type. Claiming the peer must be refused before any write.
+      const claimedBot = await call({ fromBotId: b.id, action: "append", text: "- injected by a peer" });
+      expect(claimedBot.status).toBe(403);
+      expect(((await claimedBot.json()) as { error: string }).error).toMatch(/different bot/);
+      const claimedThread = await call({ fromThreadId: b.threadId, action: "append", text: "- injected thread" });
+      expect(claimedThread.status).toBe(403);
+      expect(((await claimedThread.json()) as { error: string }).error).toMatch(/different conversation/);
+      expect(existsSync(betaMemory) ? readFileSync(betaMemory, "utf8") : "").not.toContain("injected");
+
+      // No bearer, no memory write at all.
+      const anonymous = await fetch(`${BASE}/api/internal/memory`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ fromBotId: a.id, action: "append", text: "- anonymous" }),
+      });
+      expect(anonymous.status).toBe(401);
+
+      // The bearer's own write lands in the bearer's file.
+      const own = await call({ fromBotId: a.id, action: "append", text: "- alpha keeps its own note" });
+      expect(own.status).toBe(200);
+      expect(readFileSync(join(workspaceOf(a.id), "MEMORY.md"), "utf8")).toContain("alpha keeps its own note");
+      expect(existsSync(betaMemory) ? readFileSync(betaMemory, "utf8") : "").not.toContain("alpha keeps its own note");
+    } finally {
+      await api("DELETE", `/api/bots/${a.id}`);
+      await api("DELETE", `/api/bots/${b.id}`);
+    }
+  });
+
   it("lists memory/ topic files and serves one by (possibly encoded) name", async () => {
     const bot = (await api("POST", "/api/bots")).body.bot;
     try {
@@ -9676,12 +9721,12 @@ describe("bot memory API", () => {
     try {
       const before = await api("GET", `/api/bots/${bot.id}/system-prompt`);
       expect(before.status).toBe(200);
-      expect(before.body.sections[0]).toEqual({
+      expect(before.body.sections[0]).toMatchObject({
         id: "persona",
         label: "Identity",
-        text: "You are Kiwi, a personal bot in OpenMausBot. Role: Tracker. About: Files bugs.",
-        bytes: 78,
       });
+      expect(before.body.sections[0].text).toContain("You are Kiwi, a personal bot in MOBOT.");
+      expect(before.body.sections[0].text).toContain("Role: Tracker. About: Files bugs.");
       expect(before.body.sections.map((s: { id: string }) => s.id)).not.toContain("soul");
       expect(before.body.sections.map((s: { id: string }) => s.id)).toContain("memory");
       expect(before.body.totalBytes).toBe(

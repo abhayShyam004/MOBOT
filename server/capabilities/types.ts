@@ -86,3 +86,69 @@ export interface DeviceCapability {
     context?: CapabilityContext
   ): Promise<CapabilityResult>;
 }
+
+// ── Official Roadmap Phase 11: Intelligent Capability Selection (mobot_54_phases_prompt.md:752-778) ──
+
+export const ERR_NO_CAPABLE_TOOL = 'ERR_NO_CAPABLE_TOOL';
+
+export type ExecutionModality =
+  | 'direct_answer'
+  | 'web_search'
+  | 'browser_session'
+  | 'terminal_command'
+  | 'filesystem_mutation'
+  | 'device_gesture'
+  | 'composio_service'
+  | 'specialist_handoff'
+  | 'user_clarification';
+
+export interface CapabilityMatchRequest {
+  objective: string;
+  contextKeywords: string[];
+  requiredDataFreshness: 'realtime' | 'static' | 'historical';
+  targetDevice: 'android_local' | 'cloud_vps' | 'external_saas';
+  activeBotId: string;
+}
+
+export interface CapabilityMatchResolution {
+  chosenModality: ExecutionModality;
+  primaryCapabilityId?: string;
+  fallbackCapabilityIds: string[];
+  justification: string;
+  confidenceScore: number;
+}
+
+// ── Corrective Phase: Enforceable Action-Result Truthfulness Framework ──
+
+export type ActionResultStatus =
+  | 'UNAVAILABLE'
+  | 'NOT_ATTEMPTED'
+  | 'IN_PROGRESS'
+  | 'SUCCEEDED'
+  | 'FAILED'
+  | 'UNKNOWN';
+
+export interface ActionResultEvidence {
+  resourceId?: string;
+  resourceUri?: string;
+  artifactPath?: string;
+  verifiedAt?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ActionResultReceipt {
+  operationId: string;
+  actionType: 'calendar.create_event' | 'device.phone_control' | 'reminder.schedule' | 'service.mutation' | string;
+  status: ActionResultStatus;
+  evidence?: ActionResultEvidence;
+  error?: {
+    code: string;
+    message: string;
+    details?: unknown;
+  };
+  attemptedAt: number;
+  botId?: string;
+  threadId?: string;
+  turnId?: string;
+}
+

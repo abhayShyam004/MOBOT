@@ -24,6 +24,7 @@ import type { Notification } from "./notification.ts";
 import type { Routine, RoutineRun } from "./routines.ts";
 import type { WebhookAttempt, WebhookTrigger } from "./webhooks.ts";
 import type { StructuredResponseData } from "./structured-response.ts";
+import type { AgentContract } from "./agent-contract.ts";
 
 /** Reasoning-effort levels, ascending. A union of everything any engine
  * accepts; each driver declares the subset its CLI will take. Lives here
@@ -262,6 +263,8 @@ export interface WireBot {
   busy?: boolean;
   /** What the bot is doing right now; transient like busy. */
   activity?: BotActivity;
+  /** Authoritative Agent Contract specifying role, stance, tool affinity and verification policy. */
+  contract?: AgentContract;
   createdAt: number;
 }
 
@@ -449,6 +452,7 @@ export interface ConnectorCardData {
   /** Account alias supplied by the agent when adding a second account. */
   alias?: string;
   error?: string;
+  authUrl?: string;
   dismissed?: boolean;
   resumed?: boolean;
 }

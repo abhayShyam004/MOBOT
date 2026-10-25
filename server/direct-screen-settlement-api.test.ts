@@ -147,4 +147,25 @@ describe.skipIf(process.platform === "win32")("direct final-screen settlement", 
     expect((await api("GET", `/api/threads/${threadId}/messages`)).status).toBe(404);
     expect(events.frames.some((frame) => frame.kind === "screen" && frame.threadId === threadId)).toBe(false);
   }, 30_000);
+
+  it("streams browser frames over SSE for Watch Computer but suppresses chat attachment on normal browsing query", async () => {
+    expect((await api("POST", `/api/bots/${botId}/messages`, { text: "Find me the best course for me.", threadId })).status).toBe(202);
+    await expect.poll(() => existsSync(join(fixture, "provider.json")), { timeout: 10_000 }).toBe(true);
+    const dump = JSON.parse(readFileSync(join(fixture, "provider.json"), "utf8"));
+    const token = dump.mcpConfig.mcpServers.browser.env.OMB_BROWSER_TOKEN;
+    expect((await api("POST", "/api/internal/browser/mcp", {
+      method: "tools/call", params: { name: "agent_browser_screenshot", arguments: {} },
+    }, token)).status).toBe(200);
+    gate("tools.gate");
+    await expect.poll(() => existsSync(join(fixture, "capture.entered")), { timeout: 10_000 }).toBe(true);
+    gate("finish.gate");
+    gate("capture.gate");
+
+    await expect.poll(async () => (await api("GET", `/api/threads/${threadId}/messages`)).body.messages
+      .some((message: any) => message.text === "reply to: Find me the best course for me."), { timeout: 5_000 }).toBe(true);
+
+    const messages = (await api("GET", `/api/threads/${threadId}/messages`)).body.messages;
+    expect(messages.some((m: any) => m.kind === "screen")).toBe(false);
+    expect(events.frames.some((frame) => frame.kind === "screen" && frame.threadId === threadId)).toBe(true);
+  }, 30_000);
 });
