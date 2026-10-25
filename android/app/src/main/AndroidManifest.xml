@@ -8,7 +8,7 @@
       signs anything (see SignerEnrollmentReceiver below).
     -->
     <uses-permission android:name="com.openmausbot.companion.permission.MEMORY_SIGNER" />
-
+    <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
@@ -100,6 +100,10 @@
     -->
     <queries>
         <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
         <!--
@@ -107,6 +111,31 @@
           an explicit bind to it is only allowed if it is visible here.
         -->
         <package android:name="com.openmausbot.companion.signer" />
+        <package android:name="com.whatsapp" />
+        <package android:name="com.whatsapp.w4b" />
+        <package android:name="org.telegram.messenger" />
+        <package android:name="com.discord" />
+        <package android:name="com.spotify.music" />
+        <package android:name="com.google.android.gm" />
+        <package android:name="com.google.android.calendar" />
+        <package android:name="com.google.android.apps.messaging" />
+        <package android:name="com.google.android.apps.photos" />
+        <package android:name="com.google.android.apps.docs" />
+        <package android:name="com.google.android.youtube" />
+        <package android:name="com.google.android.apps.maps" />
+        <package android:name="com.android.chrome" />
+        <package android:name="com.google.android.calculator" />
+        <package android:name="com.google.android.deskclock" />
+        <package android:name="com.android.settings" />
+        <package android:name="com.android.vending" />
+        <package android:name="ai.x.grok.bot" />
+        <package android:name="com.anthropic.claude" />
+        <package android:name="com.openai.chatgpt" />
+        <package android:name="com.deepseek.chat" />
+        <package android:name="com.sec.android.app.camera" />
+        <package android:name="com.sec.android.gallery3d" />
+        <package android:name="com.sec.android.app.myfiles" />
+        <package android:name="com.samsung.android.dialer" />
     </queries>
 
     <application

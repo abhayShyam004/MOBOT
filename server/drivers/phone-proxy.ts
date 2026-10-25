@@ -140,6 +140,7 @@ export const KNOWN_PACKAGES: Record<string, string> = {
 
 export const HUMAN_LABELS: Record<string, string> = {
   "com.whatsapp": "WhatsApp",
+  "com.whatsapp.w4b": "WhatsApp Business",
   "com.android.settings": "Settings",
   "com.android.chrome": "Chrome",
   "com.google.android.apps.maps": "Google Maps",
@@ -147,24 +148,43 @@ export const HUMAN_LABELS: Record<string, string> = {
   "com.google.android.youtube": "YouTube",
   "com.google.android.gm": "Gmail",
   "com.google.android.apps.messaging": "Messages",
+  "com.google.android.calendar": "Google Calendar",
+  "com.google.android.calculator": "Google Calculator",
+  "com.google.android.deskclock": "Google Clock",
+  "com.google.android.apps.photos": "Google Photos",
+  "com.google.android.apps.docs": "Google Drive",
   "com.samsung.android.app.contacts": "Contacts",
   "com.sec.android.app.camera": "Camera",
   "com.sec.android.app.clockpackage": "Clock",
   "com.sec.android.app.popupcalculator": "Calculator",
   "com.sec.android.app.myfiles": "My Files",
+  "com.sec.android.gallery3d": "Gallery",
+  "com.samsung.android.dialer": "Phone",
   "com.openmausbot.companion": "MOBOT Companion",
+  "com.openmausbot.companion.preview": "MOBOT Companion Preview",
+  "ai.x.grok.bot": "Grok",
+  "com.anthropic.claude": "Claude",
+  "com.openai.chatgpt": "ChatGPT",
+  "com.deepseek.chat": "DeepSeek",
   "net.skyscanner.android.main": "Skyscanner",
   "com.ubercab": "Uber",
   "com.spotify.music": "Spotify",
   "org.telegram.messenger": "Telegram",
   "com.instagram.android": "Instagram",
   "com.twitter.android": "X",
+  "com.discord": "Discord",
+  "com.linkedin.android": "LinkedIn",
+  "com.duolingo": "Duolingo",
+  "com.chess": "Chess.com",
 };
 
 export function humanLabelForPackage(pkg: string): string {
   if (HUMAN_LABELS[pkg]) return HUMAN_LABELS[pkg];
   const parts = pkg.split(".");
-  const last = parts[parts.length - 1];
+  let last = parts[parts.length - 1];
+  if ((last === "android" || last === "app" || last === "mobile" || last === "chat") && parts.length > 1) {
+    last = parts[parts.length - 2];
+  }
   return last.charAt(0).toUpperCase() + last.slice(1);
 }
 

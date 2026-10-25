@@ -128,6 +128,112 @@ describe("MOBOT Corrective Phase — Comprehensive E2E Regression Suite", () => 
       expect(result.text).toBe(modelOutput);
       expect(result.violations).toHaveLength(0);
     });
+
+    it("rejects manufactured or placeholder event ID even if receipt status claims SUCCEEDED", () => {
+      recordActionReceipt({
+        operationId: "op-cal-fake-id",
+        botId: testBotId,
+        threadId: testThreadId,
+        turnId: "turn-fake-id",
+        actionType: "calendar.create_event",
+        status: "SUCCEEDED",
+        evidence: {
+          resourceId: "cal_evt_1729849200000", // Manufactured placeholder
+          resourceUri: "https://calendar.google.com/test",
+        },
+        attemptedAt: Date.now(),
+      });
+
+      const modelOutput = "I've scheduled the meeting on your Google Calendar.";
+      const result = verifyAndEnforceTurnTruthfulness({
+        threadId: testThreadId,
+        turnId: "turn-fake-id",
+        assistantText: modelOutput,
+      });
+
+      expect(result.corrected).toBe(true);
+      expect(result.status).toBe("UNKNOWN");
+      expect(result.text).toContain("The calendar event operation was requested, but no verified event confirmation was returned");
+      expect(result.violations).toContain("Calendar success claimed without verified provider resourceId evidence");
+    });
+
+    it("ensures a calendar receipt from another turn cannot satisfy the current turn", () => {
+      // Receipt recorded on turn-prev
+      recordActionReceipt({
+        operationId: "op-cal-prev-turn",
+        botId: testBotId,
+        threadId: testThreadId,
+        turnId: "turn-prev",
+        actionType: "calendar.create_event",
+        status: "SUCCEEDED",
+        evidence: {
+          resourceId: "evt_real_valid_12345",
+        },
+        attemptedAt: Date.now(),
+      });
+
+      // Claim made on turn-current
+      const modelOutput = "I have scheduled the team meeting on your calendar.";
+      const result = verifyAndEnforceTurnTruthfulness({
+        threadId: testThreadId,
+        turnId: "turn-current",
+        assistantText: modelOutput,
+      });
+
+      expect(result.corrected).toBe(true);
+      expect(result.status).toBe("NOT_ATTEMPTED");
+      expect(result.text).toContain("I have not scheduled this meeting yet");
+    });
+
+    it("ensures a calendar receipt from another bot cannot satisfy this bot", () => {
+      recordActionReceipt({
+        operationId: "op-cal-other-bot",
+        botId: "other-bot-id",
+        threadId: "other-thread-id",
+        turnId: "turn-other",
+        actionType: "calendar.create_event",
+        status: "SUCCEEDED",
+        evidence: {
+          resourceId: "evt_other_bot_99999",
+        },
+        attemptedAt: Date.now(),
+      });
+
+      const modelOutput = "I have created the calendar event for tomorrow.";
+      const result = verifyAndEnforceTurnTruthfulness({
+        threadId: testThreadId,
+        turnId: "turn-other",
+        assistantText: modelOutput,
+      });
+
+      expect(result.corrected).toBe(true);
+      expect(result.status).toBe("NOT_ATTEMPTED");
+    });
+
+    it("ensures calendar read actions cannot satisfy calendar create requirement", () => {
+      recordActionReceipt({
+        operationId: "op-cal-read",
+        botId: testBotId,
+        threadId: testThreadId,
+        turnId: "turn-read",
+        actionType: "calendar.list_events",
+        status: "SUCCEEDED",
+        evidence: {
+          resourceId: "events_count_5",
+        },
+        attemptedAt: Date.now(),
+      });
+
+      const modelOutput = "I have created your calendar event.";
+      const result = verifyAndEnforceTurnTruthfulness({
+        threadId: testThreadId,
+        turnId: "turn-read",
+        assistantText: modelOutput,
+      });
+
+      expect(result.corrected).toBe(true);
+      expect(result.status).toBe("NOT_ATTEMPTED");
+    });
   });
 
   // =========================================================================

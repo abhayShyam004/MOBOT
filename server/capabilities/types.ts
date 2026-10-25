@@ -46,6 +46,8 @@ export interface CapabilityAvailability {
 export interface CapabilityContext {
   workspace?: string;
   botId?: string;
+  threadId?: string;
+  turnId?: string;
   signal?: AbortSignal;
   approvalMode?: 'ask' | 'edits' | 'auto' | 'full' | 'custom';
   askApproval?: (summary: string) => Promise<boolean>;

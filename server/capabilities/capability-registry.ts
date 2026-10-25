@@ -15,6 +15,7 @@ import {
   type CapabilityMatchResolution,
   ERR_NO_CAPABLE_TOOL,
 } from './types.ts';
+import { recordActionReceipt } from './action-truthfulness.ts';
 import {
   FilesCapability,
   CameraCapability,
@@ -177,7 +178,25 @@ export class DeviceCapabilityRegistry {
     }
 
     try {
-      return await cap.execute(operation, params, context);
+      const result = await cap.execute(operation, params, context);
+      if (capabilityId === 'device.calendar' && operation === 'create_event') {
+        if (result.success && result.data) {
+          const resData = result.data as Record<string, unknown>;
+          recordActionReceipt({
+            operationId: `cap_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+            botId: context?.botId || 'default',
+            threadId: context?.threadId || 'default',
+            turnId: context?.turnId || 'default',
+            actionType: 'calendar.create_event',
+            status: 'SUCCEEDED',
+            evidence: {
+              resourceId: String(resData.eventId || 'device_calendar_event'),
+            },
+            attemptedAt: Date.now(),
+          });
+        }
+      }
+      return result;
     } catch (err) {
       const message = err instanceof Error ? err.message : (typeof err === "string" ? err : "Action execution failed");
       return {
@@ -382,7 +401,7 @@ export class DeviceCapabilityRegistry {
 
     // 8. Factual Web Queries & News Requiring Real-Time Freshness -> web_search
     // Anti-Pattern: Do not route factual web queries to direct LLM generation without search verification when freshness is required.
-    const isDeviceSensorQuery = hasAnyToken("screenshot", "location", "screen", "clipboard", "gps", "camera", "photo");
+    const isDeviceSensorQuery = hasAnyToken("screenshot", "location", "screen", "clipboard", "gps", "camera", "photo", "app", "apps", "application", "applications", "installed", "whatsapp", "reminder", "reminders", "alarm", "calendar");
     const isWebSearch =
       !isDeviceSensorQuery &&
       (request.requiredDataFreshness === "realtime" ||
@@ -416,7 +435,7 @@ export class DeviceCapabilityRegistry {
     else if (hasAnyToken("contact", "contacts", "phone number", "address book")) matchedDeviceTool = "device.contacts";
     else if (hasAnyToken("location", "gps", "coordinates", "where am i")) matchedDeviceTool = "device.location";
     else if (hasAnyToken("media", "audio", "music", "play")) matchedDeviceTool = "device.media";
-    else if (hasAnyToken("app", "apps", "application", "applications", "launch", "open app")) matchedDeviceTool = "device.apps";
+    else if (hasAnyToken("app", "apps", "application", "applications", "launch", "open app", "installed", "whatsapp", "package", "packages")) matchedDeviceTool = "device.apps";
     else if (hasAnyToken("share")) matchedDeviceTool = "device.share";
 
     if (matchedDeviceTool) {

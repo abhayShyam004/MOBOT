@@ -1734,6 +1734,164 @@ describe("canonical memory integrity J. signer-owned rollback anchor", () => {
     expect(() => read(base, bot)).toThrow(/ERR_MEMORY_INTEGRITY/);
   });
 
+  it("reconciles a v2 store at seq 3 with an existing signer anchor at generation 2 without skipping generation 3", () => {
+    const base = root();
+    const bot = botName("anchor-desync-seq3-gen2");
+    process.env.OMB_MEMORY_INTEGRITY_KEY_PATH = join(base, "never.key");
+    enableAppUid();
+    seedPrivate(base, bot, "Initial record at seq 1.");
+    seedPrivate(base, bot, "Second record at seq 2.");
+    seedPrivate(base, bot, "Third record at seq 3.");
+    const v2Manifest = JSON.parse(snapshot(base, bot).manifest);
+    expect(v2Manifest.version).toBe(2);
+    expect(v2Manifest.seq).toBe(3);
+
+    // Simulate an anchor ledger where this store was recorded at generation 2
+    enableSigner();
+    const key = memoryIntegrityStoreKey(bot, recordsPath(base, bot));
+    anchorStores.set(key, {
+      generation: 2,
+      digest: v2Manifest.digest,
+      pending: null,
+    });
+
+    // Reading under signer must successfully reseal to generation 3 (head.generation + 1),
+    // instead of throwing "generation 4 is not the next generation after 2"
+    expect(read(base, bot)).toHaveLength(3);
+    const upgraded = snapshot(base, bot);
+    expect(JSON.parse(upgraded.manifest).version).toBe(MERKLE_MEMORY_INTEGRITY_VERSION);
+    expect(upgraded.seq).toBe(3);
+    expect(anchorStores.get(key)?.generation).toBe(3);
+
+    // Next write advances monotonically to generation 4
+    seedPrivate(base, bot, "Fourth record at seq 4.");
+    expect(snapshot(base, bot).seq).toBe(4);
+    expect(anchorStores.get(key)?.generation).toBe(4);
+  });
+
+  it("reconciles an interrupted v3 store at seq 3 with an anchor at gen 2 when matching pending candidate exists", () => {
+    const base = root();
+    const bot = botName("anchor-desync-v3-pending");
+    process.env.OMB_MEMORY_INTEGRITY_KEY_PATH = join(base, "never.key");
+    enableSigner();
+    __setManifestVersionForTest(SIGNER_MEMORY_INTEGRITY_VERSION);
+
+    seedPrivate(base, bot, "V3 note 1.");
+    seedPrivate(base, bot, "V3 note 2.");
+    seedPrivate(base, bot, "V3 note 3.");
+    const v3Manifest = JSON.parse(snapshot(base, bot).manifest);
+    expect(v3Manifest.version).toBe(SIGNER_MEMORY_INTEGRITY_VERSION);
+    expect(v3Manifest.seq).toBe(3);
+
+    // Simulate crash after writing manifest at 3 but before committing to anchor:
+    // anchor generation is 2, but pending candidate is generation 3 matching digest
+    const key = memoryIntegrityStoreKey(bot, recordsPath(base, bot));
+    anchorStores.set(key, {
+      generation: 2,
+      digest: "e".repeat(64),
+      pending: {
+        generation: 3,
+        digest: v3Manifest.digest,
+      },
+    });
+
+    // Reset manifest version to normal (v4)
+    __setManifestVersionForTest(null);
+
+    // Reading should complete the commit to 3, then reseal to v4 at generation 4
+    expect(read(base, bot)).toHaveLength(3);
+    const upgraded = snapshot(base, bot);
+    expect(JSON.parse(upgraded.manifest).version).toBe(MERKLE_MEMORY_INTEGRITY_VERSION);
+    expect(upgraded.seq).toBe(4);
+    expect(anchorStores.get(key)?.generation).toBe(4);
+
+    // Next write advances monotonically to generation 5
+    seedPrivate(base, bot, "V4 note 4.");
+    expect(snapshot(base, bot).seq).toBe(5);
+    expect(anchorStores.get(key)?.generation).toBe(5);
+  });
+
+  it("rejects a v3 store at seq 3 with anchor at gen 2 when pending candidate is missing", () => {
+    const base = root();
+    const bot = botName("anchor-desync-v3-no-pending");
+    process.env.OMB_MEMORY_INTEGRITY_KEY_PATH = join(base, "never.key");
+    enableSigner();
+    __setManifestVersionForTest(SIGNER_MEMORY_INTEGRITY_VERSION);
+
+    seedPrivate(base, bot, "V3 note 1.");
+    seedPrivate(base, bot, "V3 note 2.");
+    seedPrivate(base, bot, "V3 note 3.");
+
+    const key = memoryIntegrityStoreKey(bot, recordsPath(base, bot));
+    anchorStores.set(key, {
+      generation: 2,
+      digest: "f".repeat(64),
+      pending: null,
+    });
+
+    __setManifestVersionForTest(null);
+
+    // Unanchored future state must fail closed
+    expect(() => read(base, bot)).toThrow(/ahead of the committed generation 2 with no matching prepared commit/);
+  });
+
+  it("rejects a v3 store at seq 3 with anchor at gen 2 when pending candidate digest mismatches", () => {
+    const base = root();
+    const bot = botName("anchor-desync-v3-mismatched-pending");
+    process.env.OMB_MEMORY_INTEGRITY_KEY_PATH = join(base, "never.key");
+    enableSigner();
+    __setManifestVersionForTest(SIGNER_MEMORY_INTEGRITY_VERSION);
+
+    seedPrivate(base, bot, "V3 note 1.");
+    seedPrivate(base, bot, "V3 note 2.");
+    seedPrivate(base, bot, "V3 note 3.");
+
+    const key = memoryIntegrityStoreKey(bot, recordsPath(base, bot));
+    anchorStores.set(key, {
+      generation: 2,
+      digest: "f".repeat(64),
+      pending: {
+        generation: 3,
+        digest: "0".repeat(64), // Mismatched digest
+      },
+    });
+
+    __setManifestVersionForTest(null);
+
+    expect(() => read(base, bot)).toThrow(/ahead of the committed generation 2 with no matching prepared commit/);
+  });
+
+  it("rejects sealMemoryIntegrity if requested sequence does not equal head.generation + 1", () => {
+    const base = root();
+    const bot = botName("anchor-seal-invalid-seq");
+    process.env.OMB_MEMORY_INTEGRITY_KEY_PATH = join(base, "never.key");
+    enableSigner();
+
+    seedPrivate(base, bot, "Note 1");
+    seedPrivate(base, bot, "Note 2");
+    // Anchor is at generation 2
+    const key = memoryIntegrityStoreKey(bot, recordsPath(base, bot));
+    expect(anchorStores.get(key)?.generation).toBe(2);
+
+    // Attempting to seal with sequence 4 (skipping 3) must throw MemoryFreshnessError
+    expect(() =>
+      sealMemoryIntegrity(bot, [{
+        id: "rec-test",
+        botId: bot,
+        category: "user_preference",
+        headline: "Test",
+        detail: "Test detail",
+        confidence: 0.9,
+        sourceTurnId: "turn-1",
+        accessCount: 0,
+        createdAt: Date.now(),
+        lastReinforcedAt: Date.now(),
+        sha256Hash: "d".repeat(64),
+        redacted: false,
+      }], recordsPath(base, bot), 4),
+    ).toThrow(/manifest sequence 4 is not the next generation after anchor generation 2/);
+  });
+
   it("anchors every pre-existing store in the migration boot, not just the ones that get read", () => {
     const base = root();
     const a = botName("roster-a");

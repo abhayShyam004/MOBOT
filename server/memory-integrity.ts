@@ -1067,7 +1067,14 @@ function sealManifestMac(
   if (authorityFor(version) !== "signer") return manifestMac(header);
   const storeKey = memoryIntegrityStoreKey(botId, recordsPath);
   const head = signerAnchorHead(storeKey);
-  if (head) return prepareManifestMac(storeKey, manifestPayload(header));
+  if (head) {
+    if (header.seq !== head.generation + 1) {
+      throw new MemoryFreshnessError(
+        `manifest sequence ${header.seq} is not the next generation after anchor generation ${head.generation}`,
+      );
+    }
+    return prepareManifestMac(storeKey, manifestPayload(header));
+  }
 
   // No anchor yet. Generation 1 is a store being born (or adopted), which
   // nothing can be rolled back to; anything else is a store sealed before
@@ -1318,7 +1325,64 @@ export function resealMemoryIntegrity(
   // first anchor may be established from state that was just authenticated: a
   // pre-anchor store moving to the signer provider. It is not a general
   // "missing anchor" amnesty — a v3 store without an anchor still fails closed.
-  const manifest = sealMemoryIntegrity(botId, records, recordsPath, prior ? Math.max(2, prior.seq + 1) : undefined, {
+  const version = currentManifestVersion();
+  const isSigner = authorityFor(version) === "signer";
+  const storeKey = isSigner ? memoryIntegrityStoreKey(botId, recordsPath) : null;
+  const head = storeKey ? signerAnchorHead(storeKey) : null;
+
+  if (isSigner && prior && authorityFor(prior.version) === "signer") {
+    if (!head) {
+      throw new MemoryFreshnessError(
+        "signer-sealed store has no rollback anchor; refusing to reseal without freshness anchor",
+      );
+    }
+    if (prior.seq < head.generation) {
+      throw new MemoryFreshnessError(
+        `refusing to reseal a store whose prior sequence ${prior.seq} is older than the committed anchor generation ${head.generation}`,
+      );
+    }
+    if (prior.seq === head.generation) {
+      if (prior.digest !== head.digest) {
+        throw new MemoryFreshnessError(
+          `refusing to reseal a store whose generation ${prior.seq} digest does not match the anchored digest`,
+        );
+      }
+    } else if (prior.seq === head.generation + 1) {
+      if (head.pending && head.pending.generation === prior.seq && head.pending.digest === prior.digest) {
+        // Interrupted commit recovery: complete the commit to advance head to prior.seq
+        commitGeneration(storeKey!, prior.seq, prior.digest);
+      } else {
+        throw new MemoryFreshnessError(
+          `refusing to reseal a store whose sequence ${prior.seq} is ahead of anchor generation ${head.generation} with no matching prepared commit`,
+        );
+      }
+    } else {
+      throw new MemoryFreshnessError(
+        `refusing to reseal a store whose sequence ${prior.seq} is ahead of anchor generation ${head.generation} by more than one generation`,
+      );
+    }
+  }
+
+  if (isSigner && head !== null && prior && authorityFor(prior.version) !== "signer") {
+    if (prior.seq <= head.generation) {
+      throw new MemoryFreshnessError(
+        `refusing to reseal a legacy store whose sequence ${prior.seq} is already anchored at generation ${head.generation}`,
+      );
+    }
+  }
+
+  let nextSeq: number | undefined;
+  if (head) {
+    if (prior && prior.seq === head.generation + 1 && head.pending && head.pending.generation === prior.seq) {
+      nextSeq = prior.seq + 1;
+    } else {
+      nextSeq = head.generation + 1;
+    }
+  } else if (prior) {
+    nextSeq = Math.max(2, prior.seq + 1);
+  }
+
+  const manifest = sealMemoryIntegrity(botId, records, recordsPath, nextSeq, {
     allowFirstAnchor: prior != null && authorityFor(prior.version) !== "signer",
   });
   writeMemoryIntegrityManifest(recordsPath, manifest);

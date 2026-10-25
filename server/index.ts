@@ -4887,15 +4887,109 @@ bus.subscribe((event: RuntimeEvent) => {
         const itemKey = `${event.threadId}:${event.itemId}`;
         const messageId = toolMessageByItem.get(itemKey);
         let toolName = "tool";
+        let toolInput: any = undefined;
         if (messageId) {
           // the whole tool object is replaced, so carry `spoken` across —
           // dropping it here would silently un-narrate every completed tool
           const existing = store.messagesFor(event.threadId).find((m) => m.id === messageId)?.tool;
           toolName = existing?.name ?? "tool";
+          toolInput = existing?.input;
           store.patchMessage(event.threadId, messageId, {
             tool: { ...existing, name: toolName, ok: event.ok, output: event.output, error: (event as any).error },
           });
           toolMessageByItem.delete(itemKey);
+        }
+
+        // Record authoritative action receipt for calendar mutations so truthfulness guards recognize real execution
+        try {
+          const rawOutput = typeof event.output === "string" ? event.output : JSON.stringify(event.output ?? "");
+          const isCalendarTool = /googlecalendar|calendar/i.test(toolName) ||
+            (toolInput && /googlecalendar|calendar/i.test(typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput)));
+          const isCalendarRead = /list_events|get_event|find_free_slots|view_calendar|search_events/i.test(toolName);
+
+          if (isCalendarTool && !isCalendarRead) {
+            const isCreate = /create_event|createevent|addevent|insert_event/i.test(toolName) ||
+              /create_event|googlecalendar_create_event/i.test(rawOutput) ||
+              (toolInput && /create_event|googlecalendar_create_event/i.test(typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput)));
+
+            if (isCreate) {
+              let hasEmbeddedError = false;
+              let providerErrorMsg = "";
+              let isOAuthError = false;
+              let eventId = "";
+              let htmlLink = "";
+
+              try {
+                const parsed = JSON.parse(rawOutput);
+                if (parsed && typeof parsed === "object") {
+                  if (parsed.successful === false) {
+                    hasEmbeddedError = true;
+                    providerErrorMsg = typeof parsed.error === "string" ? parsed.error : (parsed.error?.message || "Operation failed in provider");
+                  } else if (parsed.error) {
+                    hasEmbeddedError = true;
+                    providerErrorMsg = typeof parsed.error === "string" ? parsed.error : (parsed.error.message || "Provider error");
+                  } else if (parsed.result?.error) {
+                    hasEmbeddedError = true;
+                    providerErrorMsg = typeof parsed.result.error === "string" ? parsed.result.error : (parsed.result.error.message || "Provider error");
+                  } else if (parsed.data?.error) {
+                    hasEmbeddedError = true;
+                    providerErrorMsg = typeof parsed.data.error === "string" ? parsed.data.error : (parsed.data.error.message || "Provider data error");
+                  }
+
+                  if (/oauth|unauthorized|not connected|token expired|authentication/i.test(providerErrorMsg)) {
+                    isOAuthError = true;
+                  }
+
+                  if (!hasEmbeddedError) {
+                    const results = parsed?.result?.data?.results || parsed?.data?.results || [];
+                    for (const r of (Array.isArray(results) ? results : [])) {
+                      if (r?.response?.data?.id) eventId = String(r.response.data.id);
+                      if (r?.response?.data?.htmlLink) htmlLink = String(r.response.data.htmlLink);
+                    }
+                    if (!eventId && parsed?.data?.response_data?.id) eventId = String(parsed.data.response_data.id);
+                    if (!eventId && parsed?.data?.response_data?.htmlLink) htmlLink = String(parsed.data.response_data.htmlLink);
+                    if (!eventId && parsed?.response_data?.id) eventId = String(parsed.response_data.id);
+                    if (!eventId && parsed?.result?.data?.eventId) eventId = String(parsed.result.data.eventId);
+                    if (!eventId && parsed?.data?.eventId) eventId = String(parsed.data.eventId);
+                    if (!eventId && typeof parsed?.id === "string" && parsed.id.length > 5) eventId = parsed.id;
+                    if (!eventId && typeof parsed?.result?.id === "string" && parsed.result.id.length > 5) eventId = parsed.result.id;
+                  }
+                }
+              } catch {}
+
+              if (event.ok && !hasEmbeddedError && eventId) {
+                recordActionReceipt({
+                  operationId: event.itemId,
+                  botId: bot?.id ?? "default",
+                  threadId: event.threadId,
+                  turnId: event.turnId ?? event.itemId,
+                  actionType: "calendar.create_event",
+                  status: "SUCCEEDED",
+                  evidence: {
+                    resourceId: eventId,
+                    ...(htmlLink ? { resourceUri: htmlLink } : {}),
+                  },
+                  attemptedAt: Date.now(),
+                });
+              } else {
+                recordActionReceipt({
+                  operationId: event.itemId,
+                  botId: bot?.id ?? "default",
+                  threadId: event.threadId,
+                  turnId: event.turnId ?? event.itemId,
+                  actionType: "calendar.create_event",
+                  status: isOAuthError ? "UNAVAILABLE" : (!event.ok || hasEmbeddedError ? "FAILED" : "UNKNOWN"),
+                  error: {
+                    code: isOAuthError ? "ERR_OAUTH_REQUIRED" : (hasEmbeddedError ? "ERR_CALENDAR_FAILED" : "ERR_CALENDAR_NO_CONFIRMATION"),
+                    message: providerErrorMsg || (event.ok && !eventId ? "Provider returned no confirmed event ID" : "Google Calendar event creation failed"),
+                  },
+                  attemptedAt: Date.now(),
+                });
+              }
+            }
+          }
+        } catch (receiptErr) {
+          console.warn("[ActionReceipt] Failed to process tool calendar receipt:", receiptErr);
         }
         // A tool that registered user-facing files just produced the artifact
         // the person is waiting for: publish it here, around the bot's words,
@@ -6921,6 +7015,48 @@ async function startTurn(
         attemptedAt: Date.now(),
       });
       capabilityGroundingContext = `\n\n[Reminder Error]: ${msg}. Inform the user truthfully.`;
+    }
+  } else if (capabilityResolution.chosenModality === "device_gesture" && capabilityResolution.primaryCapabilityId === "device.apps") {
+    try {
+      const appsRes = await defaultCapabilityRegistry.invoke(
+        "device.apps",
+        "list_apps",
+        {},
+        { botId: bot.id }
+      );
+      if (appsRes.success && appsRes.data) {
+        const apps = ((appsRes.data as any).apps || []) as Array<{ name: string; packageName: string; isLaunchable?: boolean }>;
+        const launchableApps = apps.filter((a) => a.isLaunchable !== false);
+        const targetList = launchableApps.length > 0 ? launchableApps : apps;
+        const appCount = targetList.length;
+        const displayLimit = 35;
+        const displayApps = targetList.slice(0, displayLimit);
+        const appSummaries = displayApps.map((a) => `${a.name} (${a.packageName})`).join(", ");
+        const moreCount = appCount - displayApps.length;
+
+        recordActionReceipt({
+          operationId: dispatchClaimId,
+          botId: bot.id,
+          threadId,
+          turnId: dispatchClaimId,
+          actionType: "apps.list_apps",
+          status: "SUCCEEDED",
+          evidence: {
+            resourceId: String(appCount),
+            metadata: {
+              appCount,
+              apps: displayApps.slice(0, 25),
+            },
+          },
+          attemptedAt: Date.now(),
+        });
+        capabilityGroundingContext = `\n\n[Installed Applications Detected]: Discovered ${appCount} launchable applications on this device: ${appSummaries}${moreCount > 0 ? `, and ${moreCount} more` : ""}. State these accurately and truthfully to the user.`;
+      } else {
+        capabilityGroundingContext = `\n\n[App Discovery Notice]: ${appsRes.error?.message || "Could not query installed applications."}`;
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      capabilityGroundingContext = `\n\n[App Discovery Notice]: Failed to list applications: ${msg}.`;
     }
   } else if (capabilityResolution.chosenModality === "user_clarification" && capabilityResolution.justification.includes("ERR_NO_CAPABLE_TOOL")) {
     capabilityGroundingContext = `\n\n[Capability Limitation Notice]: ${capabilityResolution.justification} Inform the user honestly of this limitation.`;

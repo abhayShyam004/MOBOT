@@ -7,6 +7,8 @@
  */
 
 import { promises as fs } from 'node:fs';
+import * as syncFs from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import type {
@@ -15,6 +17,7 @@ import type {
   CapabilityContext,
   OperationSchema,
 } from './types.ts';
+import { humanLabelForPackage } from '../drivers/phone-proxy.ts';
 import { loadUserLocation, saveUserLocation, clearUserLocation, type UserLocation } from '../location-context.ts';
 import { DATA_DIR, loadConfig } from '../config.ts';
 import { defaultReminderManager } from '../reminders.ts';
@@ -738,23 +741,140 @@ export class AppsCapability implements DeviceCapability {
     },
   ];
 
+  private getAndroidApps(options: {
+    filter?: 'launchable' | 'all';
+    includeSystem?: boolean;
+    query?: string;
+    limit?: number;
+  } = {}): Array<{ packageName: string; name: string; activity?: string; isLaunchable: boolean; isSystem?: boolean }> {
+    const appsMap = new Map<string, { packageName: string; name: string; activity?: string; isLaunchable: boolean; isSystem?: boolean }>();
+    const filter = options.filter ?? 'launchable';
+    const includeSystem = options.includeSystem ?? false;
+
+    // 1. Query launcher activities (User-facing applications)
+    try {
+      if (syncFs.existsSync('/system/bin/cmd')) {
+        const queryRes = spawnSync('/system/bin/cmd', [
+          'package',
+          'query-activities',
+          '--user',
+          '0',
+          '--brief',
+          '-a',
+          'android.intent.action.MAIN',
+          '-c',
+          'android.intent.category.LAUNCHER',
+        ], { encoding: 'utf8', timeout: 5000 });
+
+        if (queryRes.status === 0 && queryRes.stdout) {
+          const lines = queryRes.stdout.split('\n');
+          for (const line of lines) {
+            const trimmed = line.trim();
+            const match = trimmed.match(/^([a-zA-Z0-9._]+)\/([a-zA-Z0-9._]+)$/);
+            if (match) {
+              const packageName = match[1];
+              const activity = match[2];
+              if (!appsMap.has(packageName)) {
+                appsMap.set(packageName, {
+                  packageName,
+                  name: humanLabelForPackage(packageName),
+                  activity,
+                  isLaunchable: true,
+                  isSystem: packageName.startsWith('com.android.') || packageName.startsWith('com.sec.android.') || packageName.startsWith('com.samsung.'),
+                });
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // 2. Query installed packages for user 0 only if filter is 'all' or includeSystem is explicitly true
+    if (filter === 'all' || includeSystem) {
+      try {
+        if (syncFs.existsSync('/system/bin/cmd')) {
+          const listRes = spawnSync('/system/bin/cmd', [
+            'package',
+            'list',
+            'packages',
+            '--user',
+            '0',
+          ], { encoding: 'utf8', timeout: 5000 });
+
+          if (listRes.status === 0 && listRes.stdout) {
+            const lines = listRes.stdout.split('\n');
+            for (const line of lines) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('package:')) {
+                const packageName = trimmed.slice(8).trim();
+                if (packageName && !appsMap.has(packageName)) {
+                  appsMap.set(packageName, {
+                    packageName,
+                    name: humanLabelForPackage(packageName),
+                    isLaunchable: false,
+                    isSystem: true,
+                  });
+                }
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    let results = Array.from(appsMap.values());
+    if (options.query && typeof options.query === 'string' && options.query.trim().length > 0) {
+      const q = options.query.toLowerCase().trim();
+      results = results.filter((a) => a.name.toLowerCase().includes(q) || a.packageName.toLowerCase().includes(q));
+    }
+    if (options.limit && typeof options.limit === 'number' && options.limit > 0) {
+      results = results.slice(0, options.limit);
+    }
+    return results;
+  }
+
   async execute(operation: string, params: Record<string, unknown>): Promise<CapabilityResult> {
     if (operation === 'list_apps') {
+      const filter = params.filter === 'all' ? 'all' : 'launchable';
+      const includeSystem = Boolean(params.includeSystem);
+      const query = typeof params.query === 'string' ? params.query : undefined;
+      const limit = typeof params.limit === 'number' ? params.limit : undefined;
+
+      const androidApps = this.getAndroidApps({ filter, includeSystem, query, limit });
+      const apps = androidApps.length > 0 ? androidApps : [
+        { packageName: 'com.openmausbot.companion', name: 'OpenMausBot', isLaunchable: true },
+      ];
       return {
         success: true,
         data: {
-          apps: [
-            { packageName: 'com.openmausbot.companion', name: 'OpenMausBot' },
-          ],
+          apps,
+          total: apps.length,
+          filter,
         },
       };
     }
     if (operation === 'open_app') {
+      const pkg = typeof params.packageName === 'string' ? params.packageName.trim() : '';
+      const PACKAGE_REGEX = /^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)+$/;
+      if (!pkg || !PACKAGE_REGEX.test(pkg) || pkg.length > 256) {
+        return {
+          success: false,
+          error: {
+            code: 'INVALID_INPUT',
+            message: 'Invalid Android package name format.',
+            category: 'invalid_input',
+          },
+        };
+      }
       return {
         success: true,
         data: {
           launched: true,
-          packageName: params.packageName,
+          packageName: pkg,
         },
       };
     }

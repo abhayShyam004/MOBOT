@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPAWNED_PROXIES } from "./proxy-paths.ts";
 import { managedConnectorUnavailableReason } from "../shared/connector-availability.ts";
-import { COMPOSIO_CATALOG } from "./composio-catalog.js";
+import { COMPOSIO_CATALOG } from "./composio-catalog.ts";
 
 const DEFAULT_BACKEND_ORIGIN = "https://backend.composio.dev";
 const DEFAULT_CONNECT_MCP_ENDPOINT = "https://connect.composio.dev/mcp";

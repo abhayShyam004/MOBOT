@@ -1239,16 +1239,16 @@ export function loadMemoryRecords(
             "refusing to move the store to a weaker integrity provider",
         );
       }
+      // Authenticity is settled by the MACs above. Freshness is a separate
+      // question — an older but validly sealed snapshot passes every MAC —
+      // and it is answered by the signer's own committed generation. This
+      // throws before a single record reaches a caller when the store is
+      // older than what was committed, and completes a commit that a crash
+      // left unfinished when it is exactly one step ahead.
+      assertMemoryIntegrityCurrent(botId, path, verified.manifest);
+
       if (verified.manifest.version !== sealingVersion && memoryIntegrityKeyProvider() === "native") {
         resealMemoryIntegrity(botId, allRecords, path, verified.manifest);
-      } else {
-        // Authenticity is settled by the MACs above. Freshness is a separate
-        // question — an older but validly sealed snapshot passes every MAC —
-        // and it is answered by the signer's own committed generation. This
-        // throws before a single record reaches a caller when the store is
-        // older than what was committed, and completes a commit that a crash
-        // left unfinished when it is exactly one step ahead.
-        assertMemoryIntegrityCurrent(botId, path, verified.manifest);
       }
     }
   } catch (error) {

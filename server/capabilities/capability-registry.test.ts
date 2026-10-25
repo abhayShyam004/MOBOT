@@ -83,7 +83,60 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
 
     const appRes = await registry.invoke('device.apps', 'list_apps', {});
     expect(appRes.success).toBe(true);
-    expect((appRes.data as any)?.apps).toBeDefined();
+    expect(Array.isArray((appRes.data as any)?.apps)).toBe(true);
+    expect((appRes.data as any)?.apps.length).toBeGreaterThanOrEqual(1);
+    expect((appRes.data as any)?.filter).toBe('launchable');
+  });
+
+  it('validates package names strictly in open_app to prevent shell injection or malformed input', async () => {
+    const invalidRes1 = await registry.invoke('device.apps', 'open_app', { packageName: 'com.whatsapp; rm -rf /' });
+    expect(invalidRes1.success).toBe(false);
+    expect(invalidRes1.error?.code).toBe('INVALID_INPUT');
+
+    const invalidRes2 = await registry.invoke('device.apps', 'open_app', { packageName: '$(whoami)' });
+    expect(invalidRes2.success).toBe(false);
+    expect(invalidRes2.error?.code).toBe('INVALID_INPUT');
+
+    const invalidRes3 = await registry.invoke('device.apps', 'open_app', { packageName: '' });
+    expect(invalidRes3.success).toBe(false);
+    expect(invalidRes3.error?.code).toBe('INVALID_INPUT');
+
+    const validRes = await registry.invoke('device.apps', 'open_app', { packageName: 'com.whatsapp' });
+    expect(validRes.success).toBe(true);
+    expect((validRes.data as any)?.packageName).toBe('com.whatsapp');
+  });
+
+  it('supports privacy filtering and query limits in list_apps', async () => {
+    const queryRes = await registry.invoke('device.apps', 'list_apps', { query: 'companion' });
+    expect(queryRes.success).toBe(true);
+    const apps = (queryRes.data as any)?.apps || [];
+    expect(apps.every((a: any) => a.name.toLowerCase().includes('companion') || a.packageName.toLowerCase().includes('companion'))).toBe(true);
+
+    const limitRes = await registry.invoke('device.apps', 'list_apps', { limit: 1 });
+    expect(limitRes.success).toBe(true);
+    expect((limitRes.data as any)?.apps.length).toBeLessThanOrEqual(1);
+  });
+
+  it('routes app discovery queries like "what all apps can you detect in this phone" to device.apps', async () => {
+    const resolution = registry.matchCapability({
+      activeBotId: 'test-bot',
+      objective: 'what all apps can you detect in this phone',
+      requiredDataFreshness: 'realtime',
+      targetDevice: 'android_local',
+      contextKeywords: [],
+    });
+    expect(resolution.chosenModality).toBe('device_gesture');
+    expect(resolution.primaryCapabilityId).toBe('device.apps');
+
+    const whatsappResolution = registry.matchCapability({
+      activeBotId: 'test-bot',
+      objective: 'can you detect whatsapp on this phone',
+      requiredDataFreshness: 'realtime',
+      targetDevice: 'android_local',
+      contextKeywords: [],
+    });
+    expect(whatsappResolution.chosenModality).toBe('device_gesture');
+    expect(whatsappResolution.primaryCapabilityId).toBe('device.apps');
   });
 
   it('executes location status query with UNKNOWN/UNAVAILABLE when unconfigured', async () => {

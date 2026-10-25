@@ -158,11 +158,12 @@ export function verifyAndEnforceTurnTruthfulness(options: {
           "I have not scheduled this meeting yet because Google Calendar is not connected to this bot. Please connect Google Calendar to allow event scheduling.";
       }
     } else {
-      // Receipt says SUCCEEDED: verify evidence (must have resourceId or link, never manufactured)
-      if (!calendarReceipt.evidence?.resourceId && !calendarReceipt.evidence?.resourceUri) {
-        violations.push("Calendar success claimed without verified resourceId or link evidence");
+      // Receipt says SUCCEEDED: verify evidence (must have trustworthy provider resourceId, never manufactured)
+      const resourceId = calendarReceipt.evidence?.resourceId;
+      if (!resourceId || typeof resourceId !== "string" || resourceId.startsWith("cal_evt_") || resourceId.length < 5) {
+        violations.push("Calendar success claimed without verified provider resourceId evidence");
         correctedText =
-          "The calendar event operation succeeded, but no verified event confirmation was returned by the provider.";
+          "The calendar event operation was requested, but no verified event confirmation was returned by the provider.";
         dominantStatus = "UNKNOWN";
       }
     }

@@ -257,6 +257,61 @@ interface GoalFile {
   canonicalGoals?: CanonicalGoalRecord[];
 }
 
+export function canonicalGoalToGoal(record: CanonicalGoalRecord): Goal {
+  const completedMilestones = record.milestones.filter((m) => m.status === "completed");
+  const failedMilestones = record.milestones.filter((m) => m.status === "failed");
+  const total = record.milestones.length;
+  const progress = total === 0 ? 0 : Math.round((completedMilestones.length / total) * 100);
+
+  let status: GoalStatus = "active";
+  if (failedMilestones.length > 0) {
+    status = "blocked";
+  } else if (total > 0 && completedMilestones.length === total) {
+    status = "completed";
+  }
+
+  const blockers: string[] = [];
+  for (const f of failedMilestones) {
+    blockers.push(`Milestone failed: ${f.title}`);
+  }
+
+  let nextAction: string | undefined;
+  if (status === "completed") {
+    nextAction = "Goal fully achieved!";
+  } else if (record.activeMilestoneIndex < record.milestones.length) {
+    const activeM = record.milestones[record.activeMilestoneIndex];
+    if (activeM) {
+      nextAction = activeM.title;
+    }
+  }
+
+  const milestones: GoalMilestone[] = record.milestones.map((m) => ({
+    id: m.id,
+    title: m.title,
+    completed: m.status === "completed",
+    completedAt: m.verifiedAt,
+    tasks: [],
+  }));
+
+  return {
+    id: record.id,
+    botId: record.botId,
+    title: record.formalObjective,
+    objective: record.formalObjective,
+    motivation: record.originatingPrompt,
+    status,
+    progress,
+    milestones,
+    blockers,
+    nextAction,
+    relevantMemories: [],
+    relevantDocuments: [],
+    associatedSpecialists: [],
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
 export class GoalManager {
   private readonly file: string;
   private goals: Goal[] = [];
@@ -299,15 +354,22 @@ export class GoalManager {
     writeFileAtomic(this.file, JSON.stringify(payload, null, 2), { mode: 0o600 });
   }
 
-  listGoals(botId?: string): Goal[] {
-    if (botId) {
-      return this.goals.filter((g) => g.botId === botId);
-    }
-    return [...this.goals];
+  listGoals(botId?: string, includeCanonical = true): Goal[] {
+    const legacy = botId ? this.goals.filter((g) => g.botId === botId) : [...this.goals];
+    if (!includeCanonical) return legacy;
+
+    const canonical = (botId ? this.canonicalGoals.filter((g) => g.botId === botId) : this.canonicalGoals)
+      .map(canonicalGoalToGoal);
+    const existingIds = new Set(legacy.map((g) => g.id));
+    return [...legacy, ...canonical.filter((g) => !existingIds.has(g.id))];
   }
 
   getGoal(id: string): Goal | null {
-    return this.goals.find((g) => g.id === id) ?? null;
+    const legacy = this.goals.find((g) => g.id === id);
+    if (legacy) return legacy;
+    const canonical = this.canonicalGoals.find((g) => g.id === id);
+    if (canonical) return canonicalGoalToGoal(canonical);
+    return null;
   }
 
   createGoal(input: CreateGoalInput): Goal {
@@ -383,39 +445,56 @@ export class GoalManager {
 
   deleteGoal(id: string): boolean {
     const idx = this.goals.findIndex((g) => g.id === id);
-    if (idx === -1) return false;
-    this.goals.splice(idx, 1);
-    this.save();
-    return true;
+    if (idx !== -1) {
+      this.goals.splice(idx, 1);
+      this.save();
+      return true;
+    }
+    const cIdx = this.canonicalGoals.findIndex((g) => g.id === id);
+    if (cIdx !== -1) {
+      this.canonicalGoals.splice(cIdx, 1);
+      this.save();
+      return true;
+    }
+    return false;
   }
 
   completeMilestone(goalId: string, milestoneId: string): Goal | null {
     const goal = this.goals.find((g) => g.id === goalId);
-    if (!goal) return null;
-    const milestone = goal.milestones.find((m) => m.id === milestoneId);
-    if (!milestone) return null;
+    if (goal) {
+      const milestone = goal.milestones.find((m) => m.id === milestoneId);
+      if (!milestone) return null;
 
-    milestone.completed = true;
-    milestone.completedAt = Date.now();
-    for (const task of milestone.tasks) {
-      task.status = "completed";
-      task.completedAt = Date.now();
-    }
-
-    goal.progress = this.calculateProgress(goal.milestones);
-    if (goal.progress >= 100) {
-      goal.status = "completed";
-      goal.nextAction = "Goal fully achieved!";
-    } else {
-      const nextPending = goal.milestones.find((m) => !m.completed);
-      if (nextPending) {
-        goal.nextAction = `Next: ${nextPending.title}`;
+      milestone.completed = true;
+      milestone.completedAt = Date.now();
+      for (const task of milestone.tasks) {
+        task.status = "completed";
+        task.completedAt = Date.now();
       }
+
+      goal.progress = this.calculateProgress(goal.milestones);
+      if (goal.progress >= 100) {
+        goal.status = "completed";
+        goal.nextAction = "Goal fully achieved!";
+      } else {
+        const nextPending = goal.milestones.find((m) => !m.completed);
+        if (nextPending) {
+          goal.nextAction = `Next: ${nextPending.title}`;
+        }
+      }
+
+      goal.updatedAt = Date.now();
+      this.save();
+      return goal;
     }
 
-    goal.updatedAt = Date.now();
-    this.save();
-    return goal;
+    const canonical = this.canonicalGoals.find((g) => g.id === goalId);
+    if (canonical) {
+      const updated = this.updateCanonicalMilestone(goalId, milestoneId, "completed");
+      return updated ? canonicalGoalToGoal(updated) : null;
+    }
+
+    return null;
   }
 
   completeTask(goalId: string, milestoneId: string, taskId: string): Goal | null {

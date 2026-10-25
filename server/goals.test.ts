@@ -541,5 +541,95 @@ describe("GoalManager", () => {
         expect(unrelated.similarity).toBeLessThan(0.60);
       });
     });
+
+    describe("9. Canonical Goal Integration & Overview Projection", () => {
+      it("surfaces canonical goals through listGoals() and getGoal() for client UI overview", () => {
+        const cGoal = manager.createCanonicalGoal({
+          botId: "bot-overview-1",
+          originatingPrompt: "Optimize mobile memory consumption",
+          formalObjective: "Audit memory partitions and reduce footprint",
+          constraints: ["Do not disable logs"],
+          successCriteria: ["Heap sampled", "Memory profile generated"],
+          milestones: [
+            { title: "Stage 1: Sample baseline heap" },
+            { title: "Stage 2: Generate memory profile" },
+          ],
+        });
+
+        // Verify listGoals() projects canonical goals into Goal shape
+        const goals = manager.listGoals("bot-overview-1");
+        expect(goals.length).toBe(1);
+        const projected = goals[0];
+        expect(projected.id).toBe(cGoal.id);
+        expect(projected.botId).toBe("bot-overview-1");
+        expect(projected.title).toBe("Audit memory partitions and reduce footprint");
+        expect(projected.status).toBe("active");
+        expect(projected.progress).toBe(0);
+        expect(projected.milestones.length).toBe(2);
+        expect(projected.milestones[0].completed).toBe(false);
+        expect(projected.nextAction).toBe("Stage 1: Sample baseline heap");
+
+        // Verify getGoal() also resolves canonical goals
+        const fetched = manager.getGoal(cGoal.id);
+        expect(fetched).not.toBeNull();
+        expect(fetched?.title).toBe(cGoal.formalObjective);
+
+        // Advance milestone 0 via completeMilestone()
+        const afterM0 = manager.completeMilestone(cGoal.id, cGoal.milestones[0].id);
+        expect(afterM0).not.toBeNull();
+        expect(afterM0?.progress).toBe(50);
+        expect(afterM0?.milestones[0].completed).toBe(true);
+        expect(afterM0?.nextAction).toBe("Stage 2: Generate memory profile");
+
+        // Verify that underlying canonical record was also updated
+        const canonicalUpdated = manager.getCanonicalGoal(cGoal.id);
+        expect(canonicalUpdated?.milestones[0].status).toBe("completed");
+        expect(canonicalUpdated?.activeMilestoneIndex).toBe(1);
+
+        // Advance milestone 1 to complete the entire goal
+        const afterM1 = manager.completeMilestone(cGoal.id, cGoal.milestones[1].id);
+        expect(afterM1?.progress).toBe(100);
+        expect(afterM1?.status).toBe("completed");
+        expect(afterM1?.nextAction).toBe("Goal fully achieved!");
+      });
+
+      it("preserves strict bot isolation and coexistence with legacy goals", () => {
+        // Create 1 legacy goal and 1 canonical goal for Bot A
+        const legacyA = manager.createGoal({
+          botId: "bot-iso-A",
+          title: "Legacy Goal A",
+          objective: "Legacy Objective A",
+        });
+        const canonicalA = manager.createCanonicalGoal({
+          botId: "bot-iso-A",
+          originatingPrompt: "Canonical Prompt A",
+          formalObjective: "Canonical Objective A",
+        });
+
+        // Create 1 canonical goal for Bot B
+        manager.createCanonicalGoal({
+          botId: "bot-iso-B",
+          originatingPrompt: "Canonical Prompt B",
+          formalObjective: "Canonical Objective B",
+        });
+
+        // Bot A listGoals() has exactly 2 goals
+        const botAGoals = manager.listGoals("bot-iso-A");
+        expect(botAGoals.length).toBe(2);
+        const ids = botAGoals.map((g) => g.id);
+        expect(ids).toContain(legacyA.id);
+        expect(ids).toContain(canonicalA.id);
+
+        // Bot B cannot see Bot A goals
+        const botBGoals = manager.listGoals("bot-iso-B");
+        expect(botBGoals.length).toBe(1);
+        expect(botBGoals[0].title).toBe("Canonical Objective B");
+
+        // Reload across crash/restart preserves both legacy and canonical goals
+        const reloaded = new GoalManager(file);
+        const reloadedAGoals = reloaded.listGoals("bot-iso-A");
+        expect(reloadedAGoals.length).toBe(2);
+      });
+    });
   });
 });
