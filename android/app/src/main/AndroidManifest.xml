@@ -325,6 +325,24 @@
         </service>
 
         <!--
+          Native Android Phone Control (Phase 35 foundation):
+          AccessibilityService for user-authorized cross-app UI automation,
+          semantic hierarchy observation, and gesture input without ADB.
+        -->
+        <service
+            android:name=".service.CompanionAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <!--
           Enrollment for the separate-UID signing authority. The signer mints a
           single-use random challenge and delivers it *here*, as an explicit
           broadcast, so the value reaches this app's own process and no other

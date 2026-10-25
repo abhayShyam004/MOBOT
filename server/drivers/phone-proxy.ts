@@ -278,7 +278,38 @@ export async function usbDevices(): Promise<Device[]> {
   return parseDevices((await runAdb(["devices", "-l"])).toString("utf8")).filter((device) => device.connection === "usb");
 }
 
+export function isNativeDriverActive(): boolean {
+  return Boolean(process.env.PH_DRIVER_PORT && Number(process.env.PH_DRIVER_PORT) > 0);
+}
+
+export async function callNativeDriver(endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<any> {
+  const port = process.env.PH_DRIVER_PORT;
+  const token = process.env.PH_DRIVER_TOKEN || "";
+  if (!port || Number(port) <= 0) {
+    throw new PhoneActionError("ANDROID_ACCESS_REQUIRED", "Native phone driver is not active");
+  }
+
+  const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
+    method: options.method ?? "GET",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw new PhoneActionError("ACTION_FAILED", `Native driver error (HTTP ${res.status}): ${errText}`);
+  }
+
+  return await res.json();
+}
+
 export async function readySerial(requested?: unknown): Promise<string> {
+  if (isNativeDriverActive()) {
+    return "native-android";
+  }
   const devices = await usbDevices();
   const serial = typeof requested === "string" && requested ? requested : process.env.PH_ANDROID_SERIAL;
   const candidates = serial ? devices.filter((device) => device.serial === serial) : devices;
@@ -299,6 +330,19 @@ export async function readySerial(requested?: unknown): Promise<string> {
 }
 
 export async function onDevice(serial: string, args: string[], binary = false): Promise<Buffer> {
+  if (serial === "native-android") {
+    const shellArgs = args[0] === "shell" ? args.slice(1) : args;
+    const bin = shellArgs[0] === "cmd" ? "/system/bin/cmd" : shellArgs[0] === "pm" ? "/system/bin/pm" : shellArgs[0];
+    const subArgs = shellArgs.slice(1);
+    try {
+      const { spawnSync } = await import("node:child_process");
+      const res = spawnSync(bin, subArgs, { timeout: 10000 });
+      if (res.stdout) return Buffer.from(res.stdout);
+      return Buffer.from("");
+    } catch {
+      return Buffer.from("");
+    }
+  }
   return runAdb(["-s", serial, ...args], { binary });
 }
 
@@ -829,6 +873,10 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
   try {
     return await withDeviceLock(async () => {
     if (name === "status") {
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/status");
+        return textResult(JSON.stringify({ available: true, native: true, ...data }, null, 2));
+      }
       const adb = resolveAdbPath();
       const devices = adb ? await usbDevices() : [];
       return textResult(JSON.stringify({ available: Boolean(adb), devices }, null, 2));
@@ -837,6 +885,17 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
     const serial = await readySerial(args.serial);
 
     if (name === "read_screen") {
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/screen");
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Failed to read screen");
+        const state: ScreenState = {
+          currentPackage: data.currentPackage || "unknown",
+          currentActivity: data.currentActivity,
+          nodeCount: data.nodeCount || 0,
+          nodes: data.nodes || [],
+        };
+        return textResult(formatScreenState(state));
+      }
       const [nodes, fg] = await Promise.all([
         readNodes(serial),
         getForegroundActivity(serial),
@@ -851,6 +910,16 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
     }
 
     if (name === "screenshot") {
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/screenshot", { method: "POST", body: { includeBase64: true } });
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Screenshot failed");
+        return {
+          content: [
+            { type: "text", text: `Native Android screenshot from ${serial}` },
+            { type: "image", data: data.base64, mimeType: "image/png" },
+          ],
+        };
+      }
       const png = await onDevice(serial, ["exec-out", "screencap", "-p"], true);
       if (!png.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) {
         throw new PhoneActionError("ACTION_FAILED", "Android returned an invalid screenshot");
@@ -877,6 +946,22 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
 
     if (name === "open_app") {
       const appName = String(args.name ?? "");
+      if (isNativeDriverActive()) {
+        const cleaned = appName.trim();
+        const [actOutput, installed] = await Promise.all([
+          onDevice(serial, [
+            "shell", "cmd", "package", "query-activities", "--brief",
+            "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
+          ]).catch(() => Buffer.from("")),
+          getInstalledPackages(serial),
+        ]);
+        const launchableMap = parseLaunchableActivities(actOutput.toString("utf8"));
+        const matches = findPackages(cleaned, Array.from(launchableMap.keys()));
+        const targetPkg = matches.length === 1 ? matches[0] : (findPackages(cleaned, Array.from(installed))[0] || cleaned);
+        const data = await callNativeDriver("/open_app", { method: "POST", body: { packageName: targetPkg } });
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || `Could not open ${appName}`);
+        return textResult(`${humanLabelForPackage(targetPkg)} is open.`);
+      }
       const res = await openApp(serial, appName);
       return textResult(res);
     }
@@ -885,6 +970,11 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
       const text = String(args.text ?? "");
       const exact = args.exact === true;
       const index = typeof args.index === "number" ? args.index : undefined;
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/tap", { method: "POST", body: { text, exact } });
+        if (!data.ok) throw new PhoneActionError(data.code || "TARGET_NOT_FOUND", data.error || `No visible Android text matches "${text}"`);
+        return textResult(`Tapped "${text}"`);
+      }
       const res = await tapNode(serial, text, { exact, index });
       return textResult(res);
     }
@@ -892,12 +982,22 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
     if (name === "tap") {
       const x = Number(args.x);
       const y = Number(args.y);
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/tap", { method: "POST", body: { x, y } });
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Tap failed");
+        return textResult(`Tapped ${x},${y}`);
+      }
       const res = await tapCoordinates(serial, x, y);
       return textResult(res);
     }
 
     if (name === "type_text") {
       const text = String(args.text ?? "");
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/type", { method: "POST", body: { text } });
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Type text failed");
+        return textResult("Typed text into the focused Android field");
+      }
       const res = await typeText(serial, text);
       return textResult(res);
     }
@@ -909,12 +1009,22 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
 
     if (name === "swipe") {
       const direction = String(args.direction ?? "");
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/scroll", { method: "POST", body: { direction } });
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Swipe failed");
+        return textResult(`Swiped ${direction}`);
+      }
       const res = await swipeScreen(serial, direction);
       return textResult(res);
     }
 
     if (name === "press") {
       const key = String(args.key ?? "");
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/key", { method: "POST", body: { key } });
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Press key failed");
+        return textResult(`Pressed ${key}`);
+      }
       const res = await pressKey(serial, key);
       return textResult(res);
     }

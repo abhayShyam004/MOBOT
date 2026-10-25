@@ -9,6 +9,7 @@ import com.openmausbot.companion.avatar.AvatarImageStore
 import com.openmausbot.companion.core.Session
 import com.openmausbot.companion.discovery.NsdDiscovery
 import com.openmausbot.companion.host.BrowserDriverServer
+import com.openmausbot.companion.host.PhoneDriverServer
 import com.openmausbot.companion.host.AndroidHostFiles
 import com.openmausbot.companion.host.HarnessService
 import com.openmausbot.companion.host.HarnessHost
@@ -186,6 +187,9 @@ class OpenMausApp : Application() {
         // Session WebViews attach to the resumed Activity's decor: an
         // unattached WebView never spawns its renderer on several OEM builds.
         BrowserDriverServer.start(this, AndroidHostFiles(this).browserSessionsDir())
+        // Native Phone Control driver (Phase 35): loopback driver server for
+        // user-authorized Android UI automation and screen observation.
+        PhoneDriverServer.start(this)
         registerActivityLifecycleCallbacks(object : NoopLifecycle() {
             override fun onActivityResumed(a: Activity) {
                 BrowserDriverServer.attachWindow(a.window)

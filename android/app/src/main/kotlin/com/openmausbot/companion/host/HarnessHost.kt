@@ -406,6 +406,10 @@ class HarnessHost(
             // and a per-boot capability token, never a user credential.
             "AT_DRIVER_PORT" to TerminalDriverServer.currentPort().toString(),
             "AT_DRIVER_TOKEN" to TerminalDriverServer.currentToken(),
+            // Native Phone Control driver (Phase 35): loopback HTTP API to the
+            // CompanionAccessibilityService for cross-app UI automation without ADB.
+            "PH_DRIVER_PORT" to PhoneDriverServer.currentPort().toString(),
+            "PH_DRIVER_TOKEN" to PhoneDriverServer.currentToken(),
             "APP_VERSION" to files.appVersion(),
             // The host-identity token is deliberately *not* here. A child's
             // `/proc/<pid>/environ` is readable by the agent PTY on this device

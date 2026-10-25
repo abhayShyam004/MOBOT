@@ -454,6 +454,19 @@ fun SettingsScreen(
                                 showChevron = true,
                                 onClick = { activePermissionDetailDomain = "composio" },
                             )
+                            SettingsDivider()
+                            val phoneControlReady = com.openmausbot.companion.service.CompanionAccessibilityService.isReady()
+                            SettingsRow(
+                                title = "Phone Control & Automation",
+                                subtitle = if (phoneControlReady) {
+                                    "Native cross-app navigation, UI observation, and gestures"
+                                } else {
+                                    "Enable MOBOT in Android Settings -> Accessibility"
+                                },
+                                trailingValue = if (phoneControlReady) "Active" else "Action needed",
+                                showChevron = true,
+                                onClick = { activePermissionDetailDomain = "phone_control" },
+                            )
                         }
 
                         if (onOpenSpecializedCapabilities != null) {

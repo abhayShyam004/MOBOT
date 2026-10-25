@@ -33,6 +33,7 @@ import {
   WebScraperCapability,
   ComposioServiceCapability,
 } from './default-capabilities.ts';
+import { PhoneControlCapability } from './phone-control.ts';
 
 export class DeviceCapabilityRegistry {
   private readonly capabilities = new Map<string, DeviceCapability>();
@@ -60,6 +61,7 @@ export class DeviceCapabilityRegistry {
     this.register(new BrowserCapability());
     this.register(new WebScraperCapability());
     this.register(new ComposioServiceCapability());
+    this.register(new PhoneControlCapability());
   }
 
   /**
@@ -426,7 +428,8 @@ export class DeviceCapabilityRegistry {
 
     // 9. Android Device Gesture / Hardware Sensor -> device_gesture
     let matchedDeviceTool: string | undefined;
-    if (hasAnyToken("post a notification", "notification", "notify")) matchedDeviceTool = "device.notifications";
+    if (hasAnyToken("phone control", "control phone", "automation", "phone_control", "phone assistant", "tap screen", "type text", "scroll screen", "global action")) matchedDeviceTool = "device.phone_control";
+    else if (hasAnyToken("post a notification", "notification", "notify")) matchedDeviceTool = "device.notifications";
     else if (hasAnyToken("remind", "reminder", "reminders", "alarm")) matchedDeviceTool = "device.reminders";
     else if (hasAnyToken("camera", "photo", "picture")) matchedDeviceTool = "device.camera";
     else if (hasAnyToken("screenshot", "capture screen")) matchedDeviceTool = "device.screenshot";

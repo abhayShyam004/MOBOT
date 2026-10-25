@@ -7064,7 +7064,7 @@ async function startTurn(
 
   // Live Phone Control Status Grounding & Receipt Check
   const phoneDriverStatus = checkLivePhoneControlAvailability();
-  if (/(?:access|control).*phone|open.*whatsapp|take.*screenshot|capture.*screenshot/i.test(userTurnText)) {
+  if (/(?:access|control).*phone|open.*whatsapp|take.*screenshot|capture.*screenshot|phone.*control/i.test(userTurnText)) {
     if (!phoneDriverStatus.operational) {
       recordActionReceipt({
         operationId: dispatchClaimId,
@@ -7080,6 +7080,79 @@ async function startTurn(
         attemptedAt: Date.now(),
       });
       capabilityGroundingContext += `\n\n[Phone Control Live Status]: UNAVAILABLE (${phoneDriverStatus.reason || "driver offline"}). The device automation driver is offline in this session. You CANNOT access the user's phone, tap, type, inspect other apps, or open WhatsApp. You must truthfully state that phone control is currently unavailable.`;
+    } else {
+      if (/(?:open|launch)\s+whatsapp/i.test(userTurnText)) {
+        try {
+          const launchRes = await defaultCapabilityRegistry.invoke(
+            "device.phone_control",
+            "open_app",
+            { packageName: "com.whatsapp" },
+            { botId: bot.id }
+          );
+          if (launchRes.success) {
+            recordActionReceipt({
+              operationId: dispatchClaimId,
+              botId: bot.id,
+              threadId,
+              turnId: dispatchClaimId,
+              actionType: "device.phone_control",
+              status: "SUCCEEDED",
+              evidence: {
+                resourceId: "com.whatsapp",
+                metadata: { packageName: "com.whatsapp", launched: true },
+              },
+              attemptedAt: Date.now(),
+            });
+            capabilityGroundingContext += `\n\n[Phone Control Action Succeeded]: WhatsApp was successfully launched on this phone via native AccessibilityService.`;
+          } else {
+            recordActionReceipt({
+              operationId: dispatchClaimId,
+              botId: bot.id,
+              threadId,
+              turnId: dispatchClaimId,
+              actionType: "device.phone_control",
+              status: "FAILED",
+              error: {
+                code: launchRes.error?.code || "ERR_LAUNCH_FAILED",
+                message: launchRes.error?.message || "Failed to launch WhatsApp",
+              },
+              attemptedAt: Date.now(),
+            });
+            capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${launchRes.error?.message || "Failed to launch WhatsApp"}.`;
+          }
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : String(err);
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "device.phone_control",
+            status: "FAILED",
+            error: { code: "ERR_LAUNCH_FAILED", message: msg },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${msg}.`;
+        }
+      } else {
+        recordActionReceipt({
+          operationId: dispatchClaimId,
+          botId: bot.id,
+          threadId,
+          turnId: dispatchClaimId,
+          actionType: "device.phone_control",
+          status: "SUCCEEDED",
+          evidence: {
+            resourceId: "phone_control_status",
+            metadata: {
+              operational: true,
+              supportedActions: phoneDriverStatus.supportedActions,
+            },
+          },
+          attemptedAt: Date.now(),
+        });
+        capabilityGroundingContext += `\n\n[Phone Control Live Status]: OPERATIONAL (Device automation driver and AccessibilityService are active and connected). Supported actions: ${phoneDriverStatus.supportedActions.join(", ")}. You can truthfully state that phone control and automation is connected and operational.`;
+      }
     }
   }
 

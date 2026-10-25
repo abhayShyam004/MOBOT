@@ -9,9 +9,9 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
     registry = new DeviceCapabilityRegistry();
   });
 
-  it('registers all 15 core Android device and connected capabilities by default', () => {
+  it('registers all 16 core Android device and connected capabilities by default', () => {
     const list = registry.list();
-    expect(list.length).toBe(15);
+    expect(list.length).toBe(16);
 
     const ids = list.map((c) => c.id).sort();
     expect(ids).toEqual([
@@ -26,6 +26,7 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
       'device.location',
       'device.media',
       'device.notifications',
+      'device.phone_control',
       'device.reminders',
       'device.screenshot',
       'device.share',

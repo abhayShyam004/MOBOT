@@ -61,6 +61,18 @@ export function checkLivePhoneControlAvailability(driverPort?: string): PhoneCon
     };
   }
 
+  // 1. Native in-app Phone Driver (Android host loopback)
+  const nativePort = driverPort || process.env.PH_DRIVER_PORT;
+  if (nativePort && Number(nativePort) > 0) {
+    return {
+      operational: true,
+      driverPort: String(nativePort),
+      reason: "Native Android Phone Driver is configured via in-app loopback",
+      supportedActions: ["take_screenshot", "open_app", "read_screen", "tap", "type_text", "scroll", "press_key"],
+    };
+  }
+
+  // 2. Physical USB ADB phone driver
   if (process.env.OMB_PHONE_DRIVER_ACTIVE === "1") {
     return {
       operational: true,
@@ -70,8 +82,8 @@ export function checkLivePhoneControlAvailability(driverPort?: string): PhoneCon
     };
   }
 
-  // AT_DRIVER_PORT from environment or param
-  const port = driverPort || process.env.AT_DRIVER_PORT;
+  // 3. AT_DRIVER_PORT from environment or param
+  const port = process.env.AT_DRIVER_PORT;
   if (!port) {
     return {
       operational: false,

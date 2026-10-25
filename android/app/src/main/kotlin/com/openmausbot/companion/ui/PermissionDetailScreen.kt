@@ -43,6 +43,10 @@ import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Intent
+import android.provider.Settings as AndroidSettings
+import androidx.compose.ui.platform.LocalContext
+import com.openmausbot.companion.service.CompanionAccessibilityService
 import com.openmausbot.companion.core.AgentPermissions
 import com.openmausbot.companion.core.Session
 import kotlinx.coroutines.launch
@@ -133,11 +137,31 @@ object PermissionDomainCatalog {
         ),
     )
 
+    val PHONE_CONTROL = PermissionDomainSpec(
+        id = "phone_control",
+        title = "Native Phone Control & Automation",
+        subtitle = "Android UI observation, gestures, and app control",
+        description = "Authorizes MOBOT to observe the active screen, tap UI elements, type text, and switch apps natively via the Android Accessibility Service without ADB.",
+        icon = Icons.Default.Lock,
+        controlledTools = listOf(
+            "read_screen", "screenshot", "tap",
+            "type_text", "swipe", "press", "open_app",
+            "device.phone_control"
+        ),
+        securityBoundaries = listOf(
+            "Requires user enablement in Android Settings -> Accessibility -> Installed Services.",
+            "Android FLAG_SECURE windows (banking, passwords, payment apps) are never captured or accessed.",
+            "Consequential actions (messages, form submission, deletes) require explicit confirmation.",
+            "Disabling the service immediately revokes automation without stopping background server sync."
+        ),
+    )
+
     fun forDomain(id: String): PermissionDomainSpec = when (id.lowercase()) {
         "terminal" -> TERMINAL
         "filesystem" -> FILESYSTEM
         "browser" -> BROWSER
         "composio" -> COMPOSIO
+        "phone_control", "phone" -> PHONE_CONTROL
         else -> TERMINAL
     }
 }
@@ -154,14 +178,17 @@ fun PermissionDetailScreen(
 ) {
     val spec = remember(domainId) { PermissionDomainCatalog.forDomain(domainId) }
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
     var saving by remember { mutableStateOf(false) }
     var confirmRevokeOpen by remember { mutableStateOf(false) }
 
-    val currentState = when (spec.id) {
-        "terminal" -> agentPermissions?.terminal ?: "granted"
-        "filesystem" -> agentPermissions?.filesystem ?: "granted"
-        "browser" -> agentPermissions?.browser ?: "granted"
-        "composio" -> agentPermissions?.composio ?: "requires_configuration"
+    val isPhoneDomain = spec.id == "phone_control" || spec.id == "phone"
+    val currentState = when {
+        isPhoneDomain -> if (CompanionAccessibilityService.isReady()) "granted" else "requires_configuration"
+        spec.id == "terminal" -> agentPermissions?.terminal ?: "granted"
+        spec.id == "filesystem" -> agentPermissions?.filesystem ?: "granted"
+        spec.id == "browser" -> agentPermissions?.browser ?: "granted"
+        spec.id == "composio" -> agentPermissions?.composio ?: "requires_configuration"
         else -> "granted"
     }
 
@@ -240,19 +267,41 @@ fun PermissionDetailScreen(
                     horizontalArrangement = Arrangement.End,
                 ) {
                     if (isRequiresConfig) {
-                        Button(
-                            onClick = { onOpenConnectedServices?.invoke() },
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = AppTheme.colors.accent,
-                                contentColor = AppTheme.colors.onAccent,
-                            ),
-                            shape = RoundedCornerShape(12.dp),
-                        ) {
-                            Text(
-                                text = "Configure in Connected Services",
-                                fontSize = 13.sp,
-                                fontWeight = FontWeight.SemiBold,
-                            )
+                        if (isPhoneDomain) {
+                            Button(
+                                onClick = {
+                                    val intent = Intent(AndroidSettings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AppTheme.colors.accent,
+                                    contentColor = AppTheme.colors.onAccent,
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Text(
+                                    text = "Enable in Accessibility Settings",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
+                        } else {
+                            Button(
+                                onClick = { onOpenConnectedServices?.invoke() },
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = AppTheme.colors.accent,
+                                    contentColor = AppTheme.colors.onAccent,
+                                ),
+                                shape = RoundedCornerShape(12.dp),
+                            ) {
+                                Text(
+                                    text = "Configure in Connected Services",
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                )
+                            }
                         }
                     } else if (isGranted) {
                         OutlinedButton(

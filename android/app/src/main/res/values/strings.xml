@@ -15,4 +15,7 @@
     <string name="notification_channel_host">Local host</string>
     <string name="notification_channel_host_desc">Status of the MOBOT runtime running on this phone</string>
     <string name="host_notification_title">MOBOT local host</string>
+
+    <string name="accessibility_service_label">MOBOT Phone Assistant</string>
+    <string name="accessibility_service_description">Allows MOBOT to observe the active screen and automate user-authorized workflows across applications.</string>
 </resources>
