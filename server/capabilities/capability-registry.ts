@@ -13,8 +13,16 @@ import {
   type CapabilityContext,
   type CapabilityMatchRequest,
   type CapabilityMatchResolution,
+  type CapabilityHealthStatus,
   ERR_NO_CAPABLE_TOOL,
+  ERR_CAPABILITY_PROBE_FAILED,
+  ERR_CONFIRMATION_REQUIRED,
 } from './types.ts';
+import {
+  DeviceSafetyPolicy,
+  defaultActionAuthorizationManager,
+} from './safety-policy.ts';
+import { sharedObservability } from './observability.ts';
 import { recordActionReceipt } from './action-truthfulness.ts';
 import {
   FilesCapability,
@@ -34,9 +42,14 @@ import {
   ComposioServiceCapability,
 } from './default-capabilities.ts';
 import { PhoneControlCapability } from './phone-control.ts';
+import { ReachCapability } from './reach.ts';
+
+export const CAPABILITY_PROBE_TIMEOUT_MS = 500;
 
 export class DeviceCapabilityRegistry {
   private readonly capabilities = new Map<string, DeviceCapability>();
+  private readonly healthStates = new Map<string, CapabilityHealthStatus>();
+  private readonly probeGenerations = new Map<string, number>();
 
   constructor() {
     this.registerDefaults();
@@ -62,6 +75,7 @@ export class DeviceCapabilityRegistry {
     this.register(new WebScraperCapability());
     this.register(new ComposioServiceCapability());
     this.register(new PhoneControlCapability());
+    this.register(new ReachCapability());
   }
 
   /**
@@ -75,6 +89,8 @@ export class DeviceCapabilityRegistry {
    * Unregister an existing capability by ID.
    */
   unregister(id: string): boolean {
+    this.healthStates.delete(id);
+    this.probeGenerations.delete(id);
     return this.capabilities.delete(id);
   }
 
@@ -136,6 +152,203 @@ export class DeviceCapabilityRegistry {
   }
 
   /**
+   * Official Roadmap Phase 13: Capability State Awareness.
+   * Retrieve authoritative operational state of a capability.
+   */
+  getHealthStatus(capabilityId: string): CapabilityHealthStatus {
+    const cached = this.healthStates.get(capabilityId);
+    if (cached) return cached;
+
+    const cap = this.capabilities.get(capabilityId);
+    if (!cap) {
+      return {
+        capabilityId,
+        state: 'DEPENDENCY_MISSING',
+        lastCheckedMs: 0,
+        diagnosticDetails: `Device capability '${capabilityId}' is not registered.`,
+      };
+    }
+
+    if (!cap.availability.supported) {
+      return {
+        capabilityId,
+        state: 'DEPENDENCY_MISSING',
+        lastCheckedMs: 0,
+        diagnosticDetails: cap.availability.reason || 'Capability unsupported on this platform.',
+      };
+    }
+
+    return {
+      capabilityId,
+      state: 'AVAILABLE',
+      lastCheckedMs: 0,
+    };
+  }
+
+  /**
+   * Set or override capability health status explicitly.
+   */
+  setHealthStatus(status: CapabilityHealthStatus): void {
+    const previous = this.healthStates.get(status.capabilityId);
+    this.healthStates.set(status.capabilityId, status);
+    const gen = (this.probeGenerations.get(status.capabilityId) || 0) + 1;
+    this.probeGenerations.set(status.capabilityId, gen);
+
+    if (previous?.state !== status.state) {
+      sharedObservability.emit('CAPABILITY_STATE_CHANGED', {
+        capabilityId: status.capabilityId,
+        previousState: previous?.state,
+        currentState: status.state,
+        remediationAction: status.remediationAction,
+        diagnosticDetails: status.diagnosticDetails,
+      });
+    }
+  }
+
+  /**
+   * Clear cached health states (useful for tests or full re-evaluation).
+   */
+  clearHealthStatus(capabilityId?: string): void {
+    if (capabilityId) {
+      this.healthStates.delete(capabilityId);
+    } else {
+      this.healthStates.clear();
+      this.probeGenerations.clear();
+    }
+  }
+
+  /**
+   * Official Roadmap Phase 13: Live Health Probe with strict 500ms hard timeout.
+   */
+  async probeHealth(
+    capabilityId: string,
+    options?: { force?: boolean; signal?: AbortSignal; context?: CapabilityContext }
+  ): Promise<CapabilityHealthStatus> {
+    const cached = this.healthStates.get(capabilityId);
+    const now = Date.now();
+    if (!options?.force && cached && cached.lastCheckedMs > 0 && now - cached.lastCheckedMs < 1000) {
+      return cached;
+    }
+
+    const cap = this.capabilities.get(capabilityId);
+    if (!cap) {
+      const missing: CapabilityHealthStatus = {
+        capabilityId,
+        state: 'DEPENDENCY_MISSING',
+        lastCheckedMs: now,
+        diagnosticDetails: `Device capability '${capabilityId}' is not registered.`,
+      };
+      this.healthStates.set(capabilityId, missing);
+      return missing;
+    }
+
+    const gen = (this.probeGenerations.get(capabilityId) || 0) + 1;
+    this.probeGenerations.set(capabilityId, gen);
+
+    const timeoutCtrl = new AbortController();
+    const timeoutTimer = setTimeout(() => {
+      timeoutCtrl.abort(new Error(ERR_CAPABILITY_PROBE_FAILED));
+    }, CAPABILITY_PROBE_TIMEOUT_MS);
+
+    const onExternalAbort = () => {
+      timeoutCtrl.abort(options?.signal?.reason || new Error('Aborted'));
+    };
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        timeoutCtrl.abort(options.signal.reason);
+      } else {
+        options.signal.addEventListener('abort', onExternalAbort, { once: true });
+      }
+    }
+
+    let status: CapabilityHealthStatus;
+    try {
+      if (typeof cap.checkHealth === 'function') {
+        const probePromise = cap.checkHealth(options?.context, timeoutCtrl.signal);
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutCtrl.signal.addEventListener(
+            'abort',
+            () => reject(timeoutCtrl.signal.reason || new Error(ERR_CAPABILITY_PROBE_FAILED)),
+            { once: true }
+          );
+        });
+        status = await Promise.race([probePromise, timeoutPromise]);
+      } else {
+        if (!cap.availability.supported) {
+          status = {
+            capabilityId,
+            state: 'DEPENDENCY_MISSING',
+            lastCheckedMs: Date.now(),
+            diagnosticDetails: cap.availability.reason || 'Capability unsupported on this platform.',
+          };
+        } else {
+          status = {
+            capabilityId,
+            state: 'AVAILABLE',
+            lastCheckedMs: Date.now(),
+          };
+        }
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTimeout =
+        (err instanceof Error && (err.message.includes(ERR_CAPABILITY_PROBE_FAILED) || err.name === 'AbortError' || err.name === 'TimeoutError')) ||
+        timeoutCtrl.signal.aborted;
+
+      if (isTimeout) {
+        status = {
+          capabilityId,
+          state: 'TEMPORARILY_UNAVAILABLE',
+          lastCheckedMs: Date.now(),
+          diagnosticDetails: `${ERR_CAPABILITY_PROBE_FAILED}: Health probe for '${capabilityId}' exceeded ${CAPABILITY_PROBE_TIMEOUT_MS}ms hard deadline.`,
+          remediationAction: 'wait',
+        };
+      } else {
+        status = {
+          capabilityId,
+          state: 'DRIVER_OFFLINE',
+          lastCheckedMs: Date.now(),
+          diagnosticDetails: `Health probe failed: ${msg}`,
+          remediationAction: 'restart_driver',
+        };
+      }
+    } finally {
+      clearTimeout(timeoutTimer);
+      if (options?.signal) {
+        options.signal.removeEventListener('abort', onExternalAbort);
+      }
+    }
+
+    if (this.probeGenerations.get(capabilityId) === gen) {
+      this.healthStates.set(capabilityId, status);
+      sharedObservability.emit('CAPABILITY_HEALTH_PROBED', {
+        capabilityId,
+        state: status.state,
+        lastCheckedMs: status.lastCheckedMs,
+        diagnosticDetails: status.diagnosticDetails,
+        remediationAction: status.remediationAction,
+      });
+    }
+
+    return status;
+  }
+
+  /**
+   * Probe all registered capabilities in parallel.
+   */
+  async probeAll(
+    options?: { force?: boolean; signal?: AbortSignal; context?: CapabilityContext }
+  ): Promise<Map<string, CapabilityHealthStatus>> {
+    const results = new Map<string, CapabilityHealthStatus>();
+    const probes = Array.from(this.capabilities.keys()).map(async (id) => {
+      const st = await this.probeHealth(id, options);
+      results.set(id, st);
+    });
+    await Promise.all(probes);
+    return results;
+  }
+
+  /**
    * Invoke a capability operation.
    */
   async invoke(
@@ -152,6 +365,26 @@ export class DeviceCapabilityRegistry {
           code: 'CAPABILITY_NOT_FOUND',
           message: `Device capability '${capabilityId}' is not registered.`,
           category: 'unavailable',
+        },
+      };
+    }
+
+    // Official Roadmap Phase 13: Authoritative Pre-Dispatch Operational State Gate
+    const currentHealth = this.getHealthStatus(capabilityId);
+    if (currentHealth.state !== 'AVAILABLE') {
+      return {
+        success: false,
+        error: {
+          code: currentHealth.state,
+          message: currentHealth.diagnosticDetails || `Device capability '${capabilityId}' cannot be invoked because it is ${currentHealth.state}.`,
+          category: currentHealth.state === 'PERMISSION_REQUIRED' ? 'permission_denied' : 'unavailable',
+          details: {
+            capabilityId,
+            state: currentHealth.state,
+            remediationAction: currentHealth.remediationAction,
+            lastCheckedMs: currentHealth.lastCheckedMs,
+            diagnosticDetails: currentHealth.diagnosticDetails,
+          },
         },
       };
     }
@@ -177,6 +410,67 @@ export class DeviceCapabilityRegistry {
           category: 'invalid_input',
         },
       };
+    }
+
+    // Official Roadmap Phase 14: Authoritative Risk-Aware Autonomy Pre-Dispatch Gate
+    const approvalMode = (context?.approvalMode === 'custom' ? 'auto' : context?.approvalMode) || 'ask';
+    const riskResult = DeviceSafetyPolicy.evaluateRisk({
+      capabilityId,
+      operation,
+      parameters: params,
+      approvalMode: approvalMode as 'ask' | 'edits' | 'auto' | 'full',
+    });
+
+    sharedObservability.emit('CAPABILITY_RISK_EVALUATED', {
+      capabilityId,
+      operation,
+      tier: riskResult.tier,
+      requiresExplicitConfirmation: riskResult.requiresExplicitConfirmation,
+      approvalMode,
+    });
+
+    if (riskResult.requiresExplicitConfirmation) {
+      const grant = context?.confirmationGrant;
+      const validation = defaultActionAuthorizationManager.validateAndConsumeGrant({
+        grant,
+        grantId: context?.confirmationToken,
+        capabilityId,
+        operation,
+        parameters: params,
+        botId: context?.botId,
+      });
+
+      if (!validation.valid) {
+        sharedObservability.emit('CAPABILITY_CONFIRMATION_REQUIRED', {
+          capabilityId,
+          operation,
+          reason: validation.reason,
+          code: validation.code,
+        });
+
+        return {
+          success: false,
+          error: {
+            code: validation.code || ERR_CONFIRMATION_REQUIRED,
+            message: validation.reason || `Explicit user confirmation required for ${riskResult.tier}-risk operation: ${riskResult.consequentialImpactDescription}`,
+            category: 'permission_denied',
+            details: {
+              tier: riskResult.tier,
+              requiresExplicitConfirmation: true,
+              consequentialImpactDescription: riskResult.consequentialImpactDescription,
+              reversible: riskResult.reversible,
+              isMassDeletion: riskResult.isMassDeletion,
+              remediationAction: 'prompt_auth',
+            },
+          },
+        };
+      }
+
+      sharedObservability.emit('CAPABILITY_CONFIRMATION_GRANTED', {
+        capabilityId,
+        operation,
+        grantId: grant?.grantId || context?.confirmationToken,
+      });
     }
 
     try {
@@ -327,19 +621,34 @@ export class DeviceCapabilityRegistry {
 
     // 4. External Cloud SaaS -> composio_service
     const hasWebUrl = /(?:https?:\/\/|www\.)\S+/.test(lowerObj);
+    const isLocalAppQuery =
+      (hasAnyToken("open", "launch", "start", "switch to", "detect", "installed", "find", "check") && hasAnyToken("app", "application", "whatsapp")) ||
+      (hasAnyToken("whatsapp") && hasAnyToken("phone", "device", "installed", "detect"));
     const isSaasTarget =
       !hasWebUrl &&
+      !isLocalAppQuery &&
       (request.targetDevice === "external_saas" ||
-        hasAnyToken("gmail", "slack", "github", "linear", "notion", "jira", "salesforce", "trello", "hubspot", "email"));
+        hasAnyToken("gmail", "slack", "github", "linear", "notion", "jira", "salesforce", "trello", "hubspot", "email") ||
+        (hasAnyToken("whatsapp") && hasAnyToken("message", "send", "chat", "text", "dm", "notify")));
     if (isSaasTarget) {
       const composioAvailable = this.has("composio.service");
       if (composioAvailable) {
+        const health = this.getHealthStatus("composio.service");
+        if (health.state === "AVAILABLE") {
+          return {
+            chosenModality: "composio_service",
+            primaryCapabilityId: "composio.service",
+            fallbackCapabilityIds: [],
+            justification: "Task targets cloud SaaS integration managed through Composio connected services.",
+            confidenceScore: 0.90,
+          };
+        }
         return {
           chosenModality: "composio_service",
-          primaryCapabilityId: "composio.service",
+          primaryCapabilityId: undefined,
           fallbackCapabilityIds: [],
-          justification: "Task targets cloud SaaS integration managed through Composio connected services.",
-          confidenceScore: 0.90,
+          justification: `[${health.state}]: Connected SaaS capability 'composio.service' is currently ${health.state}.${health.diagnosticDetails ? ` ${health.diagnosticDetails}` : ""}${health.remediationAction ? ` Remediation: ${health.remediationAction}.` : ""}`,
+          confidenceScore: 0.30,
         };
       }
       return {
@@ -357,12 +666,17 @@ export class DeviceCapabilityRegistry {
       (request.targetDevice === "cloud_vps" ||
         hasAnyToken("terminal", "bash", "shell", "exec", "curl", "npm", "pnpm", "git", "docker", "compile", "script", "command"));
     if (isTerminalTarget && !hasAnyToken("browser", "search", "headlines", "news")) {
-      const primaryTool = this.has("system.terminal") ? "system.terminal" : (this.has("device.apps") ? "device.apps" : undefined);
+      const candidates = ["system.terminal", "device.apps"].filter((id) => this.has(id));
+      const healthyCandidates = candidates.filter((id) => this.getHealthStatus(id).state === "AVAILABLE");
+      const primaryTool = healthyCandidates[0];
+      const fallbacks = healthyCandidates.slice(1);
       return {
         chosenModality: "terminal_command",
         primaryCapabilityId: primaryTool,
-        fallbackCapabilityIds: [],
-        justification: "Task requires terminal or shell command execution in a command-line environment.",
+        fallbackCapabilityIds: fallbacks,
+        justification: primaryTool
+          ? "Task requires terminal or shell command execution in a command-line environment."
+          : `${ERR_NO_CAPABLE_TOOL}: Terminal capabilities are currently offline or unavailable.`,
         confidenceScore: primaryTool ? 0.92 : 0.35,
       };
     }
@@ -373,13 +687,25 @@ export class DeviceCapabilityRegistry {
       hasAnyToken("txt", "pdf", "json", "md", "csv", "log", "report", "file", "folder", "directory", "workspace", "storage") &&
       !hasAnyToken("browse", "website", "url", "http", "headlines", "news");
     if (isFilesystem) {
-      const primaryTool = this.has("device.files") ? "device.files" : undefined;
+      const candidates = ["device.files"].filter((id) => this.has(id));
+      const healthyCandidates = candidates.filter((id) => this.getHealthStatus(id).state === "AVAILABLE");
+      const primaryTool = healthyCandidates[0];
+      if (primaryTool) {
+        return {
+          chosenModality: "filesystem_mutation",
+          primaryCapabilityId: primaryTool,
+          fallbackCapabilityIds: [],
+          justification: "Task requires reading, writing, or managing files in local storage.",
+          confidenceScore: 0.94,
+        };
+      }
+      const filesHealth = this.getHealthStatus("device.files");
       return {
         chosenModality: "filesystem_mutation",
-        primaryCapabilityId: primaryTool,
+        primaryCapabilityId: undefined,
         fallbackCapabilityIds: [],
-        justification: "Task requires reading, writing, or managing files in local storage.",
-        confidenceScore: primaryTool ? 0.94 : 0.35,
+        justification: `[${filesHealth.state}]: Filesystem capability is currently unavailable (${filesHealth.state}).${filesHealth.remediationAction ? ` Remediation: ${filesHealth.remediationAction}.` : ""}`,
+        confidenceScore: 0.35,
       };
     }
 
@@ -390,47 +716,80 @@ export class DeviceCapabilityRegistry {
       /(?:https?:\/\/|www\.)\S+/.test(lowerObj);
 
     if (isInteractiveBrowser && !hasAnyToken("headlines", "search web for", "google search")) {
-      const primaryTool = this.has("device.browser") ? "device.browser" : (this.has("web.scraper") ? "web.scraper" : undefined);
-      const fallbacks = ["web.scraper"].filter((id) => id !== primaryTool && this.has(id));
+      const candidates = ["device.browser", "web.scraper"].filter((id) => this.has(id));
+      const healthyCandidates = candidates.filter((id) => this.getHealthStatus(id).state === "AVAILABLE");
+      const primaryTool = healthyCandidates[0];
+      const fallbacks = healthyCandidates.slice(1);
+      if (primaryTool) {
+        return {
+          chosenModality: "browser_session",
+          primaryCapabilityId: primaryTool,
+          fallbackCapabilityIds: fallbacks,
+          justification: primaryTool === "device.browser"
+            ? "Task requires interactive browser navigation, DOM inspection, or session interaction."
+            : `Primary browser 'device.browser' is unavailable (${this.getHealthStatus("device.browser").state}); routed to healthy alternative '${primaryTool}'.`,
+          confidenceScore: 0.93,
+        };
+      }
+      const browserHealth = this.getHealthStatus("device.browser");
       return {
-        chosenModality: "browser_session",
-        primaryCapabilityId: primaryTool,
-        fallbackCapabilityIds: fallbacks,
-        justification: "Task requires interactive browser navigation, DOM inspection, or session interaction.",
-        confidenceScore: primaryTool ? 0.93 : 0.35,
+        chosenModality: "user_clarification",
+        primaryCapabilityId: undefined,
+        fallbackCapabilityIds: [],
+        justification: `[${browserHealth.state}]: Interactive browser capability is currently unavailable (${browserHealth.state}).${browserHealth.diagnosticDetails ? ` ${browserHealth.diagnosticDetails}` : ""}${browserHealth.remediationAction ? ` Remediation: ${browserHealth.remediationAction}.` : ""}`,
+        confidenceScore: 0.25,
       };
     }
 
     // 8. Factual Web Queries & News Requiring Real-Time Freshness -> web_search
     // Anti-Pattern: Do not route factual web queries to direct LLM generation without search verification when freshness is required.
-    const isDeviceSensorQuery = hasAnyToken("screenshot", "location", "screen", "clipboard", "gps", "camera", "photo", "app", "apps", "application", "applications", "installed", "whatsapp", "reminder", "reminders", "alarm", "calendar");
+    const isDeviceSensorQuery = hasAnyToken("screenshot", "location", "screen", "clipboard", "gps", "camera", "photo", "app", "apps", "application", "applications", "installed", "whatsapp", "reminder", "reminders", "alarm", "calendar", "call", "wake", "reach");
     const isWebSearch =
       !isDeviceSensorQuery &&
       (request.requiredDataFreshness === "realtime" ||
         (request.requiredDataFreshness !== "historical" &&
-          (hasAnyToken("search", "headlines", "news", "today", "weather", "stock", "price", "latest", "lookup", "recent") ||
+          (hasAnyToken("search", "headlines", "news", "today", "weather", "stock", "price", "latest", "lookup", "recent", "internet", "from the internet", "web", "online") ||
             (hasAnyToken("current") && hasAnyToken("weather", "stock", "price", "news", "events", "exchange", "rate", "temperature"))
           )
         )
       );
 
     if (isWebSearch) {
-      const primaryTool = this.has("device.browser") ? "device.browser" : (this.has("web.scraper") ? "web.scraper" : undefined);
-      const fallbacks = ["web.scraper", "device.browser"].filter((id) => id !== primaryTool && this.has(id));
+      const candidates = ["device.browser", "web.scraper"].filter((id) => this.has(id));
+      const healthyCandidates = candidates.filter((id) => this.getHealthStatus(id).state === "AVAILABLE");
+      const primaryTool = healthyCandidates[0];
+      const fallbacks = healthyCandidates.slice(1);
+      if (primaryTool) {
+        return {
+          chosenModality: "web_search",
+          primaryCapabilityId: primaryTool,
+          fallbackCapabilityIds: fallbacks,
+          justification: primaryTool === "device.browser"
+            ? "Factual query requires real-time data freshness; routed to web search capability to prevent hallucinations."
+            : `Factual query routed to healthy web scraper '${primaryTool}' because browser is ${this.getHealthStatus("device.browser").state}.`,
+          confidenceScore: 0.94,
+        };
+      }
       return {
-        chosenModality: "web_search",
-        primaryCapabilityId: primaryTool,
-        fallbackCapabilityIds: fallbacks,
-        justification: "Factual query requires real-time data freshness; routed to web search capability to prevent hallucinations.",
-        confidenceScore: primaryTool ? 0.94 : 0.40,
+        chosenModality: "user_clarification",
+        primaryCapabilityId: undefined,
+        fallbackCapabilityIds: [],
+        justification: `${ERR_NO_CAPABLE_TOOL}: Web search capabilities are currently offline or unavailable.`,
+        confidenceScore: 0.20,
       };
     }
 
     // 9. Android Device Gesture / Hardware Sensor -> device_gesture
     let matchedDeviceTool: string | undefined;
     if (hasAnyToken("phone control", "control phone", "automation", "phone_control", "phone assistant", "tap screen", "type text", "scroll screen", "global action")) matchedDeviceTool = "device.phone_control";
+    else if (
+      hasAnyToken("call me", "call-like", "wake me up", "wake me", "alarm", "reach") ||
+      (hasAnyToken("call") && hasAnyToken("minute", "minutes", "hour", "hours", "remind", "reminder", "at", "tomorrow", "tonight", "in"))
+    ) {
+      matchedDeviceTool = "device.reach";
+    }
     else if (hasAnyToken("post a notification", "notification", "notify")) matchedDeviceTool = "device.notifications";
-    else if (hasAnyToken("remind", "reminder", "reminders", "alarm")) matchedDeviceTool = "device.reminders";
+    else if (hasAnyToken("remind", "reminder", "reminders")) matchedDeviceTool = "device.reminders";
     else if (hasAnyToken("camera", "photo", "picture")) matchedDeviceTool = "device.camera";
     else if (hasAnyToken("screenshot", "capture screen")) matchedDeviceTool = "device.screenshot";
     else if (hasAnyToken("clipboard", "copy", "paste")) matchedDeviceTool = "device.clipboard";
@@ -438,17 +797,27 @@ export class DeviceCapabilityRegistry {
     else if (hasAnyToken("contact", "contacts", "phone number", "address book")) matchedDeviceTool = "device.contacts";
     else if (hasAnyToken("location", "gps", "coordinates", "where am i")) matchedDeviceTool = "device.location";
     else if (hasAnyToken("media", "audio", "music", "play")) matchedDeviceTool = "device.media";
-    else if (hasAnyToken("app", "apps", "application", "applications", "launch", "open app", "installed", "whatsapp", "package", "packages")) matchedDeviceTool = "device.apps";
+    else if (hasAnyToken("app", "apps", "application", "applications", "launch", "open app", "installed", "package", "packages") || isLocalAppQuery) matchedDeviceTool = "device.apps";
     else if (hasAnyToken("share")) matchedDeviceTool = "device.share";
 
     if (matchedDeviceTool) {
       if (this.has(matchedDeviceTool)) {
+        const health = this.getHealthStatus(matchedDeviceTool);
+        if (health.state === "AVAILABLE") {
+          return {
+            chosenModality: "device_gesture",
+            primaryCapabilityId: matchedDeviceTool,
+            fallbackCapabilityIds: [],
+            justification: `Task targets Android local device interaction (${matchedDeviceTool}).`,
+            confidenceScore: 0.92,
+          };
+        }
         return {
-          chosenModality: "device_gesture",
-          primaryCapabilityId: matchedDeviceTool,
+          chosenModality: "user_clarification",
+          primaryCapabilityId: undefined,
           fallbackCapabilityIds: [],
-          justification: `Task targets Android local device interaction (${matchedDeviceTool}).`,
-          confidenceScore: 0.92,
+          justification: `[${health.state}]: Android capability '${matchedDeviceTool}' cannot be selected because it is currently ${health.state}.${health.diagnosticDetails ? ` ${health.diagnosticDetails}` : ""}${health.remediationAction ? ` Remediation: ${health.remediationAction}.` : ""}`,
+          confidenceScore: 0.20,
         };
       }
       return {
@@ -463,13 +832,16 @@ export class DeviceCapabilityRegistry {
     // 10. Fallback: Check if any registered capability matches the keywords
     for (const [id, cap] of this.capabilities.entries()) {
       if (hasAnyToken(id, cap.name.toLowerCase())) {
-        return {
-          chosenModality: "device_gesture",
-          primaryCapabilityId: id,
-          fallbackCapabilityIds: [],
-          justification: `Task keywords matched registered capability '${id}'.`,
-          confidenceScore: 0.85,
-        };
+        const health = this.getHealthStatus(id);
+        if (health.state === "AVAILABLE") {
+          return {
+            chosenModality: "device_gesture",
+            primaryCapabilityId: id,
+            fallbackCapabilityIds: [],
+            justification: `Task keywords matched registered capability '${id}'.`,
+            confidenceScore: 0.85,
+          };
+        }
       }
     }
 
@@ -542,6 +914,56 @@ export const DEVICE_CAPABILITY_TOOLS = {
       const params = (args.params as Record<string, unknown>) || {};
       const res = await defaultCapabilityRegistry.invoke(capabilityId, operation, params, { signal });
       return res;
+    },
+  },
+
+  device_capability_health: {
+    description:
+      'Check authoritative live operational state and health diagnostics of registered Android capabilities.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        capabilityId: { type: 'string', description: 'Optional capability ID, e.g. "device.browser". If omitted, probes all capabilities.' },
+        force: { type: 'boolean', description: 'Force bypass health cache.' },
+      },
+    },
+    handler: async (args: Record<string, unknown>, signal?: AbortSignal) => {
+      const capabilityId = typeof args.capabilityId === 'string' ? args.capabilityId.trim() : '';
+      const force = Boolean(args.force);
+      if (capabilityId) {
+        const status = await defaultCapabilityRegistry.probeHealth(capabilityId, { force, signal });
+        return { status };
+      }
+      const all = await defaultCapabilityRegistry.probeAll({ force, signal });
+      return { statuses: Object.fromEntries(all.entries()) };
+    },
+  },
+
+  device_capability_risk: {
+    description:
+      'Evaluate the risk tier, confirmation requirements, reversibility, and impact description for an action under an approval mode.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        capabilityId: { type: 'string', description: 'Capability identifier, e.g. "device.files"' },
+        operation: { type: 'string', description: 'Operation name, e.g. "delete"' },
+        parameters: { type: 'object', description: 'Parameters for the operation' },
+        approvalMode: { type: 'string', enum: ['ask', 'edits', 'auto', 'full'], default: 'ask' },
+      },
+      required: ['capabilityId', 'operation'],
+    },
+    handler: async (args: Record<string, unknown>) => {
+      const capabilityId = String(args.capabilityId || '');
+      const operation = String(args.operation || '');
+      const parameters = (args.parameters as Record<string, unknown>) || {};
+      const approvalMode = (args.approvalMode as 'ask' | 'edits' | 'auto' | 'full') || 'ask';
+      const evaluation = DeviceSafetyPolicy.evaluateRisk({
+        capabilityId,
+        operation,
+        parameters,
+        approvalMode,
+      });
+      return { evaluation };
     },
   },
 };

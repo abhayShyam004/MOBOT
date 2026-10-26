@@ -1,14 +1,35 @@
 /**
- * Safety and Consent Model for Device Actions (Phase Q).
+ * Safety and Consent Model for Device Actions (Official Roadmap Phase 14: Risk-Aware Autonomy).
  *
  * Implements risk tiers and approval logic aligned with MOBOT principles:
  * - SAFE OPERATIONS SHOULD FEEL EASY (low risk read-only, clipboard, search, preview)
- * - MEANINGFUL CONSEQUENCES SHOULD BE VISIBLE (destructive deletes, external changes)
- * - Do not interrupt harmless operations with unnecessary permission dialogs.
+ * - CONTEXTUAL STATE CREATION PROCEEDS AUTONOMOUSLY (medium risk creation/writes within task scope)
+ * - CONSEQUENTIAL ACTIONS ARE RIGOROUSLY PROTECTED (destructive deletes, external visible mutations)
+ * - CRITICAL INVARIANT: Mass deletions (e.g. rm -rf) can never be silently executed even under full auto
+ * - AUTHORITATIVE PRE-DISPATCH EXECUTION GATE: Confirmation tokens bound to exact operation and parameters
  */
 
-import type { RiskTier } from './types.ts';
+import { createHash } from 'node:crypto';
+import type {
+  RiskTier,
+  RiskEvaluationRequest,
+  RiskEvaluationResult,
+  ActionConfirmationGrant,
+} from './types.ts';
+import {
+  ERR_CONFIRMATION_REQUIRED,
+  ERR_CONFIRMATION_REJECTED,
+  ERR_CONFIRMATION_EXPIRED,
+  ERR_CONFIRMATION_INVALID,
+} from './types.ts';
 import type { ApprovalMode } from '../../shared/approval-mode.ts';
+
+export {
+  ERR_CONFIRMATION_REQUIRED,
+  ERR_CONFIRMATION_REJECTED,
+  ERR_CONFIRMATION_EXPIRED,
+  ERR_CONFIRMATION_INVALID,
+};
 
 export interface RiskAssessment {
   risk: RiskTier;
@@ -17,69 +38,449 @@ export interface RiskAssessment {
   consequential: boolean;
 }
 
+/**
+ * Deterministic canonical parameter hashing.
+ * Sorts keys recursively so parameter order does not alter the hash,
+ * while any parameter value change completely invalidates the hash.
+ */
+export function canonicalParameterHash(parameters: Record<string, unknown> = {}): string {
+  const sanitize = (val: unknown): unknown => {
+    if (val === null || val === undefined) return val;
+    if (typeof val === 'number') {
+      if (Number.isNaN(val)) return '__NaN__';
+      if (!Number.isFinite(val)) return val > 0 ? '__Infinity__' : '__-Infinity__';
+      return val;
+    }
+    if (Array.isArray(val)) return val.map(sanitize);
+    if (typeof val === 'object') {
+      const sortedObj: Record<string, unknown> = {};
+      const keys = Object.keys(val as Record<string, unknown>).sort();
+      for (const k of keys) {
+        sortedObj[k] = sanitize((val as Record<string, unknown>)[k]);
+      }
+      return sortedObj;
+    }
+    return val;
+  };
+
+  const canonicalObj = sanitize(parameters);
+  return createHash('sha256').update(JSON.stringify(canonicalObj)).digest('hex');
+}
+
+/**
+ * Robust classifier for destructive mass-deletion commands.
+ * Detects recursive wipes, root/system targets, format/mkfs, block device overwrites,
+ * and command wrappers across POSIX flag combinations.
+ */
+export function isMassDeletionCommand(rawCmd: string): boolean {
+  if (!rawCmd || typeof rawCmd !== 'string') return false;
+  const cmd = rawCmd.trim();
+  if (!cmd) return false;
+
+  // 1. Unwrap common shell wrappers: sh -c "...", bash -c "...", sudo ..., eval "..."
+  const unwrapPattern = /^(?:sh|bash|zsh|sudo|eval|exec|nohup)\s+(?:-c\s+)?["']?(.*?)["']?$/i;
+  let innerCmd = cmd;
+  const match = cmd.match(unwrapPattern);
+  if (match && match[1]) {
+    innerCmd = match[1].trim();
+  }
+
+  // 2. Check for disk formatting, block device overwrites, system wipe utilities
+  if (/\b(?:mkfs(?:\.[a-z0-9]+)?|fdisk|parted|wipefs|format)\b/i.test(innerCmd)) {
+    return true;
+  }
+  if (/\bdd\s+.*?\bof=\/(?:dev\/(?:block\/|sd|vd|nvme|zero|null)|system|data|boot)/i.test(innerCmd)) {
+    return true;
+  }
+
+  // 3. Check for recursive rm commands in all flag variations:
+  // e.g. rm -rf, rm -r -f, rm -f -r, rm -R, rm --recursive, rm -fr, rm -r /...
+  const isRm = /\brm\b/i.test(innerCmd);
+  if (isRm) {
+    const hasRecursiveFlag =
+      /(?:^|\s)(?:-[a-zA-Z0-9_-]*[rR][a-zA-Z0-9_-]*|--recursive)(?:\s|$)/i.test(innerCmd);
+    if (hasRecursiveFlag) {
+      return true;
+    }
+  }
+
+  // 4. Check find with -delete or -exec rm
+  if (/\bfind\b/i.test(innerCmd) && /(?:^|\s)(?:-delete|-exec\s+rm|-execdir\s+rm)\b/i.test(innerCmd)) {
+    return true;
+  }
+
+  // 5. Check git destructive wipes
+  if (/\bgit\s+(?:clean\s+-(?:[a-z]*f[a-z]*d|[a-z]*d[a-z]*f)|reset\s+--hard)\b/i.test(innerCmd)) {
+    return true;
+  }
+
+  // 6. Check Windows / cross-platform rmdir /s
+  if (/\brmdir\s+\/s\b/i.test(innerCmd)) {
+    return true;
+  }
+
+  return false;
+}
+
 export class DeviceSafetyPolicy {
   /**
+   * Official Roadmap Phase 14: Risk Evaluation Data Contract
+   * Determines risk tier, confirmation requirement, impact description, and reversibility.
+   */
+  static evaluateRisk(request: RiskEvaluationRequest): RiskEvaluationResult {
+    const { capabilityId, operation, parameters = {}, approvalMode = 'ask' } = request;
+    const lowerCap = capabilityId.toLowerCase();
+    const lowerOp = operation.toLowerCase();
+    const paramStr = JSON.stringify(parameters).toLowerCase();
+
+    // ── 1. Mass Deletions & Catastrophic Operations (CRITICAL ANTI-PATTERN) ──
+    // Invariant: Never allow a "full auto" setting to silently execute irreversible mass deletions.
+    const isFilesystemOrTerminal =
+      lowerCap === 'device.files' ||
+      lowerCap === 'workspace' ||
+      lowerCap === 'filesystem' ||
+      /^(bash|sh|terminal|shell|exec|run_command)/i.test(lowerCap) ||
+      /^(bash|sh|terminal|shell|exec|run_command)/i.test(lowerOp);
+
+    const isRecursive = Boolean(
+      parameters.recursive === true ||
+      parameters.all === true ||
+      parameters.force === true
+    );
+    const targetPath = String(parameters.path || parameters.target || parameters.command || parameters.cmd || parameters.script || '');
+    const cmdStr = String(parameters.command || parameters.cmd || parameters.script || targetPath);
+
+    const isRootOrSystemTarget =
+      isFilesystemOrTerminal &&
+      (/^(\/|\/sdcard\/?|\/data\/?|\/system\/?|\/workspace\/?|\*|\.\*|\.{1,2}\/?)$/i.test(targetPath.trim()) ||
+        isMassDeletionCommand(cmdStr) ||
+        /\b(?:mkfs|format)\b/i.test(cmdStr));
+
+    const isMassDeletion =
+      isFilesystemOrTerminal &&
+      ((lowerOp.includes('delete') && (isRecursive || isRootOrSystemTarget)) ||
+        lowerOp.includes('purge') ||
+        lowerOp.includes('wipe') ||
+        lowerOp.includes('format') ||
+        isMassDeletionCommand(cmdStr));
+
+    if (isMassDeletion) {
+      return {
+        tier: 'high',
+        requiresExplicitConfirmation: true, // NEVER bypassed, even under "full" mode
+        consequentialImpactDescription: `Irreversible mass deletion of resources ('${targetPath || cmdStr || 'multiple targets'}').`,
+        reversible: false,
+        isMassDeletion: true,
+      };
+    }
+
+    // ── 2. Filesystem Capability (device.files) ──
+    if (lowerCap === 'device.files' || lowerCap === 'workspace' || lowerCap === 'filesystem') {
+      if (['read', 'list', 'stat', 'exists', 'glob', 'grep'].includes(lowerOp)) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: `Read-only inspection of file '${targetPath || 'workspace'}'.`,
+          reversible: true,
+        };
+      }
+      if (['write', 'append', 'mkdir', 'copy', 'move'].includes(lowerOp)) {
+        const outOfScope = parameters.inTaskScope === false;
+        return {
+          tier: 'medium',
+          requiresExplicitConfirmation: outOfScope && approvalMode === 'ask',
+          consequentialImpactDescription: `Modifying file or directory '${targetPath || 'target'}'.`,
+          reversible: false,
+        };
+      }
+      if (['delete', 'remove', 'unlink'].includes(lowerOp)) {
+        return {
+          tier: 'high',
+          requiresExplicitConfirmation: approvalMode !== 'full',
+          consequentialImpactDescription: `Deleting file '${targetPath || 'target'}' is irreversible.`,
+          reversible: false,
+        };
+      }
+    }
+
+    // ── 3. Browser Capability (device.browser / web.scraper) ──
+    if (lowerCap === 'device.browser' || lowerCap === 'web.scraper') {
+      if (['open', 'navigate', 'search', 'get_text', 'dom', 'screenshot', 'status', 'cookies', 'scrape'].includes(lowerOp)) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: `Inspecting web content at '${parameters.url || parameters.query || 'target'}'.`,
+          reversible: true,
+        };
+      }
+      // Interactive form submissions, purchasing, financial transactions or account mutations
+      const isConsequentialBrowserAction =
+        /\b(?:submit|checkout|buy|purchase|pay|transfer|delete|unsubscribe|confirm)\b/i.test(
+          `${lowerOp} ${paramStr}`
+        );
+      if (isConsequentialBrowserAction) {
+        return {
+          tier: 'high',
+          requiresExplicitConfirmation: approvalMode !== 'full',
+          consequentialImpactDescription: `Submitting consequential action or form in browser.`,
+          reversible: false,
+        };
+      }
+      if (['click', 'type', 'fill', 'eval', 'evaluate'].includes(lowerOp)) {
+        return {
+          tier: 'medium',
+          requiresExplicitConfirmation: approvalMode === 'ask',
+          consequentialImpactDescription: `Interacting with web page elements.`,
+          reversible: true,
+        };
+      }
+    }
+
+    // ── 4. Calendar Capability (device.calendar) ──
+    if (lowerCap === 'device.calendar') {
+      if (['list_events', 'get_event', 'list', 'read'].includes(lowerOp)) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: `Inspecting calendar events.`,
+          reversible: true,
+        };
+      }
+      if (['create_event', 'update_event', 'create', 'update'].includes(lowerOp)) {
+        const outOfScope = parameters.inTaskScope === false;
+        return {
+          tier: 'medium',
+          requiresExplicitConfirmation: outOfScope && approvalMode === 'ask',
+          consequentialImpactDescription: `Scheduling or modifying calendar event '${parameters.title || 'Event'}'.`,
+          reversible: true,
+        };
+      }
+      if (['delete_event', 'delete'].includes(lowerOp)) {
+        return {
+          tier: 'high',
+          requiresExplicitConfirmation: approvalMode !== 'full',
+          consequentialImpactDescription: `Deleting calendar event is irreversible.`,
+          reversible: false,
+        };
+      }
+    }
+
+    // ── 5. Connected Apps & External SaaS (composio.service) ──
+    if (lowerCap.startsWith('composio') || lowerCap.startsWith('mcp__composio')) {
+      const isReadSaas = /(?:read|list|get|search|fetch|query|inspect|find)/i.test(lowerOp);
+      const isDestructiveSaas = /(?:delete|destroy|purge|remove|close|cancel|terminate)/i.test(lowerOp) || /(?:delete|destroy|purge|remove)/i.test(paramStr);
+      const isExternalPublish = /(?:send|post|publish|commit|push|tweet|transfer|pay|invite)/i.test(lowerOp) || /(?:send_message|send_email|post_message)/i.test(lowerOp) || /(?:send_message|send_email|post_message)/i.test(paramStr);
+
+      if (isReadSaas && !isDestructiveSaas && !isExternalPublish) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: `Reading information from external connected service.`,
+          reversible: true,
+        };
+      }
+      if (isDestructiveSaas || isExternalPublish) {
+        return {
+          tier: 'high',
+          requiresExplicitConfirmation: approvalMode !== 'full',
+          consequentialImpactDescription: `Executing externally visible or destructive SaaS action (${operation}).`,
+          reversible: false,
+        };
+      }
+      return {
+        tier: 'medium',
+        requiresExplicitConfirmation: approvalMode === 'ask',
+        consequentialImpactDescription: `Modifying state in connected service (${operation}).`,
+        reversible: true,
+      };
+    }
+
+    // ── 6. Phone Control & Native Gestures (device.phone_control) ──
+    if (lowerCap === 'device.phone_control' || lowerCap === 'android_computer') {
+      if (['status', 'read_screen', 'screenshot', 'list_apps', 'get_location'].includes(lowerOp)) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: `Reading on-screen device state.`,
+          reversible: true,
+        };
+      }
+      // Check if gesture targets a high-consequence button
+      const targetText = String(parameters.text || parameters.label || parameters.query || '');
+      const isDestructiveGesture = /\b(?:delete|uninstall|clear data|factory reset|format|send money|pay|checkout)\b/i.test(targetText);
+      if (isDestructiveGesture) {
+        return {
+          tier: 'high',
+          requiresExplicitConfirmation: true, // Destructive UI gesture
+          consequentialImpactDescription: `Interacting with high-consequence UI control '${targetText}'.`,
+          reversible: false,
+        };
+      }
+      return {
+        tier: 'medium',
+        requiresExplicitConfirmation: approvalMode === 'ask',
+        consequentialImpactDescription: `Performing phone control gesture (${operation}).`,
+        reversible: true,
+      };
+    }
+
+    // ── 7. Native Apps (device.apps) ──
+    if (lowerCap === 'device.apps') {
+      if (['list_apps', 'get_app_info', 'list', 'open_app', 'launch'].includes(lowerOp)) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: lowerOp.includes('open') || lowerOp.includes('launch')
+            ? `Opening application '${parameters.packageName || parameters.name || 'target'}'.`
+            : `Listing installed applications.`,
+          reversible: true,
+        };
+      }
+      if (['uninstall_app', 'uninstall', 'clear_data'].includes(lowerOp)) {
+        return {
+          tier: 'high',
+          requiresExplicitConfirmation: true,
+          consequentialImpactDescription: `Uninstalling application '${parameters.packageName || 'target'}' is irreversible.`,
+          reversible: false,
+        };
+      }
+    }
+
+    // ── 8. Clipboard (device.clipboard) ──
+    if (lowerCap === 'device.clipboard') {
+      return {
+        tier: 'low',
+        requiresExplicitConfirmation: false,
+        consequentialImpactDescription: `${lowerOp.includes('set') ? 'Updating' : 'Reading'} clipboard content.`,
+        reversible: true,
+      };
+    }
+
+    // ── 9. Notifications, Reminders & Reach (device.notifications / device.reminders / device.reach) ──
+    if (lowerCap === 'device.notifications' || lowerCap === 'device.reminders' || lowerCap === 'device.reach') {
+      if (['list', 'get', 'status', 'list_events', 'check_readiness'].includes(lowerOp)) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: `Reading notifications, alarms, or reach events.`,
+          reversible: true,
+        };
+      }
+      if (['cancel_all', 'delete_all', 'clear_all', 'delete'].includes(lowerOp)) {
+        return {
+          tier: 'high',
+          requiresExplicitConfirmation: approvalMode !== 'full',
+          consequentialImpactDescription: `Clearing notifications or deleting reminders.`,
+          reversible: false,
+        };
+      }
+      return {
+        tier: 'medium',
+        requiresExplicitConfirmation: approvalMode === 'ask',
+        consequentialImpactDescription: `Posting notification or scheduling reminder.`,
+        reversible: true,
+      };
+    }
+
+    // ── 10. Sensor Read-Only Capabilities (device.location, device.camera) ──
+    if (lowerCap === 'device.location') {
+      return {
+        tier: 'low',
+        requiresExplicitConfirmation: false,
+        consequentialImpactDescription: `Retrieving device geolocation.`,
+        reversible: true,
+      };
+    }
+
+    if (lowerCap === 'device.camera') {
+      return {
+        tier: 'medium',
+        requiresExplicitConfirmation: approvalMode === 'ask',
+        consequentialImpactDescription: `Capturing photo or video with device camera.`,
+        reversible: false,
+      };
+    }
+
+    if (lowerCap === 'device.share') {
+      return {
+        tier: 'medium',
+        requiresExplicitConfirmation: approvalMode === 'ask',
+        consequentialImpactDescription: `Presenting Android system share dialog.`,
+        reversible: true,
+      };
+    }
+
+    // ── 11. Terminal & Shell Commands ──
+    if (/^(bash|sh|terminal|shell|exec|run_command)/i.test(lowerCap) || /^(bash|sh|terminal|shell|exec|run_command)/i.test(lowerOp)) {
+      const cmd = String(parameters.command || parameters.script || parameters.cmd || '').trim();
+      const isReadOnlyCmd = /^(?:ls|cat|grep|find|head|tail|wc|pwd|echo|which|stat|df|du)\b/i.test(cmd);
+      const isDestructiveCmd = isMassDeletionCommand(cmd) || /\b(?:rm\s+-rf|rm\s+-r|mkfs|dd|git\s+reset\s+--hard|git\s+clean\s+-fd|drop\s+database|format)\b/i.test(cmd);
+
+      if (isDestructiveCmd) {
+        return {
+          tier: 'high',
+          requiresExplicitConfirmation: true, // Non-bypassable destructive command
+          consequentialImpactDescription: `Executing destructive shell command: ${cmd}`,
+          reversible: false,
+          isMassDeletion: true,
+        };
+      }
+      if (isReadOnlyCmd) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: `Read-only command execution: ${cmd}`,
+          reversible: true,
+        };
+      }
+      return {
+        tier: 'medium',
+        requiresExplicitConfirmation: approvalMode === 'ask',
+        consequentialImpactDescription: `Shell command execution: ${cmd}`,
+        reversible: false,
+      };
+    }
+
+    // ── Default Fallback: Fail-safe classification ──
+    const isMutationOp = /(?:delete|destroy|remove|send|write|create|post|update|set|drop|purge|wipe)/i.test(lowerOp);
+    if (isMutationOp) {
+      const isDestructive = /(?:delete|destroy|remove|drop|purge|wipe)/i.test(lowerOp);
+      return {
+        tier: isDestructive ? 'high' : 'medium',
+        requiresExplicitConfirmation: isDestructive ? approvalMode !== 'full' : approvalMode === 'ask',
+        consequentialImpactDescription: `State modification on ${capabilityId}:${operation}.`,
+        reversible: !isDestructive,
+      };
+    }
+
+    return {
+      tier: 'low',
+      requiresExplicitConfirmation: false,
+      consequentialImpactDescription: `Harmless read or inspection on ${capabilityId}:${operation}.`,
+      reversible: true,
+    };
+  }
+
+  /**
    * Determine the risk tier of a specific device capability operation.
+   * Preserved for backward compatibility; delegates to evaluateRisk.
    */
   static assessRisk(
     capabilityId: string,
     operation: string,
     params: Record<string, unknown> = {}
   ): RiskAssessment {
-    // 1. High Risk Operations (destructive, external messages, deletions)
-    if (capabilityId === 'device.files' && operation === 'delete') {
-      return {
-        risk: 'high',
-        reason: `Deleting file '${params.path ?? 'target'}' is irreversible.`,
-        requiresPrompt: true,
-        consequential: true,
-      };
-    }
-
-    // 2. Medium Risk Operations (creating/modifying state, calendar events, external sharing)
-    if (capabilityId === 'device.files' && operation === 'write') {
-      return {
-        risk: 'medium',
-        reason: `Writing to file '${params.path ?? 'target'}'.`,
-        requiresPrompt: false, // auto in edits/auto mode
-        consequential: false,
-      };
-    }
-
-    if (capabilityId === 'device.calendar' && operation === 'create_event') {
-      return {
-        risk: 'medium',
-        reason: `Scheduling new calendar event '${params.title ?? 'Event'}'.`,
-        requiresPrompt: false,
-        consequential: false,
-      };
-    }
-
-    if (capabilityId === 'device.share') {
-      return {
-        risk: 'medium',
-        reason: 'Opening system share dialog.',
-        requiresPrompt: false,
-        consequential: false,
-      };
-    }
-
-    if (capabilityId === 'device.camera') {
-      return {
-        risk: 'medium',
-        reason: 'Accessing device camera.',
-        requiresPrompt: false,
-        consequential: false,
-      };
-    }
-
-    // 3. Low Risk Operations (reading metadata, viewing screenshots, clipboard, apps, notifications)
-    // Low risk operations execute seamlessly without prompting.
+    const res = DeviceSafetyPolicy.evaluateRisk({
+      capabilityId,
+      operation,
+      parameters: params,
+      approvalMode: 'ask',
+    });
     return {
-      risk: 'low',
-      reason: 'Harmless read or non-consequential inspection.',
-      requiresPrompt: false,
-      consequential: false,
+      risk: res.tier,
+      reason: res.consequentialImpactDescription,
+      requiresPrompt: res.tier === 'high',
+      consequential: res.tier === 'high' || res.tier === 'medium',
     };
   }
 
@@ -94,18 +495,12 @@ export class DeviceSafetyPolicy {
     if (approvalMode === 'full') {
       return false;
     }
-
     if (risk === 'high') {
-      // High risk actions always require prompt in ask, edits, and auto modes
       return true;
     }
-
     if (risk === 'medium') {
-      // In 'ask' mode, medium actions prompt. In 'auto' or 'edits', safe medium actions pass.
       return approvalMode === 'ask';
     }
-
-    // Low risk operations never interrupt the user
     return false;
   }
 
@@ -118,9 +513,266 @@ export class DeviceSafetyPolicy {
     operation: string,
     params: Record<string, unknown> = {}
   ): boolean {
-    return DeviceSafetyPolicy.assessRisk(capabilityId, operation, params).consequential;
+    const res = DeviceSafetyPolicy.evaluateRisk({
+      capabilityId,
+      operation,
+      parameters: params,
+      approvalMode: 'ask',
+    });
+    return res.tier === 'high' || !res.reversible;
   }
 }
+
+/**
+ * Authoritative Action Authorization Manager.
+ * Binds explicit approvals to the exact operation and canonical parameters.
+ * Enforces one-time grant consumption, expiration, and prevents replay or bypass.
+ */
+export interface CreateGrantOptions {
+  capabilityId: string;
+  operation: string;
+  parameters: Record<string, unknown>;
+  ttlMs?: number; // default: 5 minutes (300,000 ms)
+  botId?: string;
+  threadId?: string;
+}
+
+export class ActionAuthorizationManager {
+  private readonly grants = new Map<string, ActionConfirmationGrant>();
+  private readonly deniedActionTargets = new Set<string>();
+
+  /**
+   * Issue a cryptographic confirmation grant bound to the exact action and parameters.
+   */
+  createGrant(options: CreateGrantOptions): ActionConfirmationGrant {
+    const grantId = `grant_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    const parameterHash = canonicalParameterHash(options.parameters);
+    const ttl = options.ttlMs && options.ttlMs > 0 ? options.ttlMs : 300_000;
+
+    const grant: ActionConfirmationGrant = {
+      grantId,
+      capabilityId: options.capabilityId,
+      operation: options.operation,
+      parameterHash,
+      approvedAtMs: Date.now(),
+      expiresAtMs: Date.now() + ttl,
+      consumed: false,
+      botId: options.botId,
+      threadId: options.threadId,
+    };
+
+    this.grants.set(grantId, grant);
+    return grant;
+  }
+
+  /**
+   * Record a user denial to prevent silent retries or alternate-capability workarounds.
+   */
+  recordDenial(
+    capabilityId: string,
+    operation: string,
+    parameters: Record<string, unknown> = {},
+    botId?: string
+  ): void {
+    const hash = canonicalParameterHash(parameters);
+    const key = `${botId || '*'}:${capabilityId}:${operation}:${hash}`;
+    this.deniedActionTargets.add(key);
+
+    // Also register target-level denial (e.g. specific file or recipient) to block alternate capability workarounds
+    const target = parameters.path || parameters.target || parameters.recipient || parameters.email || parameters.url;
+    if (target) {
+      const semanticKey = `${botId || '*'}:target:${String(target).toLowerCase()}`;
+      this.deniedActionTargets.add(semanticKey);
+    }
+
+    // Extract file targets from shell command parameters
+    const cmd = String(parameters.command || parameters.cmd || parameters.script || '');
+    if (cmd) {
+      const tokens = cmd.split(/\s+/);
+      for (const token of tokens) {
+        if (token.startsWith('/') || token.startsWith('./') || token.startsWith('../')) {
+          this.deniedActionTargets.add(`${botId || '*'}:target:${token.toLowerCase()}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Check whether an action or target has been explicitly denied by the user.
+   */
+  isActionDenied(
+    capabilityId: string,
+    operation: string,
+    parameters: Record<string, unknown> = {},
+    botId?: string
+  ): boolean {
+    const hash = canonicalParameterHash(parameters);
+    const specificKey = `${botId || '*'}:${capabilityId}:${operation}:${hash}`;
+    const wildcardKey = `*:${capabilityId}:${operation}:${hash}`;
+    if (this.deniedActionTargets.has(specificKey) || this.deniedActionTargets.has(wildcardKey)) {
+      return true;
+    }
+
+    const target = parameters.path || parameters.target || parameters.recipient || parameters.email || parameters.url;
+    if (target) {
+      const targetKey = `${botId || '*'}:target:${String(target).toLowerCase()}`;
+      const targetWildcard = `*:target:${String(target).toLowerCase()}`;
+      if (this.deniedActionTargets.has(targetKey) || this.deniedActionTargets.has(targetWildcard)) {
+        return true;
+      }
+    }
+
+    // Check if shell command targets a previously denied target
+    const cmd = String(parameters.command || parameters.cmd || parameters.script || '');
+    if (cmd) {
+      const lowerCmd = cmd.toLowerCase();
+      for (const entry of this.deniedActionTargets) {
+        if (entry.includes(':target:')) {
+          const deniedTarget = entry.split(':target:')[1];
+          if (deniedTarget && lowerCmd.includes(deniedTarget)) {
+            return true;
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+
+  /**
+   * Validate and consume a confirmation grant at the authoritative execution boundary.
+   */
+  validateAndConsumeGrant(input: {
+    grant?: ActionConfirmationGrant;
+    grantId?: string;
+    capabilityId: string;
+    operation: string;
+    parameters: Record<string, unknown>;
+    botId?: string;
+  }): { valid: boolean; code?: string; reason?: string } {
+    const targetGrantId = input.grantId || input.grant?.grantId;
+
+    // 1. If no grant identifier is provided, enforce confirmation requirement and denial check
+    if (!targetGrantId) {
+      if (this.isActionDenied(input.capabilityId, input.operation, input.parameters, input.botId)) {
+        return {
+          valid: false,
+          code: ERR_CONFIRMATION_REJECTED,
+          reason: 'User declined this operation. Action cannot be retried or bypassed via an alternate capability.',
+        };
+      }
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_REQUIRED,
+        reason: 'Explicit user confirmation required for this consequential action.',
+      };
+    }
+
+    // 2. Authoritative Grant Lookup: Grant MUST exist in the authoritative store!
+    // External callers cannot manufacture unissued in-memory grants to bypass authorization.
+    const grant = this.grants.get(targetGrantId);
+    if (!grant) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_INVALID,
+        reason: 'Confirmation grant is unrecognized or was not issued by the authorization authority.',
+      };
+    }
+
+    // 3. Authenticity & Tamper Verification: If an in-memory grant object was supplied,
+    // it must strictly match the authoritative store record.
+    if (input.grant && (input.grant.parameterHash !== grant.parameterHash || input.grant.grantId !== grant.grantId)) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_INVALID,
+        reason: 'Confirmation grant payload has been tampered with.',
+      };
+    }
+
+    // 4. Verify Capability and Operation match
+    if (grant.capabilityId !== input.capabilityId || grant.operation !== input.operation) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_INVALID,
+        reason: `Confirmation grant was issued for '${grant.capabilityId}:${grant.operation}', but invoked with '${input.capabilityId}:${input.operation}'.`,
+      };
+    }
+
+    // 5. Verify Parameter Hash (Protects against changed parameters, targets, or recipients)
+    const currentHash = canonicalParameterHash(input.parameters);
+    if (grant.parameterHash !== currentHash) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_INVALID,
+        reason: 'Parameters have been modified since confirmation was granted. Approval is invalid.',
+      };
+    }
+
+    // 6. Verify Not Already Consumed (Single-use / Replay Prevention)
+    if (grant.consumed) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_INVALID,
+        reason: 'Confirmation grant has already been consumed. Replay is rejected.',
+      };
+    }
+
+    // 7. Verify Not Expired
+    if (Date.now() > grant.expiresAtMs) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_EXPIRED,
+        reason: 'Confirmation grant has expired.',
+      };
+    }
+
+    // 8. Verify Bot Ownership if bound
+    if (grant.botId && input.botId && grant.botId !== input.botId) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_INVALID,
+        reason: 'Confirmation grant belongs to a different bot partition.',
+      };
+    }
+
+    // Authoritative execution consumption: One-time use enforced!
+    grant.consumed = true;
+
+    // A fresh explicit user confirmation supersedes any prior denial for this specific action
+    const specificKey = `${input.botId || '*'}:${input.capabilityId}:${input.operation}:${currentHash}`;
+    this.deniedActionTargets.delete(specificKey);
+    this.deniedActionTargets.delete(`*:${input.capabilityId}:${input.operation}:${currentHash}`);
+
+    const target = input.parameters.path || input.parameters.target || input.parameters.recipient;
+    if (target) {
+      this.deniedActionTargets.delete(`${input.botId || '*'}:target:${String(target).toLowerCase()}`);
+      this.deniedActionTargets.delete(`*:target:${String(target).toLowerCase()}`);
+    }
+
+    return { valid: true };
+  }
+
+  /**
+   * Cancel or revoke an active grant.
+   */
+  revokeGrant(grantId: string): boolean {
+    const grant = this.grants.get(grantId);
+    if (!grant) return false;
+    grant.consumed = true;
+    this.grants.delete(grantId);
+    return true;
+  }
+
+  /**
+   * Clear grants and denial records (e.g. for testing).
+   */
+  clear(): void {
+    this.grants.clear();
+    this.deniedActionTargets.clear();
+  }
+}
+
+export const defaultActionAuthorizationManager = new ActionAuthorizationManager();
 
 export function checkAgentExecutionPermission(
   toolOrCapability: string,

@@ -29,6 +29,14 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!--
+      MOBOT Reach: Native exact alarms, full-screen lockscreen presentation, vibration, wake lock
+    -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!--
       Pairing QR only, and asked for only when the scanner is opened. The app is
       fully usable without it: the NSD list and a typed address are the other two
       ways in (§6), so a camera the user never grants costs nothing.
@@ -367,6 +375,37 @@
             android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          MOBOT Reach: Native Call-Like Reminders and Dependable Alarms.
+          Full-screen lockscreen presentation, audio/vibration, and boot reconciliation.
+        -->
+        <activity
+            android:name=".reach.ReachActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:persistableMode="persistNever"
+            android:taskAffinity=""
+            android:theme="@style/Theme.MOBOT" />
+
+        <receiver
+            android:name=".reach.ReachAlarmReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".reach.ReachBootReceiver"
+            android:exported="true"
+            android:permission="android.permission.RECEIVE_BOOT_COMPLETED">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                <action android:name="android.intent.action.TIME_SET" />
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>
         </receiver>
 

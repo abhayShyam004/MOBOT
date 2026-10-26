@@ -9,9 +9,9 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
     registry = new DeviceCapabilityRegistry();
   });
 
-  it('registers all 16 core Android device and connected capabilities by default', () => {
+  it('registers all 17 core Android device and connected capabilities by default', () => {
     const list = registry.list();
-    expect(list.length).toBe(16);
+    expect(list.length).toBe(17);
 
     const ids = list.map((c) => c.id).sort();
     expect(ids).toEqual([
@@ -27,6 +27,7 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
       'device.media',
       'device.notifications',
       'device.phone_control',
+      'device.reach',
       'device.reminders',
       'device.screenshot',
       'device.share',
@@ -751,6 +752,83 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
         });
         expect(res.chosenModality).toBe(modality);
       }
+    });
+  });
+
+  describe('Official Roadmap Phase 13: Capability State Awareness (mobot_54_phases_prompt.md:868-925)', () => {
+    it('confirms accurate status reporting for all registered tools via probeAll()', async () => {
+      const allStatuses = await registry.probeAll();
+      expect(allStatuses.size).toBe(17);
+
+      const requiredKeys = [
+        'composio.service',
+        'device.apps',
+        'device.browser',
+        'device.calendar',
+        'device.camera',
+        'device.clipboard',
+        'device.contacts',
+        'device.files',
+        'device.location',
+        'device.media',
+        'device.notifications',
+        'device.phone_control',
+        'device.reach',
+        'device.reminders',
+        'device.screenshot',
+        'device.share',
+        'web.scraper',
+      ];
+
+      for (const k of requiredKeys) {
+        expect(allStatuses.has(k), `Missing health status for ${k}`).toBe(true);
+        const st = allStatuses.get(k)!;
+        expect(st.capabilityId).toBe(k);
+        expect(st.lastCheckedMs).toBeGreaterThan(0);
+      }
+    });
+
+    it('detects browser driver failure and transitions device.browser to DRIVER_OFFLINE', async () => {
+      // Simulate stopped browser driver
+      const origPort = process.env.AB_DRIVER_PORT;
+      const origToken = process.env.AB_DRIVER_TOKEN;
+      delete process.env.AB_DRIVER_PORT;
+      delete process.env.AB_DRIVER_TOKEN;
+
+      try {
+        const status = await registry.probeHealth('device.browser', { force: true });
+        expect(status.state).toBe('DRIVER_OFFLINE');
+        expect(status.remediationAction).toBe('restart_driver');
+        expect(status.diagnosticDetails).toContain('AB_DRIVER_PORT');
+
+        // Verify planner refuses to select offline browser
+        const matchRes = registry.matchCapability({
+          objective: 'Open https://example.com and inspect page',
+          contextKeywords: ['browser_session'],
+          requiredDataFreshness: 'static',
+          targetDevice: 'android_local',
+          activeBotId: 'test-bot',
+        });
+        // Routes to healthy fallback or user_clarification
+        expect(matchRes.primaryCapabilityId).not.toBe('device.browser');
+      } finally {
+        if (origPort) process.env.AB_DRIVER_PORT = origPort;
+        if (origToken) process.env.AB_DRIVER_TOKEN = origToken;
+      }
+    });
+
+    it('device_capability_health tool returns authoritative live capability status', async () => {
+      const { DEVICE_CAPABILITY_TOOLS } = await import('./capability-registry.ts');
+      const singleRes = await DEVICE_CAPABILITY_TOOLS.device_capability_health.handler({
+        capabilityId: 'device.clipboard',
+      });
+      expect(singleRes.status).toBeDefined();
+      expect(singleRes.status?.capabilityId).toBe('device.clipboard');
+      expect(singleRes.status?.state).toBe('AVAILABLE');
+
+      const allRes = await DEVICE_CAPABILITY_TOOLS.device_capability_health.handler({});
+      expect(allRes.statuses).toBeDefined();
+      expect(Object.keys(allRes.statuses || {}).length).toBe(17);
     });
   });
 });

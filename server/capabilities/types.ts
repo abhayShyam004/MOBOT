@@ -51,6 +51,8 @@ export interface CapabilityContext {
   signal?: AbortSignal;
   approvalMode?: 'ask' | 'edits' | 'auto' | 'full' | 'custom';
   askApproval?: (summary: string) => Promise<boolean>;
+  confirmationGrant?: ActionConfirmationGrant;
+  confirmationToken?: string;
 }
 
 export interface DeviceCapabilityMetadata {
@@ -87,6 +89,76 @@ export interface DeviceCapability {
     params: Record<string, unknown>,
     context?: CapabilityContext
   ): Promise<CapabilityResult>;
+
+  /**
+   * Official Roadmap Phase 13: Capability State Awareness live probe.
+   * Probes active driver, permissions, external authentication, and connectivity.
+   */
+  checkHealth?(
+    context?: CapabilityContext,
+    signal?: AbortSignal
+  ): Promise<CapabilityHealthStatus>;
+}
+
+// ── Official Roadmap Phase 13: Capability State Awareness (mobot_54_phases_prompt.md:868-925) ──
+
+export const ERR_CAPABILITY_PROBE_FAILED = 'ERR_CAPABILITY_PROBE_FAILED';
+
+export type CapabilityOperationalState =
+  | 'AVAILABLE'
+  | 'PERMISSION_REQUIRED'
+  | 'AUTH_REQUIRED'
+  | 'DRIVER_OFFLINE'
+  | 'RATE_LIMITED'
+  | 'DEPENDENCY_MISSING'
+  | 'TEMPORARILY_UNAVAILABLE';
+
+export type CapabilityRemediationAction =
+  | 'prompt_permission'
+  | 'prompt_auth'
+  | 'restart_driver'
+  | 'wait';
+
+export interface CapabilityHealthStatus {
+  capabilityId: string;
+  state: CapabilityOperationalState;
+  lastCheckedMs: number;
+  diagnosticDetails?: string;
+  remediationAction?: CapabilityRemediationAction;
+}
+
+// ── Official Roadmap Phase 14: Risk-Aware Autonomy (mobot_54_phases_prompt.md:925-995) ──
+
+export const ERR_CONFIRMATION_REQUIRED = 'ERR_CONFIRMATION_REQUIRED';
+export const ERR_CONFIRMATION_REJECTED = 'ERR_CONFIRMATION_REJECTED';
+export const ERR_CONFIRMATION_EXPIRED = 'ERR_CONFIRMATION_EXPIRED';
+export const ERR_CONFIRMATION_INVALID = 'ERR_CONFIRMATION_INVALID';
+
+export interface RiskEvaluationRequest {
+  capabilityId: string;
+  operation: string;
+  parameters: Record<string, unknown>;
+  approvalMode: 'ask' | 'edits' | 'auto' | 'full';
+}
+
+export interface RiskEvaluationResult {
+  tier: RiskTier;
+  requiresExplicitConfirmation: boolean;
+  consequentialImpactDescription: string;
+  reversible: boolean;
+  isMassDeletion?: boolean;
+}
+
+export interface ActionConfirmationGrant {
+  grantId: string;
+  capabilityId: string;
+  operation: string;
+  parameterHash: string;
+  approvedAtMs: number;
+  expiresAtMs: number;
+  consumed: boolean;
+  botId?: string;
+  threadId?: string;
 }
 
 // ── Official Roadmap Phase 11: Intelligent Capability Selection (mobot_54_phases_prompt.md:752-778) ──

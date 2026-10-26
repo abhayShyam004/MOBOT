@@ -282,7 +282,7 @@ import * as tts from "./tts/index.ts";
 import { narrateTool, toUtterances } from "./tts/speech-text.ts";
 import { buildRecoveryText, buildTurnContext, engineIsFresh, peerMessageText } from "./turn-context.ts";
 import { Handoffs, handedStateUsable, recordHanded, renderUnseen, sessionStart, unseenMessages, withUnseenMessages, type ContextMessage } from "./delta-context.ts";
-import { extractTurnImages } from "./turn-images.ts";
+import { extractTurnImages, resolveConversationImages } from "./turn-images.ts";
 import { extractTurnFiles, readDocumentPages } from "./turn-files.ts";
 import { TurnWatchdog } from "./turn-watchdog.ts";
 import { TurnResources, workspaceResource, type TurnOwner } from "./turn-resources.ts";
@@ -5043,7 +5043,7 @@ bus.subscribe((event: RuntimeEvent) => {
       const unattended = permission && asker && event.requestId ? isUnattended(asker.id, event.threadId) : false;
       const effectiveApprovalMode = asker ? approvalModeForTurn(asker, isInternalTurn(event.threadId)) : "ask";
       const verdict = permission && asker && event.requestId
-        ? autoVerdict(effectiveApprovalMode, event.tool, { requiresExplicitApproval: event.requiresExplicitApproval })
+        ? autoVerdict(effectiveApprovalMode, event.tool, { requiresExplicitApproval: event.requiresExplicitApproval, summary: event.summary })
         : null;
       // Auto's reviewer is the engine's own. Claude accepts `--permission-mode
       // auto` for any model and starts in Manual without a word when auto is
@@ -5341,7 +5341,32 @@ bus.subscribe((event: RuntimeEvent) => {
           });
         }
       }
-      if (completedTurnId) store.markTerminalAssistantMessage(event.threadId, completedTurnId);
+      if (completedTurnId) {
+        const existingText = [...store.messagesFor(event.threadId)].reverse().find(
+          (message) =>
+            message.role === "bot" &&
+            message.kind === "text" &&
+            message.turnId === completedTurnId,
+        );
+        if (!existingText) {
+          // A turn that finished without emitting an assistant text message (e.g. after tool execution
+          // or upon interruption/timeout) must emit a terminal assistant response so the turn never
+          // remains indefinitely stuck in a "Thinking…" state.
+          const fallbackText = event.stopReason === "interrupted"
+            ? "The request was interrupted."
+            : (!event.ok
+              ? `The action could not be completed: ${event.stopReason?.trim() || "the operation ended without a result"}.`
+              : "Action completed.");
+          pushMessage({
+            role: "bot",
+            kind: "text",
+            text: fallbackText,
+            turnId: completedTurnId,
+            turnTerminal: true,
+          });
+        }
+        store.markTerminalAssistantMessage(event.threadId, completedTurnId);
+      }
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
       // A run that broke — not one the person stopped, and not a routine's,
@@ -6447,7 +6472,12 @@ async function startTurnAdmission(
     // cross-turn retention so follow-up messages can refer back to attachments.
     const priorMessages = store.activePath(threadId);
     const resolvedFiles = await extractTurnFiles(text, { threadId, priorMessages });
-    const resolvedImages = extractTurnImages(resolvedFiles.text);
+    const usesNativeImageInput = instance.adapter.capabilities.nativeImageInput === true;
+    const resolvedImages = resolveConversationImages(resolvedFiles.text, {
+      priorMessages,
+      usesNativeImageInput,
+      injectGroundingNote: true,
+    });
     return { instance, plan, task, resolvedFiles, resolvedImages, dispatchClaimId, resourceOwner };
   } catch (error) {
     store.setTaskActivity(bot.id, threadId, priorActivity ?? "idle");
@@ -6873,10 +6903,12 @@ async function startTurn(
         `\n\n[Real-Time Search Notice]: Search error (${err?.message || String(err)}). Inform the user truthfully that live search could not be executed.`;
     }
   } else if (capabilityResolution.chosenModality === "composio_service") {
-    // SaaS service integration: determine required service (gmail, github, googlecalendar, slack, linear)
+    // SaaS service integration: determine required service (gmail, github, googlecalendar, slack, linear, whatsapp)
     const lowerText = effectiveObjective.toLowerCase();
-    let service: "gmail" | "github" | "googlecalendar" | "slack" | "linear" = "gmail";
-    if (lowerText.includes("calendar") || lowerText.includes("meeting") || lowerText.includes("event") || lowerText.includes("schedule")) {
+    let service: "gmail" | "github" | "googlecalendar" | "slack" | "linear" | "whatsapp" = "gmail";
+    if (lowerText.includes("whatsapp")) {
+      service = "whatsapp";
+    } else if (lowerText.includes("calendar") || lowerText.includes("meeting") || lowerText.includes("event") || lowerText.includes("schedule")) {
       service = "googlecalendar";
     } else if (lowerText.includes("github") || lowerText.includes("repo") || lowerText.includes("pull request") || lowerText.includes("issue")) {
       service = "github";
@@ -7015,6 +7047,111 @@ async function startTurn(
         attemptedAt: Date.now(),
       });
       capabilityGroundingContext = `\n\n[Reminder Error]: ${msg}. Inform the user truthfully.`;
+    }
+  } else if (capabilityResolution.chosenModality === "device_gesture" && capabilityResolution.primaryCapabilityId === "device.reach") {
+    // Schedule Call Reminder or Alarm via native MOBOT Reach capability
+    const isCallReminder = userTurnText.toLowerCase().includes("call");
+    const isCancel = /\b(cancel|delete|stop|clear|remove)\b/i.test(userTurnText);
+
+    try {
+      if (isCancel) {
+        const cancelRes = await defaultCapabilityRegistry.invoke(
+          "device.reach",
+          "cancel_event",
+          { title: userTurnText },
+          { botId: bot.id }
+        );
+        if (cancelRes.success) {
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "reach.cancel",
+            status: "SUCCEEDED",
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext = `\n\n[MOBOT Reach Notice]: The scheduled reach event has been successfully cancelled and its Android trigger removed. Confirm this to the user.`;
+        } else {
+          capabilityGroundingContext = `\n\n[MOBOT Reach Notice]: ${cancelRes.error?.message || "Could not find active event to cancel."}`;
+        }
+      } else if (isCallReminder) {
+        // Extract title & spoken reminder
+        const callMatch = userTurnText.match(/call(?:\s+me)?(?:\s+in\s+[^,\n]+)?(?:\s+(?:and|to)\s+remind\s+me(?:\s+to)?\s+([^.\n]+))?/i);
+        const title = callMatch && callMatch[1] ? callMatch[1].trim() : "Check my laptop";
+        const message = title;
+
+        const reachRes = await defaultCapabilityRegistry.invoke(
+          "device.reach",
+          "schedule_call",
+          { title, message, time: userTurnText },
+          { botId: bot.id }
+        );
+
+        if (reachRes.success && reachRes.data) {
+          const data = reachRes.data as any;
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "reach.call_reminder.schedule",
+            status: "SUCCEEDED",
+            evidence: {
+              resourceId: data.event?.id,
+              metadata: {
+                title,
+                formattedTime: data.formattedTime,
+                kind: "call_reminder",
+              },
+            },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext = `\n\n[MOBOT Call Reminder Scheduled]: A native call-like reminder titled "${title}" has been successfully scheduled for ${data.formattedTime} (ID: ${data.event?.id}). It will ring and present a call-like screen over the lockscreen and speak the reminder aloud when answered, even with the screen off and app closed. Confirm this truthfully to the user without claiming to place a cellular or VoIP call.`;
+        } else {
+          const errMsg = reachRes.error?.message || "Failed to schedule call reminder";
+          capabilityGroundingContext = `\n\n[MOBOT Reach Limitation]: ${errMsg}. Inform the user truthfully.`;
+        }
+      } else {
+        // Alarm
+        const alarmMatch = userTurnText.match(/(?:wake\s+me\s+up|set\s+an?\s+alarm)(?:.*?)(?:and\s+(?:tell|remind)\s+me\s+to\s+([^.\n]+))?/i);
+        const title = "Wake Up";
+        const message = alarmMatch && alarmMatch[1] ? alarmMatch[1].trim() : "";
+
+        const alarmRes = await defaultCapabilityRegistry.invoke(
+          "device.reach",
+          "schedule_alarm",
+          { title, message, time: userTurnText },
+          { botId: bot.id }
+        );
+
+        if (alarmRes.success && alarmRes.data) {
+          const data = alarmRes.data as any;
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "reach.alarm.schedule",
+            status: "SUCCEEDED",
+            evidence: {
+              resourceId: data.event?.id,
+              metadata: {
+                title,
+                formattedTime: data.formattedTime,
+                kind: "alarm",
+              },
+            },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext = `\n\n[MOBOT Alarm Scheduled]: A native alarm has been scheduled for ${data.formattedTime} (ID: ${data.event?.id})${message ? ` with spoken reminder: "${message}"` : ""}. It will ring with screen off and app closed. Confirm this truthfully to the user.`;
+        } else {
+          const errMsg = alarmRes.error?.message || "Failed to schedule alarm";
+          capabilityGroundingContext = `\n\n[MOBOT Reach Limitation]: ${errMsg}. Inform the user truthfully.`;
+        }
+      }
+    } catch (reachErr: any) {
+      capabilityGroundingContext = `\n\n[MOBOT Reach Error]: ${reachErr.message}`;
     }
   } else if (capabilityResolution.chosenModality === "device_gesture" && capabilityResolution.primaryCapabilityId === "device.apps") {
     try {
@@ -9269,10 +9406,14 @@ async function runGroupMemberTurn(
   const latestUser = [...store.activePath(threadId)].reverse().find(
     (message) => message.role === "user" && message.kind === "text" && message.text,
   );
-  const resolvedLatestImages = latestUser?.text && !cardContinuation
-    ? extractTurnImages(latestUser.text)
-    : { text: latestUser?.text ?? "", images: [] };
   const usesNativeImageInput = instance.adapter.capabilities.nativeImageInput === true;
+  const resolvedLatestImages = latestUser?.text && !cardContinuation
+    ? resolveConversationImages(latestUser.text, {
+        priorMessages: [...store.activePath(threadId)],
+        usesNativeImageInput,
+        injectGroundingNote: true,
+      })
+    : { text: latestUser?.text ?? "", images: [] };
   const roomContext = serializeRoomContext(
     threadId,
     userName,
