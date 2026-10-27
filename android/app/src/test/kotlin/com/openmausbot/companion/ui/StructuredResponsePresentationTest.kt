@@ -16,6 +16,22 @@ import com.openmausbot.companion.core.StructuredResponseData
 import com.openmausbot.companion.core.TableColumn
 import com.openmausbot.companion.core.TableData
 import com.openmausbot.companion.core.TimelineData
+import com.openmausbot.companion.core.MatchScorecardData
+import com.openmausbot.companion.core.MatchTeam
+import com.openmausbot.companion.core.CricketInnings
+import com.openmausbot.companion.core.CricketBatterSummary
+import com.openmausbot.companion.core.CricketBowlerSummary
+import com.openmausbot.companion.core.PlayerStatsData
+import com.openmausbot.companion.core.PlayerStatItem
+import com.openmausbot.companion.core.StandingsTableData
+import com.openmausbot.companion.core.StandingRow
+import com.openmausbot.companion.core.QualificationZoneLegend
+import com.openmausbot.companion.core.MedalTallyData
+import com.openmausbot.companion.core.MedalRow
+import com.openmausbot.companion.core.GenericDataCardData
+import com.openmausbot.companion.core.DataMetric
+import com.openmausbot.companion.core.DataRow
+import com.openmausbot.companion.core.DataSection
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -349,5 +365,160 @@ class StructuredResponsePresentationTest {
         assertEquals("Deploy Now", decoded.label)
         assertEquals("primary", decoded.style)
         assertEquals(false, decoded.disabled)
+    }
+
+    @Test
+    fun `supports cricket and football match scorecards`() {
+        val scorecard = MatchScorecardData(
+            sport = "cricket",
+            competition = "ICC Men's T20 World Cup 2024",
+            fixtureTitle = "Final: India vs South Africa",
+            status = "finished",
+            statusDetail = "India won by 7 runs",
+            teams = listOf(
+                MatchTeam(name = "India", shortName = "IND", score = "176/7 (20.0)", isWinner = true),
+                MatchTeam(name = "South Africa", shortName = "SA", score = "169/8 (20.0)", isWinner = false),
+            ),
+            innings = listOf(
+                CricketInnings(
+                    teamName = "India",
+                    runs = 176,
+                    wickets = 7,
+                    overs = "20.0",
+                    topBatters = listOf(
+                        CricketBatterSummary(name = "Virat Kohli", runs = 76, balls = 59, fours = 6, sixes = 2, strikeRate = "128.81"),
+                    ),
+                    topBowlers = listOf(
+                        CricketBowlerSummary(name = "Anrich Nortje", overs = "4.0", runs = 26, wickets = 2, economy = "6.50"),
+                    ),
+                ),
+            ),
+            sourceUrl = "https://www.icc-cricket.com/matches/final-ind-vs-sa-2024",
+            sourceName = "ICC Official",
+        )
+
+        val encoded = json.encodeToJsonElement(scorecard)
+        val decoded = json.decodeFromJsonElement<MatchScorecardData>(encoded)
+
+        assertEquals("cricket", decoded.sport)
+        assertEquals("Final: India vs South Africa", decoded.fixtureTitle)
+        assertEquals(2, decoded.teams.size)
+        assertTrue(decoded.teams[0].isWinner)
+        assertEquals("176/7 (20.0)", decoded.teams[0].score)
+        assertEquals(1, decoded.innings.size)
+        assertEquals("Virat Kohli", decoded.innings[0].topBatters[0].name)
+        assertEquals(76, decoded.innings[0].topBatters[0].runs)
+        assertEquals("https://www.icc-cricket.com/matches/final-ind-vs-sa-2024", decoded.sourceUrl)
+    }
+
+    @Test
+    fun `supports player statistics components`() {
+        val playerStats = PlayerStatsData(
+            playerName = "Sanju Samson",
+            sport = "cricket",
+            teamName = "India",
+            opponentName = "South Africa",
+            competition = "T20 International",
+            headlineStat = "107 (50)",
+            headlineLabel = "Centurion",
+            stats = listOf(
+                PlayerStatItem(label = "Runs", value = "107", highlight = true),
+                PlayerStatItem(label = "Balls", value = "50"),
+                PlayerStatItem(label = "4s", value = "7"),
+                PlayerStatItem(label = "6s", value = "10", highlight = true),
+            ),
+            sourceUrl = "https://www.bcci.tv/match/456",
+        )
+
+        val encoded = json.encodeToJsonElement(playerStats)
+        val decoded = json.decodeFromJsonElement<PlayerStatsData>(encoded)
+
+        assertEquals("Sanju Samson", decoded.playerName)
+        assertEquals("107 (50)", decoded.headlineStat)
+        assertEquals(4, decoded.stats.size)
+        assertEquals("7", decoded.stats.find { it.label == "4s" }?.value)
+        assertEquals("10", decoded.stats.find { it.label == "6s" }?.value)
+        assertTrue(decoded.stats[0].highlight)
+    }
+
+    @Test
+    fun `supports league standings table components`() {
+        val standings = StandingsTableData(
+            competition = "Premier League 2024/25",
+            season = "2024/25",
+            columns = listOf("Pos", "Team", "P", "W", "D", "L", "GD", "PTS"),
+            rows = listOf(
+                StandingRow(rank = 1, teamName = "Arsenal", played = 20, won = 15, drawn = 3, lost = 2, diff = "+30", points = 48, qualificationZone = "champions_league"),
+                StandingRow(rank = 2, teamName = "Manchester City", played = 20, won = 14, drawn = 4, lost = 2, diff = "+28", points = 46, qualificationZone = "champions_league"),
+            ),
+            qualificationLegend = listOf(
+                QualificationZoneLegend(zone = "champions_league", label = "Champions League", color = "#58A6FF"),
+            ),
+            sourceUrl = "https://www.premierleague.com/tables",
+        )
+
+        val encoded = json.encodeToJsonElement(standings)
+        val decoded = json.decodeFromJsonElement<StandingsTableData>(encoded)
+
+        assertEquals("Premier League 2024/25", decoded.competition)
+        assertEquals(2, decoded.rows.size)
+        assertEquals("Arsenal", decoded.rows[0].teamName)
+        assertEquals(48, decoded.rows[0].points)
+        assertEquals("+30", decoded.rows[0].diff)
+    }
+
+    @Test
+    fun `supports olympic and multi-sport medal tally components`() {
+        val medalTally = MedalTallyData(
+            competition = "Paris 2024 Olympic Games",
+            rankingMethod = "gold_first",
+            rankingMethodLabel = "Ranked by Gold medals first",
+            freshness = "Final Tally",
+            rows = listOf(
+                MedalRow(rank = 1, nation = "United States", nocCode = "USA", gold = 40, silver = 44, bronze = 42, total = 126),
+                MedalRow(rank = 2, nation = "China", nocCode = "CHN", gold = 40, silver = 27, bronze = 24, total = 91),
+            ),
+            sourceUrl = "https://olympics.com/paris-2024/medals",
+        )
+
+        val encoded = json.encodeToJsonElement(medalTally)
+        val decoded = json.decodeFromJsonElement<MedalTallyData>(encoded)
+
+        assertEquals("Paris 2024 Olympic Games", decoded.competition)
+        assertEquals("gold_first", decoded.rankingMethod)
+        assertEquals(2, decoded.rows.size)
+        assertEquals("United States", decoded.rows[0].nation)
+        assertEquals(40, decoded.rows[0].gold)
+        assertEquals(126, decoded.rows[0].total)
+    }
+
+    @Test
+    fun `supports extensible generic data card components`() {
+        val dataCard = GenericDataCardData(
+            title = "Q4 Financial Report",
+            subtitle = "Earnings Review",
+            badge = "Verified",
+            badgeType = "success",
+            metrics = listOf(
+                DataMetric(label = "Revenue", value = "$12.4B", change = "+14%", trend = "up"),
+            ),
+            rows = listOf(
+                DataRow(key = "Operating Cash Flow", value = "$3.2B"),
+            ),
+            sections = listOf(
+                DataSection(heading = "Summary", content = "Strong quarterly performance."),
+            ),
+            sourceUrl = "https://example.com/report",
+        )
+
+        val encoded = json.encodeToJsonElement(dataCard)
+        val decoded = json.decodeFromJsonElement<GenericDataCardData>(encoded)
+
+        assertEquals("Q4 Financial Report", decoded.title)
+        assertEquals("Verified", decoded.badge)
+        assertEquals(1, decoded.metrics.size)
+        assertEquals("$12.4B", decoded.metrics[0].value)
+        assertEquals(1, decoded.rows.size)
+        assertEquals("Operating Cash Flow", decoded.rows[0].key)
     }
 }

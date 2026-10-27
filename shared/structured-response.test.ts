@@ -354,4 +354,221 @@ describe("Structured Response Protocol (Phase J)", () => {
     expect(comp?.data.title).toBe("Senior Software Engineer");
     expect(comp?.data.company).toBe("Google");
   });
+
+  it("validates cricket match scorecard with innings, top batters and bowlers", () => {
+    const input = {
+      version: 1,
+      components: [
+        {
+          id: "scorecard-t20",
+          type: "match_scorecard",
+          data: {
+            sport: "cricket",
+            competition: "ICC Men's T20 World Cup 2024",
+            fixtureTitle: "Final: India vs South Africa",
+            status: "finished",
+            statusDetail: "India won by 7 runs",
+            date: "June 29, 2024",
+            venue: "Kensington Oval, Bridgetown, Barbados",
+            teams: [
+              { name: "India", shortName: "IND", score: "176/7 (20.0)", isWinner: true },
+              { name: "South Africa", shortName: "SA", score: "169/8 (20.0)", isWinner: false },
+            ],
+            innings: [
+              {
+                teamName: "India",
+                runs: 176,
+                wickets: 7,
+                overs: "20.0",
+                runRate: "8.80",
+                topBatters: [
+                  { name: "Virat Kohli", runs: 76, balls: 59, fours: 6, sixes: 2, strikeRate: "128.81" },
+                  { name: "Axar Patel", runs: 47, balls: 31, fours: 1, sixes: 4, strikeRate: "151.61" },
+                ],
+                topBowlers: [
+                  { name: "Anrich Nortje", overs: "4.0", maidens: 0, runs: 26, wickets: 2, economy: "6.50" },
+                ],
+              },
+            ],
+            sourceUrl: "https://www.icc-cricket.com/matches/final-ind-vs-sa-2024",
+            sourceName: "ICC Official",
+            retrievalTimestamp: 1719688000000,
+          },
+        },
+      ],
+    };
+
+    const result = validateStructuredResponse(input);
+    expect(result.valid).toBe(true);
+    const comp = result.sanitized?.components[0];
+    expect(comp?.type).toBe("match_scorecard");
+    expect(comp?.data.sport).toBe("cricket");
+    expect(comp?.data.fixtureTitle).toBe("Final: India vs South Africa");
+    expect(comp?.data.status).toBe("finished");
+    expect(comp?.data.teams[0].score).toBe("176/7 (20.0)");
+    expect(comp?.data.innings[0].topBatters[0].name).toBe("Virat Kohli");
+    expect(comp?.data.sourceUrl).toBe("https://www.icc-cricket.com/matches/final-ind-vs-sa-2024");
+
+    const fallback = structuredResponseToFallbackText(result.sanitized!);
+    expect(fallback).toContain("ICC Men's T20 World Cup 2024");
+    expect(fallback).toContain("India: 176/7 (20.0) vs South Africa: 169/8 (20.0)");
+  });
+
+  it("validates football match scorecard with events and stats", () => {
+    const input = {
+      version: 1,
+      components: [
+        {
+          id: "scorecard-epl",
+          type: "match_scorecard",
+          data: {
+            sport: "football",
+            competition: "Premier League",
+            fixtureTitle: "Arsenal vs Chelsea",
+            status: "finished",
+            statusDetail: "Full Time",
+            teams: [
+              { name: "Arsenal", score: "3", isWinner: true },
+              { name: "Chelsea", score: "1", isWinner: false },
+            ],
+            events: [
+              { type: "goal", minute: "18'", teamName: "Arsenal", playerName: "Martin Odegaard" },
+              { type: "goal", minute: "31'", teamName: "Arsenal", playerName: "Martin Odegaard" },
+              { type: "goal", minute: "65'", teamName: "Chelsea", playerName: "Noni Madueke" },
+            ],
+            stats: [
+              { label: "Possession", homeValue: "56%", awayValue: "44%" },
+              { label: "Shots", homeValue: "16", awayValue: "7" },
+            ],
+            sourceUrl: "https://www.premierleague.com/match/123",
+          },
+        },
+      ],
+    };
+
+    const result = validateStructuredResponse(input);
+    expect(result.valid).toBe(true);
+    const comp = result.sanitized?.components[0];
+    expect(comp?.type).toBe("match_scorecard");
+    expect(comp?.data.sport).toBe("football");
+    expect(comp?.data.events.length).toBe(3);
+    expect(comp?.data.stats.length).toBe(2);
+  });
+
+  it("validates player statistics tied to fixture", () => {
+    const input = {
+      version: 1,
+      components: [
+        {
+          id: "player-samson",
+          type: "player_stats",
+          data: {
+            playerName: "Sanju Samson",
+            sport: "cricket",
+            teamName: "India",
+            opponentName: "South Africa",
+            competition: "T20 International",
+            fixtureTitle: "1st T20I: South Africa vs India",
+            fixtureDate: "Nov 08, 2024",
+            role: "Wicketkeeper-Batter",
+            headlineStat: "107 (50)",
+            headlineLabel: "Back-to-back T20I Century",
+            stats: [
+              { label: "Runs", value: 107, highlight: true },
+              { label: "Balls", value: 50 },
+              { label: "4s", value: 7 },
+              { label: "6s", value: 10, highlight: true },
+              { label: "Strike Rate", value: "214.00" },
+            ],
+            sourceUrl: "https://www.bcci.tv/match/456",
+            sourceName: "BCCI",
+          },
+        },
+      ],
+    };
+
+    const result = validateStructuredResponse(input);
+    expect(result.valid).toBe(true);
+    const comp = result.sanitized?.components[0];
+    expect(comp?.type).toBe("player_stats");
+    expect(comp?.data.playerName).toBe("Sanju Samson");
+    expect(comp?.data.headlineStat).toBe("107 (50)");
+    expect(comp?.data.stats.find((s: any) => s.label === "4s")?.value).toBe(7);
+  });
+
+  it("validates standings table and medal tally components", () => {
+    const standingsInput = {
+      version: 1,
+      components: [
+        {
+          id: "standings-epl",
+          type: "standings_table",
+          data: {
+            competition: "Premier League 2024/25",
+            rows: [
+              { rank: 1, teamName: "Liverpool", played: 10, won: 8, drawn: 1, lost: 1, diff: "+11", points: 25, qualificationZone: "champions_league" },
+              { rank: 2, teamName: "Manchester City", played: 10, won: 7, drawn: 2, lost: 1, diff: "+10", points: 23, qualificationZone: "champions_league" },
+            ],
+            sourceUrl: "https://www.premierleague.com/tables",
+          },
+        },
+        {
+          id: "medals-paris",
+          type: "medal_tally",
+          data: {
+            competition: "Paris 2024 Olympic Games",
+            rankingMethod: "gold_first",
+            rankingMethodLabel: "Ranked by Gold medals",
+            freshness: "Final Tally",
+            rows: [
+              { rank: 1, nation: "United States", nocCode: "USA", gold: 40, silver: 44, bronze: 42, total: 126 },
+              { rank: 2, nation: "China", nocCode: "CHN", gold: 40, silver: 27, bronze: 24, total: 91 },
+            ],
+            sourceUrl: "https://olympics.com/paris-2024/medals",
+          },
+        },
+      ],
+    };
+
+    const result = validateStructuredResponse(standingsInput);
+    expect(result.valid).toBe(true);
+    expect(result.sanitized?.components.length).toBe(2);
+    expect(result.sanitized?.components[0].type).toBe("standings_table");
+    expect(result.sanitized?.components[1].type).toBe("medal_tally");
+    expect(result.sanitized?.components[1].data.rows[0].nation).toBe("United States");
+  });
+
+  it("validates extensible generic data card component", () => {
+    const input = {
+      version: 1,
+      components: [
+        {
+          id: "card-economy",
+          type: "data_card",
+          data: {
+            title: "Q3 Financial Performance",
+            subtitle: "Global Markets Review",
+            badge: "Verified",
+            badgeType: "success",
+            metrics: [
+              { label: "Revenue", value: "$12.4M", change: "+14.2%", trend: "up" },
+              { label: "Net Margin", value: "22.8%", trend: "neutral" },
+            ],
+            rows: [
+              { key: "Operating Cash Flow", value: "$3.8M" },
+              { key: "EBITDA", value: "$4.1M", subtext: "Exceeds consensus" },
+            ],
+            sourceUrl: "https://sec.gov/filing/123",
+          },
+        },
+      ],
+    };
+
+    const result = validateStructuredResponse(input);
+    expect(result.valid).toBe(true);
+    const comp = result.sanitized?.components[0];
+    expect(comp?.type).toBe("data_card");
+    expect(comp?.data.metrics[0].label).toBe("Revenue");
+    expect(comp?.data.rows[1].key).toBe("EBITDA");
+  });
 });

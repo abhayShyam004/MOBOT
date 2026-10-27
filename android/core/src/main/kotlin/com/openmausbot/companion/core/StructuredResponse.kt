@@ -592,3 +592,211 @@ data class TextComponentData(
     val text: String,
     val format: String = "markdown",
 )
+
+// ── 26. Match Scorecard (Cricket / Football / Generic) ──
+@Serializable
+data class MatchTeam(
+    val name: String,
+    val shortName: String? = null,
+    val score: String = "0",
+    val overs: String? = null,
+    val wickets: Int? = null,
+    val isWinner: Boolean = false,
+    val logoUrl: String? = null,
+    val color: String? = null,
+)
+
+@Serializable
+data class CricketBatterSummary(
+    val name: String,
+    val runs: Int = 0,
+    val balls: Int = 0,
+    val fours: Int? = null,
+    val sixes: Int? = null,
+    val strikeRate: String? = null,
+    val dismissal: String? = null,
+    val notOut: Boolean = false,
+)
+
+@Serializable
+data class CricketBowlerSummary(
+    val name: String,
+    val overs: String = "0",
+    val maidens: Int? = null,
+    val runs: Int = 0,
+    val wickets: Int = 0,
+    val economy: String? = null,
+)
+
+@Serializable
+data class CricketInnings(
+    val teamName: String,
+    val runs: Int = 0,
+    val wickets: Int = 0,
+    val overs: String = "0",
+    val runRate: String? = null,
+    val topBatters: List<CricketBatterSummary> = emptyList(),
+    val topBowlers: List<CricketBowlerSummary> = emptyList(),
+)
+
+@Serializable
+data class FootballMatchEvent(
+    val type: String = "goal",
+    val minute: String = "",
+    val teamName: String = "",
+    val playerName: String = "",
+    val assistPlayerName: String? = null,
+    val detail: String? = null,
+)
+
+@Serializable
+data class FootballMatchStat(
+    val label: String,
+    val homeValue: String = "0",
+    val awayValue: String = "0",
+)
+
+@Serializable
+data class MatchScorecardData(
+    val sport: String = "generic",
+    val competition: String = "",
+    val fixtureTitle: String = "",
+    val status: String = "finished",
+    val statusDetail: String? = null,
+    val date: String? = null,
+    val venue: String? = null,
+    val teams: List<MatchTeam> = emptyList(),
+    val innings: List<CricketInnings> = emptyList(),
+    val events: List<FootballMatchEvent> = emptyList(),
+    val stats: List<FootballMatchStat> = emptyList(),
+    val sourceUrl: String? = null,
+    val sourceName: String? = null,
+    val retrievalTimestamp: Long? = null,
+)
+
+// ── 27. Player Statistics ──
+@Serializable
+data class PlayerStatItem(
+    val label: String,
+    val value: String = "",
+    val highlight: Boolean = false,
+    val subtext: String? = null,
+)
+
+@Serializable
+data class PlayerStatsData(
+    val playerName: String = "",
+    val sport: String = "generic",
+    val teamName: String = "",
+    val opponentName: String? = null,
+    val competition: String? = null,
+    val fixtureTitle: String? = null,
+    val fixtureDate: String? = null,
+    val role: String? = null,
+    val headlineStat: String = "",
+    val headlineLabel: String? = null,
+    val stats: List<PlayerStatItem> = emptyList(),
+    val sourceUrl: String? = null,
+    val sourceName: String? = null,
+    val retrievalTimestamp: Long? = null,
+)
+
+// ── 28. Standings Table ──
+@Serializable
+data class StandingRow(
+    val rank: Int = 1,
+    val teamName: String = "",
+    val teamShort: String? = null,
+    val logoUrl: String? = null,
+    val played: Int = 0,
+    val won: Int = 0,
+    val drawn: Int? = null,
+    val lost: Int = 0,
+    val diff: String? = null,
+    val points: Int = 0,
+    val form: List<String> = emptyList(),
+    val qualificationZone: String? = null,
+)
+
+@Serializable
+data class QualificationZoneLegend(
+    val zone: String,
+    val label: String,
+    val color: String,
+)
+
+@Serializable
+data class StandingsTableData(
+    val competition: String = "",
+    val season: String? = null,
+    val group: String? = null,
+    val columns: List<String> = emptyList(),
+    val rows: List<StandingRow> = emptyList(),
+    val qualificationLegend: List<QualificationZoneLegend> = emptyList(),
+    val sourceUrl: String? = null,
+    val sourceName: String? = null,
+    val retrievalTimestamp: Long? = null,
+)
+
+// ── 29. Olympic / Multi-Sport Medal Tally ──
+@Serializable
+data class MedalRow(
+    val rank: Int = 1,
+    val nation: String = "",
+    val nocCode: String? = null,
+    val flagUrl: String? = null,
+    val gold: Int = 0,
+    val silver: Int = 0,
+    val bronze: Int = 0,
+    val total: Int = 0,
+)
+
+@Serializable
+data class MedalTallyData(
+    val competition: String = "",
+    val year: String? = null,
+    val rankingMethod: String = "gold_first",
+    val rankingMethodLabel: String? = null,
+    val freshness: String? = null,
+    val rows: List<MedalRow> = emptyList(),
+    val sourceUrl: String? = null,
+    val sourceName: String? = null,
+    val retrievalTimestamp: Long? = null,
+)
+
+// ── 30. Extensible Generic Data Card ──
+@Serializable
+data class DataMetric(
+    val label: String,
+    val value: String = "",
+    val unit: String? = null,
+    val change: String? = null,
+    val trend: String? = null,
+)
+
+@Serializable
+data class DataRow(
+    val key: String,
+    val value: String = "",
+    val subtext: String? = null,
+)
+
+@Serializable
+data class DataSection(
+    val heading: String,
+    val content: String,
+)
+
+@Serializable
+data class GenericDataCardData(
+    val title: String = "",
+    val subtitle: String? = null,
+    val badge: String? = null,
+    val badgeType: String = "info",
+    val metrics: List<DataMetric> = emptyList(),
+    val rows: List<DataRow> = emptyList(),
+    val sections: List<DataSection> = emptyList(),
+    val sourceUrl: String? = null,
+    val sourceName: String? = null,
+    val retrievalTimestamp: Long? = null,
+)

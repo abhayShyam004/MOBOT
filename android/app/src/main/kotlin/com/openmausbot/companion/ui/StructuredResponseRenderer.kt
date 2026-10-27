@@ -103,6 +103,11 @@ import com.openmausbot.companion.core.StructuredResponseData
 import com.openmausbot.companion.core.TableData
 import com.openmausbot.companion.core.TextComponentData
 import com.openmausbot.companion.core.TimelineData
+import com.openmausbot.companion.core.MatchScorecardData
+import com.openmausbot.companion.core.PlayerStatsData
+import com.openmausbot.companion.core.StandingsTableData
+import com.openmausbot.companion.core.MedalTallyData
+import com.openmausbot.companion.core.GenericDataCardData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -150,6 +155,11 @@ fun StructuredResponseView(
                         "card" -> SemanticCardRenderer(component)
                         "product" -> ProductCardRenderer(component, onEvent)
                         "result" -> ResearchResultCardRenderer(component, onEvent)
+                        "match_scorecard" -> MatchScorecardRenderer(component, onEvent)
+                        "player_stats" -> PlayerStatsRenderer(component, onEvent)
+                        "standings_table" -> StandingsTableRenderer(component, onEvent)
+                        "medal_tally" -> MedalTallyRenderer(component, onEvent)
+                        "data_card" -> GenericDataCardRenderer(component, onEvent)
                         "sources" -> SourcesRenderer(component)
                         "code" -> CodeRenderer(component)
                         "diagram" -> DiagramRenderer(component)
@@ -177,7 +187,7 @@ private fun ComponentContainer(
     content: @Composable () -> Unit,
 ) {
     var remixOpen by remember { mutableStateOf(false) }
-    val isSelfContainedCard = component.type in listOf("result", "product")
+    val isSelfContainedCard = component.type in listOf("result", "product", "match_scorecard", "player_stats", "standings_table", "medal_tally", "data_card")
     val title = component.title
     val subtitle = component.subtitle
     val showHeader = !isSelfContainedCard && (!title.isNullOrBlank() || !subtitle.isNullOrBlank() || onEvent != null)
@@ -3316,6 +3326,1067 @@ private fun TextRenderer(component: StructuredComponent) {
             MarkdownText(
                 source = sanitized,
             )
+        }
+    }
+}
+
+// ── Match Scorecard Renderer (Cricket / Football / Generic) ──
+@Composable
+private fun MatchScorecardRenderer(
+    component: StructuredComponent,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+) {
+    val scorecard = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<MatchScorecardData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (scorecard == null) {
+        FallbackRenderer(component)
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+    var selectedInningsIndex by remember { mutableIntStateOf(0) }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // 1. Header: Competition, Date & Status Pill
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f, fill = false)) {
+                Text(
+                    text = scorecard.competition.uppercase(),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textTertiary,
+                    letterSpacing = 0.5.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (!scorecard.date.isNullOrBlank() || !scorecard.venue.isNullOrBlank()) {
+                    val venueDate = listOfNotNull(scorecard.date, scorecard.venue).joinToString(" - ")
+                    Text(
+                        text = venueDate,
+                        fontSize = 11.sp,
+                        color = AppTheme.colors.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+
+            val statusBg = when (scorecard.status.lowercase()) {
+                "live" -> Color(0xFFDC2626)
+                "upcoming" -> Color(0xFF2563EB)
+                else -> AppTheme.colors.surfaceRaised
+            }
+            val statusColor = when (scorecard.status.lowercase()) {
+                "live", "upcoming" -> Color.White
+                else -> AppTheme.colors.textSecondary
+            }
+            val statusLabel = when (scorecard.status.lowercase()) {
+                "live" -> "LIVE"
+                "upcoming" -> "UPCOMING"
+                else -> if (scorecard.sport == "football") "FT" else "FINAL"
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(statusBg)
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            ) {
+                Text(
+                    text = statusLabel,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = statusColor,
+                    letterSpacing = 0.5.sp,
+                )
+            }
+        }
+
+        // Fixture title if distinct
+        if (scorecard.fixtureTitle.isNotBlank() && scorecard.fixtureTitle != scorecard.competition) {
+            Text(
+                text = scorecard.fixtureTitle,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Medium,
+                color = AppTheme.colors.textPrimary,
+            )
+        }
+
+        // 2. Teams & Scoreboard Card Box
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(AppTheme.colors.surfaceRaised)
+                .padding(12.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                scorecard.teams.forEach { team ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f, fill = false),
+                        ) {
+                            if (team.color != null) {
+                                val colorVal = try { Color(android.graphics.Color.parseColor(team.color)) } catch (_: Exception) { AppTheme.colors.accent }
+                                Box(
+                                    modifier = Modifier
+                                        .size(10.dp)
+                                        .clip(CircleShape)
+                                        .background(colorVal),
+                                )
+                            }
+                            Text(
+                                text = team.name,
+                                fontSize = 15.sp,
+                                fontWeight = if (team.isWinner) FontWeight.Bold else FontWeight.SemiBold,
+                                color = if (team.isWinner) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+
+                        Text(
+                            text = team.score,
+                            fontSize = 16.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (team.isWinner) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
+                        )
+                    }
+                }
+            }
+        }
+
+        // Status Detail outcome banner
+        val statusDetail = scorecard.statusDetail
+        if (!statusDetail.isNullOrBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Text(
+                    text = statusDetail,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = AppTheme.colors.accent,
+                )
+            }
+        }
+
+        // 3. Sport Breakdown (Cricket vs Football vs Generic)
+        if (scorecard.sport == "cricket" && scorecard.innings.isNotEmpty()) {
+            // Innings Tabs if > 1
+            if (scorecard.innings.size > 1) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    scorecard.innings.forEachIndexed { idx, inn ->
+                        val isSelected = idx == selectedInningsIndex
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(if (isSelected) AppTheme.colors.accent else AppTheme.colors.surfaceRaised)
+                                .clickable { selectedInningsIndex = idx }
+                                .padding(vertical = 6.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                text = inn.teamName,
+                                fontSize = 12.sp,
+                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                color = if (isSelected) AppTheme.colors.onAccent else AppTheme.colors.textSecondary,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
+
+            val currentInnings = scorecard.innings.getOrNull(selectedInningsIndex) ?: scorecard.innings[0]
+
+            // Batting Summary
+            if (currentInnings.topBatters.isNotEmpty()) {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("BATTER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.weight(1f))
+                        Text("R", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                        Text("B", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                        Text("4s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                        Text("6s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                        Text("SR", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
+                    }
+
+                    currentInnings.topBatters.forEach { b ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(b.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, maxLines = 1)
+                                val dismissal = b.dismissal
+                                if (!dismissal.isNullOrBlank()) {
+                                    Text(dismissal, fontSize = 10.sp, color = AppTheme.colors.textTertiary, maxLines = 1)
+                                }
+                            }
+                            Text("${b.runs}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                            Text("${b.balls}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                            Text(b.fours?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                            Text(b.sixes?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                            Text(b.strikeRate ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
+                        }
+                    }
+                }
+            }
+
+            // Bowling Summary
+            if (currentInnings.topBowlers.isNotEmpty()) {
+                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(vertical = 2.dp))
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text("BOWLER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.weight(1f))
+                        Text("O", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                        Text("M", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                        Text("R", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                        Text("W", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                        Text("ECON", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
+                    }
+
+                    currentInnings.topBowlers.forEach { bw ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(bw.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, modifier = Modifier.weight(1f), maxLines = 1)
+                            Text(bw.overs, fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                            Text(bw.maidens?.toString() ?: "0", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                            Text("${bw.runs}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                            Text("${bw.wickets}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.accent, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                            Text(bw.economy ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
+                        }
+                    }
+                }
+            }
+        } else if (scorecard.sport == "football") {
+            // Events timeline
+            if (scorecard.events.isNotEmpty()) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("MATCH EVENTS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
+                    scorecard.events.forEach { ev ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Text(ev.minute, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.accent, modifier = Modifier.width(32.dp))
+                            Text(ev.playerName, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                            if (!ev.assistPlayerName.isNullOrBlank()) {
+                                Text("(assist: ${ev.assistPlayerName})", fontSize = 10.sp, color = AppTheme.colors.textTertiary)
+                            }
+                            Spacer(Modifier.weight(1f))
+                            Text(ev.teamName, fontSize = 10.sp, color = AppTheme.colors.textTertiary)
+                        }
+                    }
+                }
+            }
+
+            // Stats comparison
+            if (scorecard.stats.isNotEmpty()) {
+                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(vertical = 2.dp))
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("MATCH STATS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
+                    scorecard.stats.forEach { st ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(st.homeValue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(40.dp))
+                            Text(st.label, fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
+                            Text(st.awayValue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(40.dp), textAlign = TextAlign.End)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Provenance
+        val sourceUrl = scorecard.sourceUrl
+        if (!sourceUrl.isNullOrBlank()) {
+            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        uriHandler.openUri(sourceUrl)
+                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Source: ${scorecard.sourceName ?: "Official Fixture"}",
+                    fontSize = 11.sp,
+                    color = AppTheme.colors.accent,
+                    textDecoration = TextDecoration.Underline,
+                )
+                Text(
+                    text = "Verified",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFF10B981),
+                )
+            }
+        }
+    }
+}
+
+// ── Player Statistics Card Renderer ──
+@Composable
+private fun PlayerStatsRenderer(
+    component: StructuredComponent,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+) {
+    val player = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<PlayerStatsData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (player == null) {
+        FallbackRenderer(component)
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // 1. Header: Role & Competition
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = listOfNotNull(player.competition, player.fixtureDate).joinToString(" - ").uppercase(),
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                color = AppTheme.colors.textTertiary,
+                letterSpacing = 0.5.sp,
+                modifier = Modifier.weight(1f, fill = false),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            val role = player.role
+            if (!role.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(AppTheme.colors.surfaceRaised)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) {
+                    Text(
+                        text = role,
+                        fontSize = 10.sp,
+                        color = AppTheme.colors.textSecondary,
+                    )
+                }
+            }
+        }
+
+        // 2. Player Name & Team Subtitle
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = player.playerName,
+                fontSize = 18.sp,
+                fontWeight = FontWeight.Bold,
+                color = AppTheme.colors.textPrimary,
+            )
+            val subText = listOfNotNull(
+                player.teamName.ifBlank { null },
+                player.opponentName?.let { "vs $it" },
+                player.fixtureTitle?.ifBlank { null },
+            ).joinToString(" - ")
+            if (subText.isNotBlank()) {
+                Text(
+                    text = subText,
+                    fontSize = 12.sp,
+                    color = AppTheme.colors.textSecondary,
+                )
+            }
+        }
+
+        // 3. Headline Metric Callout
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(AppTheme.colors.surfaceRaised)
+                .padding(12.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = player.headlineStat,
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textPrimary,
+                    letterSpacing = (-0.5).sp,
+                )
+                val headlineLabel = player.headlineLabel
+                if (!headlineLabel.isNullOrBlank()) {
+                    Text(
+                        text = headlineLabel,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = AppTheme.colors.accent,
+                    )
+                }
+            }
+        }
+
+        // 4. Statistics Grid
+        if (player.stats.isNotEmpty()) {
+            @OptIn(ExperimentalLayoutApi::class)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                player.stats.forEach { s ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .widthIn(min = 70.dp)
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(if (s.highlight) AppTheme.colors.surfaceRaised else AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
+                            .padding(8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(2.dp),
+                        ) {
+                            Text(
+                                text = s.value,
+                                fontSize = 14.sp,
+                                fontWeight = if (s.highlight) FontWeight.Bold else FontWeight.SemiBold,
+                                color = if (s.highlight) AppTheme.colors.accent else AppTheme.colors.textPrimary,
+                            )
+                            Text(
+                                text = s.label.uppercase(),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AppTheme.colors.textTertiary,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // 5. Provenance
+        val sourceUrl = player.sourceUrl
+        if (!sourceUrl.isNullOrBlank()) {
+            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        uriHandler.openUri(sourceUrl)
+                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Source: ${player.sourceName ?: "Official Fixture Record"}",
+                    fontSize = 11.sp,
+                    color = AppTheme.colors.accent,
+                    textDecoration = TextDecoration.Underline,
+                )
+                Text(
+                    text = "Verified",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFF10B981),
+                )
+            }
+        }
+    }
+}
+
+// ── League Standings Table Renderer ──
+@Composable
+private fun StandingsTableRenderer(
+    component: StructuredComponent,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+) {
+    val table = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<StandingsTableData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (table == null) {
+        FallbackRenderer(component)
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // 1. Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f, fill = false)) {
+                Text(
+                    text = table.competition,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textPrimary,
+                )
+                if (!table.season.isNullOrBlank() || !table.group.isNullOrBlank()) {
+                    Text(
+                        text = listOfNotNull(table.season, table.group).joinToString(" - "),
+                        fontSize = 11.sp,
+                        color = AppTheme.colors.textSecondary,
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(AppTheme.colors.surfaceRaised)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            ) {
+                Text("TABLE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
+            }
+        }
+
+        // 2. Horizontally scrollable table container
+        val scrollState = rememberScrollState()
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.4f))
+                .horizontalScroll(scrollState),
+        ) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                // Table Header Row
+                Row(
+                    modifier = Modifier.padding(bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("POS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(36.dp))
+                    Text("TEAM", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(130.dp))
+                    Text("P", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                    Text("W", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                    Text("D", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                    Text("L", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                    Text("DIFF", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+                    Text("PTS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
+                }
+
+                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(340.dp))
+
+                // Table Rows
+                table.rows.forEach { r ->
+                    val zoneColor = when (r.qualificationZone) {
+                        "champions_league" -> Color(0xFF58A6FF)
+                        "europa_league" -> Color(0xFFF0883E)
+                        "relegation" -> Color(0xFFF85149)
+                        else -> null
+                    }
+
+                    Row(
+                        modifier = Modifier
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(modifier = Modifier.width(36.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (zoneColor != null) {
+                                Box(
+                                    modifier = Modifier
+                                        .size(width = 3.dp, height = 14.dp)
+                                        .clip(RoundedCornerShape(1.dp))
+                                        .background(zoneColor),
+                                )
+                                Spacer(Modifier.width(4.dp))
+                            }
+                            Text(
+                                text = "${r.rank}",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = AppTheme.colors.textSecondary,
+                            )
+                        }
+
+                        Text(
+                            text = r.teamName,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = AppTheme.colors.textPrimary,
+                            modifier = Modifier.width(130.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+
+                        Text("${r.played}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                        Text("${r.won}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                        Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                        Text("${r.lost}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                        Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+                        Text("${r.points}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
+                    }
+                }
+            }
+        }
+
+        // 3. Qualification Legend
+        if (table.qualificationLegend.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                table.qualificationLegend.forEach { leg ->
+                    val colorVal = try { Color(android.graphics.Color.parseColor(leg.color)) } catch (_: Exception) { Color(0xFF58A6FF) }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Box(modifier = Modifier.size(6.dp).clip(CircleShape).background(colorVal))
+                        Text(leg.label, fontSize = 9.sp, color = AppTheme.colors.textTertiary)
+                    }
+                }
+            }
+        }
+
+        // 4. Provenance
+        val sourceUrl = table.sourceUrl
+        if (!sourceUrl.isNullOrBlank()) {
+            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        uriHandler.openUri(sourceUrl)
+                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Source: ${table.sourceName ?: "Official Standings"}",
+                    fontSize = 11.sp,
+                    color = AppTheme.colors.accent,
+                    textDecoration = TextDecoration.Underline,
+                )
+                Text("Verified", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF10B981))
+            }
+        }
+    }
+}
+
+// ── Olympic & Multi-Sport Medal Tally Renderer ──
+@Composable
+private fun MedalTallyRenderer(
+    component: StructuredComponent,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+) {
+    val tally = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<MedalTallyData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (tally == null) {
+        FallbackRenderer(component)
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        // 1. Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f, fill = false)) {
+                Text(
+                    text = tally.competition,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textPrimary,
+                )
+                val subtitle = tally.rankingMethodLabel ?: "Ranked by Gold medals first"
+                Text(
+                    text = subtitle,
+                    fontSize = 11.sp,
+                    color = AppTheme.colors.textSecondary,
+                )
+            }
+            val freshness = tally.freshness
+            if (!freshness.isNullOrBlank()) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(AppTheme.colors.surfaceRaised)
+                        .padding(horizontal = 6.dp, vertical = 2.dp),
+                ) {
+                    Text(freshness, fontSize = 10.sp, fontWeight = FontWeight.Medium, color = AppTheme.colors.textTertiary)
+                }
+            }
+        }
+
+        // 2. Horizontally scrollable table
+        val scrollState = rememberScrollState()
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(8.dp))
+                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.4f))
+                .horizontalScroll(scrollState),
+        ) {
+            Column(modifier = Modifier.padding(8.dp)) {
+                // Header
+                Row(
+                    modifier = Modifier.padding(bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("RANK", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp))
+                    Text("NATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(140.dp))
+                    Text("GOLD", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD700), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+                    Text("SILVER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC0C0C0), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+                    Text("BRONZE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFCD7F32), modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
+                    Text("TOTAL", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
+                }
+
+                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(330.dp))
+
+                // Rows
+                tally.rows.forEach { r ->
+                    val rankColor = when (r.rank) {
+                        1 -> Color(0xFFFFD700)
+                        2 -> Color(0xFFC0C0C0)
+                        3 -> Color(0xFFCD7F32)
+                        else -> AppTheme.colors.textSecondary
+                    }
+
+                    Row(
+                        modifier = Modifier.padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            text = "${r.rank}",
+                            fontSize = 12.sp,
+                            fontWeight = if (r.rank <= 3) FontWeight.Bold else FontWeight.SemiBold,
+                            color = rankColor,
+                            modifier = Modifier.width(42.dp),
+                        )
+
+                        Text(
+                            text = if (!r.nocCode.isNullOrBlank()) "${r.nation} (${r.nocCode})" else r.nation,
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = AppTheme.colors.textPrimary,
+                            modifier = Modifier.width(140.dp),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+
+                        Text("${r.gold}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFD700), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+                        Text("${r.silver}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFC0C0C0), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+                        Text("${r.bronze}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFCD7F32), modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
+                        Text("${r.total}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
+                    }
+                }
+            }
+        }
+
+        // 3. Provenance
+        val sourceUrl = tally.sourceUrl
+        if (!sourceUrl.isNullOrBlank()) {
+            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        uriHandler.openUri(sourceUrl)
+                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Source: ${tally.sourceName ?: "Medal Standings"}",
+                    fontSize = 11.sp,
+                    color = AppTheme.colors.accent,
+                    textDecoration = TextDecoration.Underline,
+                )
+                Text("Verified", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF10B981))
+            }
+        }
+    }
+}
+
+// ── Extensible Generic Data Card Renderer ──
+@Composable
+private fun GenericDataCardRenderer(
+    component: StructuredComponent,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+) {
+    val card = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<GenericDataCardData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (card == null) {
+        FallbackRenderer(component)
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // 1. Header with Badge
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f, fill = false)) {
+                Text(
+                    text = card.title,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textPrimary,
+                )
+                val subtitle = card.subtitle
+                if (!subtitle.isNullOrBlank()) {
+                    Text(
+                        text = subtitle,
+                        fontSize = 12.sp,
+                        color = AppTheme.colors.textSecondary,
+                    )
+                }
+            }
+
+            val badge = card.badge
+            if (!badge.isNullOrBlank()) {
+                val badgeColor = when (card.badgeType) {
+                    "success" -> Color(0xFF10B981)
+                    "warning" -> Color(0xFFF59E0B)
+                    "accent" -> AppTheme.colors.accent
+                    else -> AppTheme.colors.textSecondary
+                }
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(badgeColor.copy(alpha = 0.15f))
+                        .padding(horizontal = 7.dp, vertical = 3.dp),
+                ) {
+                    Text(
+                        text = badge,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = badgeColor,
+                    )
+                }
+            }
+        }
+
+        // 2. Metrics Tiles Grid
+        if (card.metrics.isNotEmpty()) {
+            @OptIn(ExperimentalLayoutApi::class)
+            FlowRow(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                card.metrics.forEach { m ->
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .widthIn(min = 90.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(AppTheme.colors.surfaceRaised)
+                            .padding(10.dp),
+                    ) {
+                        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                            Text(
+                                text = m.label.uppercase(),
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AppTheme.colors.textTertiary,
+                            )
+                            Row(verticalAlignment = Alignment.Bottom) {
+                                Text(
+                                    text = m.value,
+                                    fontSize = 18.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = AppTheme.colors.textPrimary,
+                                )
+                                val unit = m.unit
+                                if (!unit.isNullOrBlank()) {
+                                    Spacer(Modifier.width(2.dp))
+                                    Text(
+                                        text = unit,
+                                        fontSize = 11.sp,
+                                        color = AppTheme.colors.textSecondary,
+                                        modifier = Modifier.padding(bottom = 2.dp),
+                                    )
+                                }
+                            }
+                            val change = m.change
+                            if (!change.isNullOrBlank()) {
+                                val changeColor = when (m.trend) {
+                                    "up" -> Color(0xFF10B981)
+                                    "down" -> Color(0xFFEF4444)
+                                    else -> AppTheme.colors.textSecondary
+                                }
+                                Text(
+                                    text = change,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = changeColor,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Key-Value Rows
+        if (card.rows.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                card.rows.forEachIndexed { idx, r ->
+                    if (idx > 0) HorizontalDivider(color = AppTheme.colors.hairline.copy(alpha = 0.5f))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f, fill = false)) {
+                            Text(r.key, fontSize = 12.sp, color = AppTheme.colors.textSecondary)
+                            val subtext = r.subtext
+                            if (!subtext.isNullOrBlank()) {
+                                Text(subtext, fontSize = 10.sp, color = AppTheme.colors.textTertiary)
+                            }
+                        }
+                        Text(
+                            text = r.value,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = AppTheme.colors.textPrimary,
+                        )
+                    }
+                }
+            }
+        }
+
+        // 4. Sections
+        card.sections.forEach { sec ->
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(sec.heading, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary)
+                Text(sec.content, fontSize = 12.sp, color = AppTheme.colors.textSecondary)
+            }
+        }
+
+        // 5. Provenance
+        val sourceUrl = card.sourceUrl
+        if (!sourceUrl.isNullOrBlank()) {
+            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        uriHandler.openUri(sourceUrl)
+                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
+                    },
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = "Source: ${card.sourceName ?: "Data Source"}",
+                    fontSize = 11.sp,
+                    color = AppTheme.colors.accent,
+                    textDecoration = TextDecoration.Underline,
+                )
+                Text("Verified", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF10B981))
+            }
         }
     }
 }

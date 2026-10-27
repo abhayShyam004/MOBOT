@@ -131,7 +131,7 @@ export function canonicalizeAssistantResponse(
   text = redactSecretsInText(text);
 
   // Extract structured content if present
-  const { cleanText, structured } = extractStructuredContent(text);
+  const { cleanText, structured } = extractStructuredContent(text, { threadId });
   text = cleanText;
 
   // Truthfulness check against tool receipts

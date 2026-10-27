@@ -36,7 +36,12 @@ export type StructuredComponentType =
   | "sources"
   | "product"
   | "result"
-  | "text";
+  | "text"
+  | "match_scorecard"
+  | "player_stats"
+  | "standings_table"
+  | "medal_tally"
+  | "data_card";
 
 export interface ComponentAction {
   id: string;
@@ -508,6 +513,196 @@ export interface TextComponentData {
   format?: "markdown" | "plain";
 }
 
+// ── Match Scorecard (Cricket / Football / Generic) ──
+export interface MatchTeam {
+  name: string;
+  shortName?: string;
+  score: string;
+  overs?: string | number;
+  wickets?: number;
+  isWinner?: boolean;
+  logoUrl?: string;
+  color?: string;
+}
+
+export interface CricketBatterSummary {
+  name: string;
+  runs: number;
+  balls: number;
+  fours?: number;
+  sixes?: number;
+  strikeRate?: number | string;
+  dismissal?: string;
+  notOut?: boolean;
+}
+
+export interface CricketBowlerSummary {
+  name: string;
+  overs: number | string;
+  maidens?: number;
+  runs: number;
+  wickets: number;
+  economy?: number | string;
+}
+
+export interface CricketInnings {
+  teamName: string;
+  runs: number;
+  wickets: number;
+  overs: number | string;
+  runRate?: string | number;
+  topBatters?: CricketBatterSummary[];
+  topBowlers?: CricketBowlerSummary[];
+}
+
+export interface FootballMatchEvent {
+  type: "goal" | "yellow_card" | "red_card" | "sub";
+  minute: string | number;
+  teamName: string;
+  playerName: string;
+  assistPlayerName?: string;
+  detail?: string;
+}
+
+export interface FootballMatchStat {
+  label: string;
+  homeValue: string | number;
+  awayValue: string | number;
+}
+
+export interface MatchScorecardComponentData {
+  sport: "cricket" | "football" | "generic";
+  competition: string;
+  fixtureTitle: string;
+  status: "live" | "finished" | "upcoming";
+  statusDetail?: string;
+  date?: string;
+  venue?: string;
+  teams: [MatchTeam, MatchTeam] | MatchTeam[];
+  innings?: CricketInnings[];
+  events?: FootballMatchEvent[];
+  stats?: FootballMatchStat[];
+  sourceUrl?: string;
+  sourceName?: string;
+  retrievalTimestamp?: number;
+}
+
+// ── Player Statistics ──
+export interface PlayerStatItem {
+  label: string;
+  value: string | number;
+  highlight?: boolean;
+  subtext?: string;
+}
+
+export interface PlayerStatsComponentData {
+  playerName: string;
+  sport: "cricket" | "football" | "generic";
+  teamName: string;
+  opponentName?: string;
+  competition?: string;
+  fixtureTitle?: string;
+  fixtureDate?: string;
+  role?: string;
+  headlineStat: string;
+  headlineLabel?: string;
+  stats: PlayerStatItem[];
+  sourceUrl?: string;
+  sourceName?: string;
+  retrievalTimestamp?: number;
+}
+
+// ── Standings / League Tables ──
+export interface StandingRow {
+  rank: number | string;
+  teamName: string;
+  teamShort?: string;
+  logoUrl?: string;
+  played: number;
+  won: number;
+  drawn?: number;
+  lost: number;
+  diff?: string | number;
+  points: number;
+  form?: string[];
+  qualificationZone?: string;
+}
+
+export interface QualificationZoneLegend {
+  zone: string;
+  label: string;
+  color: string;
+}
+
+export interface StandingsTableComponentData {
+  competition: string;
+  season?: string;
+  group?: string;
+  columns?: string[];
+  rows: StandingRow[];
+  qualificationLegend?: QualificationZoneLegend[];
+  sourceUrl?: string;
+  sourceName?: string;
+  retrievalTimestamp?: number;
+}
+
+// ── Olympic & Multi-Sport Medal Tallies ──
+export interface MedalRow {
+  rank: number;
+  nation: string;
+  nocCode?: string;
+  flagUrl?: string;
+  gold: number;
+  silver: number;
+  bronze: number;
+  total: number;
+}
+
+export interface MedalTallyComponentData {
+  competition: string;
+  year?: number | string;
+  rankingMethod?: "gold_first" | "total_first";
+  rankingMethodLabel?: string;
+  freshness?: string;
+  rows: MedalRow[];
+  sourceUrl?: string;
+  sourceName?: string;
+  retrievalTimestamp?: number;
+}
+
+// ── Generic Extensible Data Card ──
+export interface DataMetric {
+  label: string;
+  value: string | number;
+  unit?: string;
+  change?: string;
+  trend?: "up" | "down" | "neutral";
+}
+
+export interface DataRow {
+  key: string;
+  value: string;
+  subtext?: string;
+}
+
+export interface DataSection {
+  heading: string;
+  content: string;
+}
+
+export interface DataCardComponentData {
+  title: string;
+  subtitle?: string;
+  badge?: string;
+  badgeType?: "info" | "success" | "warning" | "accent";
+  metrics?: DataMetric[];
+  rows?: DataRow[];
+  sections?: DataSection[];
+  sourceUrl?: string;
+  sourceName?: string;
+  retrievalTimestamp?: number;
+}
+
 // ── Structured Component Envelope ──
 export interface StructuredComponent {
   id: string;
@@ -706,6 +901,46 @@ export const STRUCTURED_COMPONENT_REGISTRY: Record<StructuredComponentType, Comp
     semanticPurpose: "Interleaved prose and markdown sections flowing between structured components.",
     supportedInteractions: [],
     mobileLayout: "compact",
+  },
+  match_scorecard: {
+    type: "match_scorecard",
+    schemaVersion: 1,
+    semanticPurpose: "Live or final sports scorecards (cricket, football, etc.) with innings, overs, wickets, events, and stats.",
+    supportedInteractions: ["switch_innings", "view_details", "open_source"],
+    mobileLayout: "adaptive",
+    viewSwitchableTo: ["table", "card"],
+  },
+  player_stats: {
+    type: "player_stats",
+    schemaVersion: 1,
+    semanticPurpose: "Individual player match or career statistics tied to resolved fixture with headline metric and stat grid.",
+    supportedInteractions: ["view_details", "open_source"],
+    mobileLayout: "compact",
+    viewSwitchableTo: ["table", "card"],
+  },
+  standings_table: {
+    type: "standings_table",
+    schemaVersion: 1,
+    semanticPurpose: "Ranked league and tournament standings with qualification zones, form badges, and mobile horizontal scrolling.",
+    supportedInteractions: ["sort", "filter_group", "open_source"],
+    mobileLayout: "scrollable",
+    viewSwitchableTo: ["table"],
+  },
+  medal_tally: {
+    type: "medal_tally",
+    schemaVersion: 1,
+    semanticPurpose: "Olympic and multi-sport medal tallies with Gold/Silver/Bronze breakdown, ranking methodology, and freshness.",
+    supportedInteractions: ["switch_ranking_method", "open_source"],
+    mobileLayout: "scrollable",
+    viewSwitchableTo: ["table"],
+  },
+  data_card: {
+    type: "data_card",
+    schemaVersion: 1,
+    semanticPurpose: "Extensible multi-metric data cards with key-value rows, expandable sections, badges, and source attribution.",
+    supportedInteractions: ["expand_section", "open_source"],
+    mobileLayout: "compact",
+    viewSwitchableTo: ["card", "dashboard"],
   },
 };
 
@@ -1363,6 +1598,240 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
         break;
       }
 
+      case "match_scorecard": {
+        const card = comp.data as MatchScorecardComponentData | undefined;
+        if (!card || !card.fixtureTitle || !Array.isArray(card.teams) || card.teams.length < 2) {
+          errors.push(`Component '${compId}' (match_scorecard) missing valid fixtureTitle or at least 2 teams.`);
+          break;
+        }
+        const validSports = ["cricket", "football", "generic"];
+        const sport = validSports.includes(card.sport) ? card.sport : "generic";
+        const validStatuses = ["live", "finished", "upcoming"];
+        const status = validStatuses.includes(card.status) ? card.status : "finished";
+
+        sanitizedComp.data = {
+          sport,
+          competition: sanitizeString(card.competition) || "Sports Fixture",
+          fixtureTitle: sanitizeString(card.fixtureTitle) || "Match",
+          status,
+          statusDetail: sanitizeString(card.statusDetail),
+          date: sanitizeString(card.date),
+          venue: sanitizeString(card.venue),
+          teams: card.teams.slice(0, 4).map((t) => ({
+            name: sanitizeString(t.name) || "Team",
+            shortName: sanitizeString(t.shortName),
+            score: sanitizeString(t.score) || "0",
+            overs: typeof t.overs === "number" || typeof t.overs === "string" ? t.overs : undefined,
+            wickets: typeof t.wickets === "number" ? t.wickets : undefined,
+            isWinner: Boolean(t.isWinner),
+            logoUrl: sanitizeUrl(t.logoUrl),
+            color: sanitizeColor(t.color),
+          })),
+          innings: Array.isArray(card.innings)
+            ? card.innings.slice(0, 4).map((inn) => ({
+                teamName: sanitizeString(inn.teamName) || "Team",
+                runs: typeof inn.runs === "number" ? inn.runs : 0,
+                wickets: typeof inn.wickets === "number" ? inn.wickets : 0,
+                overs: typeof inn.overs === "number" || typeof inn.overs === "string" ? String(inn.overs) : "0",
+                runRate: sanitizeString(String(inn.runRate ?? "")),
+                topBatters: Array.isArray(inn.topBatters)
+                  ? inn.topBatters.slice(0, 11).map((b) => ({
+                      name: sanitizeString(b.name) || "Batter",
+                      runs: typeof b.runs === "number" ? b.runs : 0,
+                      balls: typeof b.balls === "number" ? b.balls : 0,
+                      fours: typeof b.fours === "number" ? b.fours : undefined,
+                      sixes: typeof b.sixes === "number" ? b.sixes : undefined,
+                      strikeRate: typeof b.strikeRate === "number" || typeof b.strikeRate === "string" ? String(b.strikeRate) : undefined,
+                      dismissal: sanitizeString(b.dismissal),
+                      notOut: Boolean(b.notOut),
+                    }))
+                  : undefined,
+                topBowlers: Array.isArray(inn.topBowlers)
+                  ? inn.topBowlers.slice(0, 11).map((bw) => ({
+                      name: sanitizeString(bw.name) || "Bowler",
+                      overs: typeof bw.overs === "number" || typeof bw.overs === "string" ? String(bw.overs) : "0",
+                      maidens: typeof bw.maidens === "number" ? bw.maidens : undefined,
+                      runs: typeof bw.runs === "number" ? bw.runs : 0,
+                      wickets: typeof bw.wickets === "number" ? bw.wickets : 0,
+                      economy: typeof bw.economy === "number" || typeof bw.economy === "string" ? String(bw.economy) : undefined,
+                    }))
+                  : undefined,
+              }))
+            : undefined,
+          events: Array.isArray(card.events)
+            ? card.events.slice(0, 30).map((ev) => ({
+                type: ["goal", "yellow_card", "red_card", "sub"].includes(ev.type) ? ev.type : "goal",
+                minute: sanitizeString(String(ev.minute ?? "")) || "",
+                teamName: sanitizeString(ev.teamName) || "",
+                playerName: sanitizeString(ev.playerName) || "Player",
+                assistPlayerName: sanitizeString(ev.assistPlayerName),
+                detail: sanitizeString(ev.detail),
+              }))
+            : undefined,
+          stats: Array.isArray(card.stats)
+            ? card.stats.slice(0, 20).map((st) => ({
+                label: sanitizeString(st.label) || "Stat",
+                homeValue: sanitizeString(String(st.homeValue ?? "")) || "0",
+                awayValue: sanitizeString(String(st.awayValue ?? "")) || "0",
+              }))
+            : undefined,
+          sourceUrl: sanitizeUrl(card.sourceUrl),
+          sourceName: sanitizeString(card.sourceName),
+          retrievalTimestamp: typeof card.retrievalTimestamp === "number" ? card.retrievalTimestamp : undefined,
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
+      case "player_stats": {
+        const p = comp.data as PlayerStatsComponentData | undefined;
+        if (!p || !p.playerName || !p.headlineStat || !Array.isArray(p.stats)) {
+          errors.push(`Component '${compId}' (player_stats) missing playerName, headlineStat, or stats array.`);
+          break;
+        }
+        sanitizedComp.data = {
+          playerName: sanitizeString(p.playerName) || "Player",
+          sport: ["cricket", "football", "generic"].includes(p.sport) ? p.sport : "generic",
+          teamName: sanitizeString(p.teamName) || "",
+          opponentName: sanitizeString(p.opponentName),
+          competition: sanitizeString(p.competition),
+          fixtureTitle: sanitizeString(p.fixtureTitle),
+          fixtureDate: sanitizeString(p.fixtureDate),
+          role: sanitizeString(p.role),
+          headlineStat: sanitizeString(p.headlineStat) || "",
+          headlineLabel: sanitizeString(p.headlineLabel),
+          stats: p.stats.slice(0, 25).map((s) => ({
+            label: sanitizeString(s.label) || "Metric",
+            value: typeof s.value === "number" || typeof s.value === "string" ? s.value : String(s.value ?? ""),
+            highlight: Boolean(s.highlight),
+            subtext: sanitizeString(s.subtext),
+          })),
+          sourceUrl: sanitizeUrl(p.sourceUrl),
+          sourceName: sanitizeString(p.sourceName),
+          retrievalTimestamp: typeof p.retrievalTimestamp === "number" ? p.retrievalTimestamp : undefined,
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
+      case "standings_table": {
+        const stand = comp.data as StandingsTableComponentData | undefined;
+        if (!stand || !stand.competition || !Array.isArray(stand.rows)) {
+          errors.push(`Component '${compId}' (standings_table) missing competition or rows array.`);
+          break;
+        }
+        sanitizedComp.data = {
+          competition: sanitizeString(stand.competition) || "Standings",
+          season: sanitizeString(stand.season),
+          group: sanitizeString(stand.group),
+          columns: Array.isArray(stand.columns)
+            ? stand.columns.slice(0, 15).map((c) => sanitizeString(c) || "").filter(Boolean)
+            : undefined,
+          rows: stand.rows.slice(0, LIMITS.MAX_TABLE_ROWS).map((r, idx) => ({
+            rank: typeof r.rank === "number" ? r.rank : (parseInt(String(r.rank), 10) || idx + 1),
+            teamName: sanitizeString(r.teamName) || "Team",
+            teamShort: sanitizeString(r.teamShort),
+            logoUrl: sanitizeUrl(r.logoUrl),
+            played: typeof r.played === "number" ? r.played : 0,
+            won: typeof r.won === "number" ? r.won : 0,
+            drawn: typeof r.drawn === "number" ? r.drawn : undefined,
+            lost: typeof r.lost === "number" ? r.lost : 0,
+            diff: typeof r.diff === "number" || typeof r.diff === "string" ? String(r.diff) : undefined,
+            points: typeof r.points === "number" ? r.points : 0,
+            form: Array.isArray(r.form) ? r.form.slice(0, 6).map((f) => sanitizeString(f) || "").filter(Boolean) : undefined,
+            qualificationZone: sanitizeString(r.qualificationZone),
+          })),
+          qualificationLegend: Array.isArray(stand.qualificationLegend)
+            ? stand.qualificationLegend.slice(0, 10).map((l) => ({
+                zone: sanitizeString(l.zone) || "zone",
+                label: sanitizeString(l.label) || "",
+                color: sanitizeColor(l.color) || "#58A6FF",
+              }))
+            : undefined,
+          sourceUrl: sanitizeUrl(stand.sourceUrl),
+          sourceName: sanitizeString(stand.sourceName),
+          retrievalTimestamp: typeof stand.retrievalTimestamp === "number" ? stand.retrievalTimestamp : undefined,
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
+      case "medal_tally": {
+        const medal = comp.data as MedalTallyComponentData | undefined;
+        if (!medal || !medal.competition || !Array.isArray(medal.rows)) {
+          errors.push(`Component '${compId}' (medal_tally) missing competition or rows array.`);
+          break;
+        }
+        sanitizedComp.data = {
+          competition: sanitizeString(medal.competition) || "Medal Tally",
+          year: typeof medal.year === "number" || typeof medal.year === "string" ? medal.year : undefined,
+          rankingMethod: ["gold_first", "total_first"].includes(medal.rankingMethod || "")
+            ? medal.rankingMethod
+            : "gold_first",
+          rankingMethodLabel: sanitizeString(medal.rankingMethodLabel),
+          freshness: sanitizeString(medal.freshness),
+          rows: medal.rows.slice(0, 100).map((r, idx) => ({
+            rank: typeof r.rank === "number" ? r.rank : idx + 1,
+            nation: sanitizeString(r.nation) || "Nation",
+            nocCode: sanitizeString(r.nocCode),
+            flagUrl: sanitizeUrl(r.flagUrl),
+            gold: typeof r.gold === "number" ? Math.max(0, r.gold) : 0,
+            silver: typeof r.silver === "number" ? Math.max(0, r.silver) : 0,
+            bronze: typeof r.bronze === "number" ? Math.max(0, r.bronze) : 0,
+            total: typeof r.total === "number" ? Math.max(0, r.total) : (typeof r.gold === "number" ? r.gold : 0) + (typeof r.silver === "number" ? r.silver : 0) + (typeof r.bronze === "number" ? r.bronze : 0),
+          })),
+          sourceUrl: sanitizeUrl(medal.sourceUrl),
+          sourceName: sanitizeString(medal.sourceName),
+          retrievalTimestamp: typeof medal.retrievalTimestamp === "number" ? medal.retrievalTimestamp : undefined,
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
+      case "data_card": {
+        const dc = comp.data as DataCardComponentData | undefined;
+        const dcTitle = sanitizeString(dc?.title || comp.title);
+        if (!dcTitle) {
+          errors.push(`Component '${compId}' (data_card) missing title.`);
+          break;
+        }
+        sanitizedComp.data = {
+          title: dcTitle,
+          subtitle: sanitizeString(dc?.subtitle || comp.subtitle),
+          badge: sanitizeString(dc?.badge),
+          badgeType: ["info", "success", "warning", "accent"].includes(dc?.badgeType || "")
+            ? dc?.badgeType
+            : "info",
+          metrics: Array.isArray(dc?.metrics)
+            ? dc.metrics.slice(0, 12).map((m) => ({
+                label: sanitizeString(m.label) || "Metric",
+                value: typeof m.value === "number" || typeof m.value === "string" ? m.value : String(m.value ?? ""),
+                unit: sanitizeString(m.unit),
+                change: sanitizeString(m.change),
+                trend: ["up", "down", "neutral"].includes(m.trend || "") ? m.trend : undefined,
+              }))
+            : undefined,
+          rows: Array.isArray(dc?.rows)
+            ? dc.rows.slice(0, 30).map((r) => ({
+                key: sanitizeString(r.key) || "",
+                value: sanitizeString(r.value) || "",
+                subtext: sanitizeString(r.subtext),
+              }))
+            : undefined,
+          sections: Array.isArray(dc?.sections)
+            ? dc.sections.slice(0, 10).map((s) => ({
+                heading: sanitizeString(s.heading) || "",
+                content: sanitizeString(s.content) || "",
+              }))
+            : undefined,
+          sourceUrl: sanitizeUrl(dc?.sourceUrl),
+          sourceName: sanitizeString(dc?.sourceName),
+          retrievalTimestamp: typeof dc?.retrievalTimestamp === "number" ? dc?.retrievalTimestamp : undefined,
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
       default:
         // Graceful fallback for unknown component types
         sanitizedComp.type = "card";
@@ -1547,6 +2016,83 @@ export function structuredResponseToFallbackText(resp: StructuredResponseData): 
         }
         if (data.sourceUrl) {
           parts.push(`[${data.actionLabel || "View product"}](${data.sourceUrl})`);
+        }
+        break;
+      }
+
+      case "match_scorecard": {
+        const data = comp.data as MatchScorecardComponentData;
+        parts.push(`**${data.competition}** — ${data.fixtureTitle} (${data.status.toUpperCase()})`);
+        if (data.statusDetail) parts.push(`*${data.statusDetail}*`);
+        if (data.teams && data.teams.length >= 2) {
+          parts.push(`${data.teams[0].name}: ${data.teams[0].score} vs ${data.teams[1].name}: ${data.teams[1].score}`);
+        }
+        if (data.sourceUrl) {
+          parts.push(`Source: [${data.sourceName || "Official Scorecard"}](${data.sourceUrl})`);
+        }
+        break;
+      }
+
+      case "player_stats": {
+        const data = comp.data as PlayerStatsComponentData;
+        parts.push(`**${data.playerName}** (${data.teamName}) — ${data.headlineStat}`);
+        if (data.headlineLabel) parts.push(`*${data.headlineLabel}*`);
+        if (data.stats && data.stats.length) {
+          parts.push(data.stats.map((s) => `- ${s.label}: ${s.value}`).join("\n"));
+        }
+        if (data.sourceUrl) {
+          parts.push(`Source: [${data.sourceName || "Match Report"}](${data.sourceUrl})`);
+        }
+        break;
+      }
+
+      case "standings_table": {
+        const data = comp.data as StandingsTableComponentData;
+        parts.push(`**${data.competition} Standings**`);
+        if (data.rows && data.rows.length) {
+          const header = "| Pos | Team | P | W | D | L | GD/NRR | PTS |";
+          const divider = "|---|---|---|---|---|---|---|---|";
+          const rows = data.rows.map(
+            (r) => `| ${r.rank} | ${r.teamName} | ${r.played} | ${r.won} | ${r.drawn ?? "-"} | ${r.lost} | ${r.diff ?? "-"} | ${r.points} |`
+          );
+          parts.push([header, divider, ...rows].join("\n"));
+        }
+        if (data.sourceUrl) {
+          parts.push(`Source: [${data.sourceName || "Official Table"}](${data.sourceUrl})`);
+        }
+        break;
+      }
+
+      case "medal_tally": {
+        const data = comp.data as MedalTallyComponentData;
+        parts.push(`**${data.competition} Medal Tally**`);
+        if (data.freshness) parts.push(`*${data.freshness}*`);
+        if (data.rows && data.rows.length) {
+          const header = "| Rank | Nation | Gold | Silver | Bronze | Total |";
+          const divider = "|---|---|---|---|---|---|";
+          const rows = data.rows.map(
+            (r) => `| ${r.rank} | ${r.nation} | ${r.gold} | ${r.silver} | ${r.bronze} | ${r.total} |`
+          );
+          parts.push([header, divider, ...rows].join("\n"));
+        }
+        if (data.sourceUrl) {
+          parts.push(`Source: [${data.sourceName || "Medal Standings"}](${data.sourceUrl})`);
+        }
+        break;
+      }
+
+      case "data_card": {
+        const data = comp.data as DataCardComponentData;
+        parts.push(`**${data.title}**`);
+        if (data.subtitle) parts.push(`*${data.subtitle}*`);
+        if (data.metrics && data.metrics.length) {
+          parts.push(data.metrics.map((m) => `- ${m.label}: ${m.value}${m.unit ? ` ${m.unit}` : ""}`).join("\n"));
+        }
+        if (data.rows && data.rows.length) {
+          parts.push(data.rows.map((r) => `- **${r.key}**: ${r.value}`).join("\n"));
+        }
+        if (data.sourceUrl) {
+          parts.push(`Source: [${data.sourceName || "Data Source"}](${data.sourceUrl})`);
         }
         break;
       }
