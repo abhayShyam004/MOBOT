@@ -3,6 +3,47 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
+import {
+  type ProactiveTriggerEvent,
+  type ProactiveSuggestion,
+  type SurfaceSuggestionOptions,
+  type SuggestionEvaluationResult,
+  RELEVANCE_THRESHOLD,
+  FOUR_HOURS_MS,
+  FORTY_EIGHT_HOURS_MS,
+  ERR_SUGGESTION_SPAM_DETECTED,
+  SuggestionSpamError,
+  validateProactiveSuggestion,
+  computeDeduplicationKey,
+  ProactiveIntelligenceManager,
+  sharedProactiveManager,
+  detectCalendarConflict,
+  detectApproachingDeadline,
+  detectStaleDependency,
+  detectWeatherAlert,
+  publishSuggestionToAttention,
+} from "./proactive-intelligence.ts";
+
+export {
+  type ProactiveTriggerEvent,
+  type ProactiveSuggestion,
+  type SurfaceSuggestionOptions,
+  type SuggestionEvaluationResult,
+  RELEVANCE_THRESHOLD,
+  FOUR_HOURS_MS,
+  FORTY_EIGHT_HOURS_MS,
+  ERR_SUGGESTION_SPAM_DETECTED,
+  SuggestionSpamError,
+  validateProactiveSuggestion,
+  computeDeduplicationKey,
+  ProactiveIntelligenceManager,
+  sharedProactiveManager,
+  detectCalendarConflict,
+  detectApproachingDeadline,
+  detectStaleDependency,
+  detectWeatherAlert,
+  publishSuggestionToAttention,
+};
 
 export type WatchStatus = "active" | "paused" | "triggered" | "expired";
 export type WatchSource = "web" | "browser" | "github" | "file" | "server" | "device";
@@ -71,10 +112,23 @@ export class WatchManager {
   private readonly file: string;
   private watches: Watch[] = [];
   private checkHandler?: (watch: Watch) => Promise<{ state: string; triggered: boolean; note?: string }>;
+  private proactiveManager: ProactiveIntelligenceManager;
 
-  constructor(file = join(DATA_DIR, "watches.json")) {
+  constructor(file = join(DATA_DIR, "watches.json"), proactiveManager?: ProactiveIntelligenceManager) {
     this.file = file;
+    this.proactiveManager = proactiveManager ?? sharedProactiveManager;
     this.load();
+  }
+
+  getProactiveManager(): ProactiveIntelligenceManager {
+    return this.proactiveManager;
+  }
+
+  evaluateProactiveSuggestion(
+    suggestion: ProactiveSuggestion,
+    options?: SurfaceSuggestionOptions
+  ): SuggestionEvaluationResult {
+    return this.proactiveManager.evaluateSuggestion(suggestion, options);
   }
 
   setCheckHandler(handler: (watch: Watch) => Promise<{ state: string; triggered: boolean; note?: string }>): void {

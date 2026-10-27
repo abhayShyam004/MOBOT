@@ -21,6 +21,8 @@ data class UpdaterReleaseManifest(
     val releaseNotes: String = "",
     val publishedAt: String = "",
     val channel: String = "stable",
+    val versionCode: Long? = null,
+    val packageName: String? = null,
 )
 
 @Serializable
@@ -38,7 +40,10 @@ data class StateValidation(
 data class UpdaterStatusResponse(
     val status: String,
     val currentVersion: String,
+    val currentVersionCode: Long? = null,
     val targetVersion: String? = null,
+    val targetVersionCode: Long? = null,
+    val targetPackageName: String? = null,
     val release: UpdaterReleaseManifest? = null,
     val downloadProgress: UpdaterDownloadProgress? = null,
     val lastCheckedAt: String? = null,

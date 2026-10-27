@@ -16,6 +16,7 @@ import { createChatToolApproval } from "./chat-tool-approval.ts";
 import { ChatProtocolError, ChatReasoningDetails, ChatToolCalls, MAX_CHAT_TOOL_CALLS, object, type ChatToolCall } from "./openai-chat-protocol.ts";
 import { appendNative } from "./native.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
+import { isMassDeletionCommand } from "../capabilities/safety-policy.ts";
 
 export interface OpenAIChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -534,7 +535,10 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
                 // so it is honoured here: without it every single tool call on
                 // an OpenAI-compatible engine stops for a card, and a Chief's
                 // delegated Full access cannot help either.
-                const allowed = turn.approvalMode === "full"
+                const cmdStr = String((args as any)?.command || (args as any)?.cmd || "");
+                const isMassDel = (Boolean(cmdStr) && isMassDeletionCommand(cmdStr)) || isMassDeletionCommand(inputPreview ?? "")
+                  || ((args as any)?.recursive === true && ((args as any)?.path === "/" || (args as any)?.target === "/"));
+                const allowed = (turn.approvalMode === "full" && !isMassDel)
                   || await approval.ask(call.function.name, inputPreview ?? "This tool has no arguments.");
                 abort.signal.throwIfAborted();
                 startItem();

@@ -565,6 +565,35 @@ class ClientTest {
         assertEquals("k2", keyBody.getValue("key").jsonPrimitive.content)
     }
 
+    @Test
+    fun attachmentImageFetchesValidPathsAndRejectsMalformed() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(200).setBody("image-bytes-1"))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("image-bytes-2"))
+        server.enqueue(MockResponse().setResponseCode(200).setBody("image-bytes-3"))
+
+        val b1 = client.attachmentImage("/api/attachments/screen-123.png")
+        assertEquals("image-bytes-1", b1.toString(Charsets.UTF_8))
+
+        val b2 = client.attachmentImage("/api/attachments/photo-456.jpg")
+        assertEquals("image-bytes-2", b2.toString(Charsets.UTF_8))
+
+        val b3 = client.attachmentImage("/api/attachments/image-test.webp")
+        assertEquals("image-bytes-3", b3.toString(Charsets.UTF_8))
+
+        assertFailsWith<APIError.BadUrl> {
+            client.attachmentImage("/api/attachments/../secret.png")
+        }
+        assertFailsWith<APIError.BadUrl> {
+            client.attachmentImage("/api/attachments/nested/file.png")
+        }
+        assertFailsWith<APIError.BadUrl> {
+            client.attachmentImage("/api/other/screen.png")
+        }
+        assertFailsWith<APIError.BadUrl> {
+            client.attachmentImage("/api/attachments/screen.exe")
+        }
+    }
+
     private fun json(body: String, code: Int = 200) = MockResponse()
         .setResponseCode(code)
         .setHeader("Content-Type", "application/json")

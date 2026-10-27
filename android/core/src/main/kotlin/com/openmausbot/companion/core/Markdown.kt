@@ -74,12 +74,21 @@ object Markdown {
                 }
             }
 
+            // Strict Separation of Visual Telemetry (Official Phase 16):
+            // Never render raw base64 data URIs or raw base64 encoded image dumps as ordinary Markdown text.
+            if (trimmed.startsWith("data:image/") || (trimmed.startsWith("iVBORw0KGgo") && trimmed.length > 80)) {
+                flushParagraph()
+                continue
+            }
+
             val imgMatch = IMAGE_BLOCK_REGEX.matchEntire(trimmed)
             if (imgMatch != null) {
                 flushParagraph()
                 val alt = imgMatch.groupValues[1].ifBlank { null }
                 val url = imgMatch.groupValues[2].trim()
-                blocks += MarkdownBlock.Image(url, alt)
+                if (!url.startsWith("data:image/") && !url.contains(";base64,")) {
+                    blocks += MarkdownBlock.Image(url, alt)
+                }
                 continue
             }
 
@@ -88,7 +97,9 @@ object Markdown {
                 flushParagraph()
                 val url = tagMatch.groupValues[1].trim()
                 val alt = tagMatch.groupValues.getOrNull(2)?.ifBlank { null }
-                blocks += MarkdownBlock.Image(url, alt)
+                if (!url.startsWith("data:image/") && !url.contains(";base64,")) {
+                    blocks += MarkdownBlock.Image(url, alt)
+                }
                 continue
             }
 
@@ -101,7 +112,9 @@ object Markdown {
                 }
                 val alt = inlineMatch.groupValues[1].ifBlank { null }
                 val url = inlineMatch.groupValues[2].trim()
-                blocks += MarkdownBlock.Image(url, alt)
+                if (!url.startsWith("data:image/") && !url.contains(";base64,")) {
+                    blocks += MarkdownBlock.Image(url, alt)
+                }
                 val after = line.substring(inlineMatch.range.last + 1).trim()
                 if (after.isNotEmpty()) {
                     paragraph += after

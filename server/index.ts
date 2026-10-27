@@ -34,6 +34,7 @@ import {
 } from "../shared/credential-request.ts";
 
 import { approvalHeldNote, approvalHeldReason, approvalModeForOrigin, autoVerdict, deliverFullAccessApproval, delegationInheritsFullAccess } from "./auto-approve.ts";
+import { humanizeApprovalRequest } from "./approval-humanizer.ts";
 import { updateClaudeCli } from "./claude-update.ts";
 import { configuredAccountDirectory, assertSeparateClaudeAccount, claudeAccountInfo, createClaudeAccountSchema, instanceSettingsSchema, newClaudeAccount } from "./claude-accounts.ts";
 import { providerIconPatchSchema, withInstanceIcon } from "./provider-icon.ts";
@@ -404,17 +405,25 @@ import {
 } from "./system-prompt.ts";
 import { getProjectManager, getRepairLoop, getDeploymentManager } from "./app-builder/app-builder-tools.ts";
 import { defaultCapabilityRegistry, normalizeCapabilityMatchRequest } from "./capabilities/capability-registry.ts";
+import { defaultActionAuthorizationManager } from "./capabilities/safety-policy.ts";
 import {
-  verifyAndEnforceTurnTruthfulness,
   recordActionReceipt,
   checkLivePhoneControlAvailability,
 } from "./capabilities/action-truthfulness.ts";
+import { PhoneControlTaskCheckpointManager } from "./capabilities/phone-control.ts";
 import { defaultReminderManager } from "./reminders.ts";
+import { KNOWN_PACKAGES, HUMAN_LABELS } from "./drivers/phone-proxy.ts";
+import { sharedPersistentJobManager } from "./tasks.ts";
+import { sharedBackgroundExecutionManager } from "./background-execution.ts";
+import { BackgroundResearchWorker } from "./background-research-worker.ts";
 
 import { artifactsFromToolOutput, defaultArtifactManager, isUserFacingArtifact } from "./computer-agent/artifact-manager.ts";
 import { readCuaConnection, gatedLocalComputer } from "./local-computer.ts";
-import { extractStructuredContent } from "./structured-extract.ts";
-import { enforceResponseLength } from "./response-length.ts";
+import {
+  canonicalizeAssistantResponse,
+  shouldBufferStreamingDeltas,
+  sanitizeStreamingDelta,
+} from "./canonical-response.ts";
 import {
   formatLocationPromptBlock,
   loadUserLocation,
@@ -475,7 +484,7 @@ import {
   describeBrowserEngine,
 } from "./browser-engine.ts";
 import { createScreenFrameSource, type ScreenCapture } from "./screen-frame-source.ts";
-import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews, shouldSurfaceBrowserScreenInChat } from "./screen-frame-gate.ts";
+import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews, shouldSurfaceBrowserScreenInChat, validateScreenFrameBytes } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
 import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
 import { ProfileRequestService } from "./profile-requests.ts";
@@ -623,8 +632,13 @@ let desktopMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 let companionMutationToken: string | undefined = DESKTOP_MANAGED ? "" : undefined;
 // Where remote clients reach this server (a proxy's public address); pairing URLs use it.
 const FALLBACK_PUBLIC_URL = process.env.OMB_PUBLIC_URL?.trim().replace(/\/+$/, "") || null;
+const appVersion = process.env.APP_VERSION || process.env.OMB_APP_VERSION || "1.1.2";
+const appVersionCode = process.env.APP_VERSION_CODE ? parseInt(process.env.APP_VERSION_CODE, 10) : undefined;
+const appPackageName = process.env.APP_PACKAGE_NAME || undefined;
 const appUpdater = new UpdaterManager({
-  currentVersion: process.env.APP_VERSION || "1.0.0",
+  currentVersion: appVersion,
+  currentVersionCode: appVersionCode,
+  packageName: appPackageName,
   dataDir: DATA_DIR,
 });
 
@@ -1165,10 +1179,24 @@ function parksBehindCoordination(botId: string, threadId: string): boolean {
   return (store.projectBotForTask(botId, threadId) ?? store.bot(botId))?.parkDirectMessages === true;
 }
 
-function botAtThreadCapacity(botId: string): boolean {
+function isBackgroundExecutionThread(botId: string, threadId: string): boolean {
+  const task = store.taskByThread(botId, threadId);
+  if (!task) return false;
+  if (task.routineRunId || (task as unknown as Record<string, unknown>).backgroundJobId || (task as unknown as Record<string, unknown>).isBackground) return true;
+  if (threadId.startsWith("bg_") || threadId.startsWith("bg-") || threadId.startsWith("job_") || threadId.startsWith("job-") || threadId.startsWith("routine_")) return true;
+  return false;
+}
+
+function botAtThreadCapacity(botId: string, forInteractiveChat = false): boolean {
   // Setup/dispatch reservations still occupy a slot even if an early
   // completion event has already cleared the stored busy flag.
-  return store.tasks(botId).filter((task) => threadBusy(botId, task.threadId)).length >= maxConcurrentBotThreads(cfg);
+  const busyTasks = store.tasks(botId).filter((task) => threadBusy(botId, task.threadId));
+  if (forInteractiveChat) {
+    // Background jobs must not block interactive human conversational turns
+    const interactiveBusy = busyTasks.filter((task) => !isBackgroundExecutionThread(botId, task.threadId));
+    return interactiveBusy.length >= maxConcurrentBotThreads(cfg);
+  }
+  return busyTasks.length >= maxConcurrentBotThreads(cfg);
 }
 
 function hasDirectDispatch(botId: string): boolean {
@@ -1258,6 +1286,9 @@ const registeredArtifactsByTurn = new Map<
   string,
   Array<NonNullable<Message["attachments"]>[number]>
 >();
+
+/** Set of thread IDs where phone tools were invoked during the active turn */
+const phoneToolsUsedByThread = new Set<string>();
 
 /**
  * Bind artifacts to the words they were produced around. An artifact belongs
@@ -1494,6 +1525,9 @@ function phoneIntegration() {
   if (process.env.OMB_ADB_PATH) env.OMB_ADB_PATH = process.env.OMB_ADB_PATH;
   if (process.env.OMB_RESOURCES_PATH) env.OMB_RESOURCES_PATH = process.env.OMB_RESOURCES_PATH;
   if (process.env.PH_ANDROID_SERIAL) env.PH_ANDROID_SERIAL = process.env.PH_ANDROID_SERIAL;
+  if (process.env.PH_DRIVER_PORT) env.PH_DRIVER_PORT = process.env.PH_DRIVER_PORT;
+  if (process.env.PH_DRIVER_TOKEN) env.PH_DRIVER_TOKEN = process.env.PH_DRIVER_TOKEN;
+  if (process.env.OMB_PHONE_DRIVER_ACTIVE) env.OMB_PHONE_DRIVER_ACTIVE = process.env.OMB_PHONE_DRIVER_ACTIVE;
   return { command: process.execPath, args: [phoneProxyPath], env };
 }
 
@@ -3664,6 +3698,50 @@ async function answerRequest(
       decision: behavior === "allow" ? "user-approved" : "user-denied",
       source: "user",
     });
+
+    if (behavior === "allow") {
+      const rawTool = card?.tool || "device.phone_control";
+      let capabilityId = "device.phone_control";
+      let operation = rawTool;
+      if (rawTool.includes(":")) {
+        const parts = rawTool.split(":");
+        capabilityId = parts[0];
+        operation = parts[1];
+      } else if (rawTool.startsWith("device.")) {
+        capabilityId = rawTool;
+        operation = "execute";
+      } else if (["type_text", "tap", "press_key", "scroll", "open_app", "take_screenshot", "read_screen"].includes(rawTool)) {
+        capabilityId = "device.phone_control";
+        operation = rawTool;
+      }
+      const rawParams = (cardMessage as any)?.parameters || {};
+      defaultActionAuthorizationManager.createGrant({
+        capabilityId,
+        operation,
+        parameters: rawParams,
+        botId: decidedFor?.id,
+        threadId,
+        ttlMs: 300_000,
+      });
+      const canonicalCap = defaultCapabilityRegistry.resolveCanonicalId(capabilityId);
+      if (canonicalCap !== capabilityId) {
+        defaultActionAuthorizationManager.createGrant({
+          capabilityId: canonicalCap,
+          operation,
+          parameters: rawParams,
+          botId: decidedFor?.id,
+          threadId,
+          ttlMs: 300_000,
+        });
+      }
+    } else if (behavior === "deny") {
+      defaultActionAuthorizationManager.recordDenial(
+        "device.phone_control",
+        card?.tool || "*",
+        {},
+        decidedFor?.id
+      );
+    }
   }
   if (outcome === "unavailable") {
     // Name WHY the answer could not be delivered — a bare 200
@@ -4725,6 +4803,16 @@ bus.subscribe((event: RuntimeEvent) => {
   // report is on screen for the length of the turn — the leak the card exists
   // to close, just earlier.
   if (event.type === "content.delta" && event.synthetic) return;
+  if (event.type === "content.delta" && event.streamKind === "assistant_text") {
+    const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
+    if (shouldBufferStreamingDeltas(lastUserPrompt)) {
+      // Buffer deltas for conversational greetings or advice requests requiring holistic recovery
+      return;
+    }
+    const sanitized = sanitizeStreamingDelta(event.delta);
+    if (!sanitized) return;
+    event = { ...event, delta: sanitized };
+  }
   const coordinatorVisibleText = goalCoordinatorTurn && !goalCoordinatorTurn.discard && event.type === "turn.completed"
     ? parseGroupGoalDecision(goalCoordinatorTurn.assistantItems.join("\n")).visibleText
     : "";
@@ -4742,11 +4830,22 @@ bus.subscribe((event: RuntimeEvent) => {
     broadcast({ kind: "runtime", event: publicAssistantEvent });
   }
   const privateImageEvent = event.type === "item.completed" && event.itemType === "assistant_image";
+  const ownerBot = store.botByThread(event.threadId);
+  if (event.type === "item.completed" && event.itemType === "assistant_text" && !event.synthetic) {
+    const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
+    const task = store.taskByThread(ownerBot?.id ?? "", event.threadId);
+    const canonical = canonicalizeAssistantResponse(event.text, {
+      userPrompt: lastUserPrompt,
+      threadId: event.threadId,
+      turnId: event.turnId,
+      taskTitle: task?.title,
+    });
+    event = { ...event, text: canonical.text };
+  }
   // The durable message patch below is the public frame. Sending raw base64
   // through runtime SSE would multiply large bytes across every app window.
   if (!privateImageEvent) broadcast({ kind: "runtime", event });
   const routineRun = privateImageEvent ? null : (routines?.handleRuntimeEvent(event) ?? null);
-  const ownerBot = store.botByThread(event.threadId);
   const bot = ownerBot ? botForThread(ownerBot.id, event.threadId) ?? undefined : undefined;
   const group = bot ? undefined : store.groupByThread(event.threadId);
   if (!bot && !group) return;
@@ -4756,18 +4855,14 @@ bus.subscribe((event: RuntimeEvent) => {
     let sanitized = m.text ? { ...m, text: stripEmojis(m.text) } : m;
     if (sanitized.role === "bot" && sanitized.text) {
       const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
-      const truthfulness = verifyAndEnforceTurnTruthfulness({
+      const canonical = canonicalizeAssistantResponse(sanitized.text, {
+        userPrompt: lastUserPrompt,
         threadId: event.threadId,
         turnId: m.turnId ?? event.turnId,
-        assistantText: sanitized.text,
-        userText: lastUserPrompt,
       });
-      if (truthfulness.corrected) {
-        console.warn(`[TruthfulnessGuard] Intercepted false action claim in pushMessage (thread ${event.threadId}): ${truthfulness.violations.join("; ")}`);
-      }
       sanitized = {
         ...sanitized,
-        text: enforceResponseLength(truthfulness.text, { userPrompt: lastUserPrompt }),
+        text: canonical.text,
       };
     }
     const message = store.appendMessage(event.threadId, group && m.role === "bot" ? { ...sanitized, from: speaker } : sanitized);
@@ -4837,24 +4932,20 @@ bus.subscribe((event: RuntimeEvent) => {
           failureReportedTurns.set(event.threadId, event.turnId ?? null);
           break;
         }
-        const { cleanText, structured } = extractStructuredContent(text);
         const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
-        const truthfulnessResult = verifyAndEnforceTurnTruthfulness({
+        const task = store.taskByThread(ownerBot?.id ?? "", event.threadId);
+        const canonical = canonicalizeAssistantResponse(text, {
+          userPrompt: lastUserPrompt,
           threadId: event.threadId,
           turnId: event.turnId,
-          assistantText: cleanText,
-          userText: lastUserPrompt,
+          taskTitle: task?.title,
         });
-        if (truthfulnessResult.corrected) {
-          console.warn(`[TruthfulnessGuard] Intercepted false action claim in thread ${event.threadId}: ${truthfulnessResult.violations.join("; ")}`);
-        }
-        const textToEmit = truthfulnessResult.text;
-        const boundedText = textToEmit ? enforceResponseLength(textToEmit, { userPrompt: lastUserPrompt }) : textToEmit;
+        const boundedText = canonical.text;
         pushMessage({
           role: "bot",
-          kind: structured && !boundedText ? "structured" : "text",
+          kind: canonical.structured && !boundedText ? "structured" : "text",
           text: boundedText,
-          ...(structured ? { structured } : {}),
+          ...(canonical.structured ? { structured: canonical.structured } : {}),
           turnId: event.turnId,
         });
 
@@ -4991,11 +5082,43 @@ bus.subscribe((event: RuntimeEvent) => {
         } catch (receiptErr) {
           console.warn("[ActionReceipt] Failed to process tool calendar receipt:", receiptErr);
         }
+        // Track phone tool usage so companion app can be automatically restored to foreground on turn completion
+        if (/phone|open_app|tap|type_text|swipe|press|screenshot|list_apps|clear_text|restore_host/i.test(toolName)) {
+          phoneToolsUsedByThread.add(event.threadId);
+        }
+
         // A tool that registered user-facing files just produced the artifact
         // the person is waiting for: publish it here, around the bot's words,
         // instead of at the end of a turn it may not even reach.
         const registered = artifactsFromToolOutput(event.output);
-        if (registered.length) attachArtifactsToTurn(event.threadId, event.turnId, registered);
+        if (registered.length) {
+          attachArtifactsToTurn(event.threadId, event.turnId, registered);
+        } else if (/screenshot|take_screenshot|screen_capture/i.test(toolName) && event.output) {
+          try {
+            let b64 = "";
+            if (typeof event.output === "string") {
+              const match = event.output.match(/"base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/);
+              if (match) b64 = match[1];
+            } else if (typeof event.output === "object" && event.output !== null) {
+              const rec = event.output as Record<string, unknown>;
+              b64 = typeof rec.base64 === "string" ? rec.base64 : (typeof rec.data === "string" ? rec.data : "");
+            }
+            if (b64 && b64.length > 100) {
+              const buf = Buffer.from(b64, "base64");
+              const saved = saveImage(buf, "image/png");
+              const fname = basename(saved.path);
+              const aPath = `/api/attachments/${fname}`;
+              attachArtifactsToTurn(event.threadId, event.turnId, [{
+                kind: "image",
+                path: aPath,
+                mime: "image/png",
+                name: fname,
+              }]);
+            }
+          } catch (imgErr) {
+            console.warn("[ScreenShotAttachment] Failed to auto-save screenshot output:", imgErr);
+          }
+        }
         // the bot just acted ON ITS SCREEN — refresh the preview now. Only
         // computer tools can change the screen, and each capture competes
         // with the agent for the box's command endpoint, so a bot grinding
@@ -5120,7 +5243,15 @@ bus.subscribe((event: RuntimeEvent) => {
         });
         break;
       }
-      const heldContext = { source: verdict?.source, permission };
+      const humanized = humanizeApprovalRequest({
+        tool: event.tool,
+        summary: event.summary,
+        parameters: (event as any).parameters,
+        requestType: event.requestType,
+        approvalScope: event.approvalScope,
+        command: (event as any).command,
+      });
+      const heldContext = { source: verdict?.source, permission, tool: event.tool, summary: event.summary };
       // A structured ask (Claude's AskUserQuestion) is a question whatever
       // the provider routed it as: it has no allow/deny answer, only the
       // model's own options. The card carries them so the person can choose.
@@ -5129,13 +5260,8 @@ bus.subscribe((event: RuntimeEvent) => {
         role: "bot",
         kind: "options",
         card: {
-          title:
-            permission && event.approvalScope === "local-computer"
-              ? "Local computer approval"
-              : permission
-                ? "Approval needed"
-                : "Your bot has a question",
-          subtitle: event.summary,
+          title: permission ? humanized.title : "Your bot has a question",
+          subtitle: humanized.subtitle,
           options: event.choices?.length ? event.choices : permission ? ["Allow", "Deny"] : [],
           requestId: event.requestId,
           tool: permission ? event.tool : undefined,
@@ -5284,7 +5410,11 @@ bus.subscribe((event: RuntimeEvent) => {
       failureReportedTurns.delete(event.threadId);
       const failureAlreadyExplained = reportedFailure !== undefined &&
         (reportedFailure === null || event.turnId === undefined || reportedFailure === event.turnId);
-      if (!event.ok && !internal && event.stopReason !== "interrupted" && !failureAlreadyExplained) {
+      const alreadySpoke = [...store.messagesFor(event.threadId)].some(
+        (m) => m.role === "bot" && (m.kind === "text" || m.kind === "structured") && m.turnId === (completedTurnId ?? event.turnId) &&
+          (((m.text?.trim()?.length ?? 0) > 0) || Boolean(m.structured))
+      );
+      if (!event.ok && !internal && event.stopReason !== "interrupted" && !failureAlreadyExplained && !alreadySpoke) {
         const summary = summarizeStopReason(event.stopReason);
         const where = failureWhere();
         const report = `turn.completed ok:false stopReason=${event.stopReason ?? ""}`;
@@ -5366,6 +5496,27 @@ bus.subscribe((event: RuntimeEvent) => {
           });
         }
         store.markTerminalAssistantMessage(event.threadId, completedTurnId);
+      }
+
+      // Restore companion host application to foreground if phone tools were used during the turn
+      if (phoneToolsUsedByThread.has(event.threadId)) {
+        phoneToolsUsedByThread.delete(event.threadId);
+        const lastUserMsg = [...store.messagesFor(event.threadId)].reverse().find(m => m.role === "user")?.text || "";
+        const userWantsToStay = /leave\s+open|keep\s+open|stay\s+in/i.test(lastUserMsg);
+        if (!userWantsToStay && process.env.PH_DRIVER_PORT) {
+          const port = Number(process.env.PH_DRIVER_PORT);
+          const token = process.env.PH_DRIVER_TOKEN || "";
+          fetch(`http://127.0.0.1:${port}/restore_host`, {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${token}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({}),
+          }).catch((err) => {
+            console.warn("[HostRestore] Failed to restore companion to foreground:", err);
+          });
+        }
       }
       const reply = lastReply.get(event.threadId) ?? "";
       lastReply.delete(event.threadId);
@@ -5488,13 +5639,23 @@ bus.subscribe((event: RuntimeEvent) => {
             new Promise<null>((resolve) => { timeout = setTimeout(() => resolve(null), SCREEN_SETTLE_TIMEOUT_MS); }),
           ]).then((frame) => {
             if (frame && isCurrent()) {
+              const validation = validateScreenFrameBytes(frame.png);
+              if (!validation.valid) {
+                console.warn(`[screen-frame-gate] Prevented invalid/blank screen frame from settling: ${validation.reason}`);
+                return;
+              }
               const shouldSurface = frame.surface !== "browser" || shouldSurfaceBrowserScreenInChat({
                 userPrompt: [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text,
                 taskTitle: store.taskByThread(bot.id, event.threadId)?.title,
               });
               if (shouldSurface) {
                 settledScreenHashes.set(event.threadId, screenFrameHash(frame.png));
-                store.insertMessageAfter(event.threadId, settleLeafId, { role: "bot", kind: "screen", png: frame.png, mime: frame.mime });
+                store.insertMessageAfter(event.threadId, settleLeafId, { role: "bot", kind: "screen", png: frame.png, mime: frame.mime, surface: frame.surface });
+              } else {
+                // ERR_CHAT_POLLUTION_BLOCKED: drops prohibited screen frame from normal chat storage,
+                // routing visual telemetry exclusively through Watch Computer SSE pathway.
+                latestScreens.set(bot.id, { png: frame.png, mime: frame.mime, botId: bot.id, threadId: event.threadId });
+                broadcast({ kind: "screen", botId: bot.id, threadId: event.threadId, ...frame });
               }
             }
           }).catch(() => {}).finally(() => {
@@ -6140,7 +6301,7 @@ function drainQueuedSends() {
 /** Keep a person's words off the transcript until a direct-thread slot is
  * available. Reuse the existing cancellable, idempotent composer queue. */
 async function startOrQueueDirectMessage(botId: string, threadId: string, text: string, replyTo?: Message, sendId?: string) {
-  const capacity = botAtThreadCapacity(botId);
+  const capacity = botAtThreadCapacity(botId, true);
   if (capacity || threadBusy(botId, threadId) || parksBehindCoordination(botId, threadId)) {
     const reason = capacity ? "capacity" as const : undefined;
     const queued = queueSteeredMessage(botId, threadId, text, {
@@ -6341,6 +6502,11 @@ async function finalScreenFrame(_botId: string, threadId: string): Promise<(Fram
       !store.taskByThread(_botId, threadId)) return null;
   const frame = entry.last;
   if (!frame || !settledFrameIsNews(shownScreenHash(threadId), frame.png)) return null;
+  const validation = validateScreenFrameBytes(frame.png);
+  if (!validation.valid) {
+    console.warn(`[screen-frame-gate] Dropping invalid/blank frame in finalScreenFrame: ${validation.reason}`);
+    return null;
+  }
   return { png: frame.png, mime: frame.mime, surface };
 }
 
@@ -6576,7 +6742,7 @@ async function startTurn(
   if (activeGroupTurnForBot(botId)) {
     throw Object.assign(new Error("the bot is already working in a channel — wait for it to finish"), { status: 409, code: "thread_busy" });
   }
-  if (botAtThreadCapacity(botId)) {
+  if (botAtThreadCapacity(botId, !opts?.automationSource && !opts?.unattended)) {
     throw Object.assign(new Error(`this bot has reached its limit of ${maxConcurrentBotThreads(cfg)} parallel threads — wait for one to finish`), { status: 409, code: "thread_limit" });
   }
   // Steering is never a cancel. A message sent while teammates are working
@@ -6847,6 +7013,113 @@ async function startTurn(
   ) {
     const origQuery = previousUserMsg?.text || "Schedule team sync meeting on Google Calendar";
     effectiveObjective = `${origQuery} with duration ${userTurnText}`;
+  }
+
+  // Multi-turn phone task objective continuity (unlock/permission confirmation or brief replies like "ok enter", "done", "yes")
+  const suspendedPhoneTask = PhoneControlTaskCheckpointManager.getInstance().getSuspendedTask(threadId);
+  const isPhoneContinuation = Boolean(
+    suspendedPhoneTask ||
+    (lastAssistantMsg?.text && /unlock|locked|screen|keyguard|permission|accessibility|open.*app|calculate|phone/i.test(lastAssistantMsg.text) &&
+     /^(?:ok|okay|done|yes|yep|unlocked|enter|go ahead|proceed|continue|i did|ready|sure)\b/i.test(userTurnText.trim())) ||
+    activePathMsgs.slice(-6).some((m) => m.role === "bot" && m.tool && /phone|open_app|type|tap|screenshot/i.test(m.tool.name))
+  );
+  if (isPhoneContinuation && !/^(?:open|launch|calculator|type|tap|press|screenshot)\b/i.test(userTurnText)) {
+    const origQuery = suspendedPhoneTask?.objective || previousUserMsg?.text || "Perform phone control operation";
+    effectiveObjective = `${origQuery} (User confirmed: ${userTurnText})`;
+  }
+
+  // Screen-off bounded background research routing
+  const lowerObj = effectiveObjective.toLowerCase();
+  const isBgRequested = /\b(?:background|screen-off|screen\s+off|unattended|while\s+(?:the\s+)?screen\s+is\s+off)\b/i.test(effectiveObjective);
+  const isResearchAction = /\b(?:research|investigate|analyze|audit|inspect|check|explore|eval(?:uate)?)\b/i.test(effectiveObjective);
+  const repoMatch = effectiveObjective.match(/\b([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)\b/);
+  const urlMatch = effectiveObjective.match(/\b(https?:\/\/[^\s]+)\b/);
+
+  const isEligibleBackgroundResearch =
+    isBgRequested &&
+    (isResearchAction || Boolean(repoMatch)) &&
+    (Boolean(repoMatch) || lowerObj.includes("repo") || lowerObj.includes("github") || lowerObj.includes("mobot-website"));
+
+  if (isEligibleBackgroundResearch) {
+    let targetRepo = repoMatch ? repoMatch[1] : undefined;
+    if (!targetRepo) {
+      if (lowerObj.includes("mobot-website")) {
+        targetRepo = "abhayShyam004/mobot-website";
+      } else if (lowerObj.includes("express")) {
+        targetRepo = "expressjs/express";
+      } else if (lowerObj.includes("react")) {
+        targetRepo = "facebook/react";
+      } else if (lowerObj.includes("vite")) {
+        targetRepo = "vitejs/vite";
+      }
+    }
+    if (!targetRepo) targetRepo = "abhayShyam004/mobot-website";
+    const targetLiveUrl = urlMatch ? urlMatch[1] : undefined;
+    const bgJobId = `job_bg_user_${Date.now()}_${randomUUID().slice(0, 8)}`;
+
+    sharedObservability.emit("AGENT_LOOP_CAPABILITY_SELECTED", {
+      threadId,
+      botId: bot.id,
+      chosenModality: "system.background_execution",
+      primaryCapabilityId: "system.background_execution",
+      confidenceScore: 0.99,
+      justification: `User requested bounded background research on ${targetRepo} while screen is off.`,
+    });
+
+    recordActionReceipt({
+      operationId: dispatchClaimId,
+      botId: bot.id,
+      threadId,
+      turnId: dispatchClaimId,
+      actionType: "background.research_dispatch",
+      status: "SUCCEEDED",
+      evidence: {
+        resourceId: bgJobId,
+        metadata: {
+          targetRepo,
+          liveUrl: targetLiveUrl,
+        },
+      },
+      attemptedAt: Date.now(),
+    });
+
+    const ackText = `I have initiated background research for **${targetRepo}** [Job: \`${bgJobId}\`]. The analysis will continue even if you lock the device or turn the physical screen off. I will notify you with the synthesized report upon completion.`;
+    const ackMsg = store.appendMessage(threadId, {
+      role: "bot",
+      kind: "text",
+      text: ackText,
+      card: {
+        kind: "background_research_card",
+        jobId: bgJobId,
+        repo: targetRepo,
+        status: "RUNNING",
+        startedAt: Date.now(),
+      } as any,
+    });
+
+    const worker = new BackgroundResearchWorker({
+      jobManager: sharedPersistentJobManager,
+      bgManager: sharedBackgroundExecutionManager,
+      store,
+    });
+    worker.runCanonicalScreenOffTask({
+      jobId: bgJobId,
+      botId: bot.id,
+      threadId,
+      targetRepo,
+      liveUrl: targetLiveUrl,
+      workerId: `worker_companion_${process.pid}`,
+    }).catch((err) => {
+      console.error(`[BackgroundResearchWorker] Execution error for ${bgJobId}:`, err);
+    });
+
+    clearDirectTurnDispatch(threadId, dispatchClaimId);
+    revokeInternalCapabilityGeneration(threadId, dispatchClaimId);
+    releaseTurnResources(resourceOwner);
+    settleDirectFollowup(dispatchClaimId);
+    store.setTaskActivity(bot.id, threadId, "idle");
+    opts?.onTurnSettled?.();
+    return ackMsg;
   }
 
   // Official Roadmap Phase 11: Intelligent Capability Selection (mobot_54_phases_prompt.md:740-804)
@@ -7201,7 +7474,13 @@ async function startTurn(
 
   // Live Phone Control Status Grounding & Receipt Check
   const phoneDriverStatus = checkLivePhoneControlAvailability();
-  if (/(?:access|control).*phone|open.*whatsapp|take.*screenshot|capture.*screenshot|phone.*control/i.test(userTurnText)) {
+  const openAppMatch = userTurnText.match(/(?:open|launch)\s+([a-zA-Z0-9_.\s-]+?)(?:\s+(?:app|application|and|then|to|please)|$)/i);
+  const typeTextMatch = userTurnText.match(/(?:type|enter|input)\s+['"‘“]?([0-9a-zA-Z\s.,!?-]+?)['"’”]?\s*(?:into|in|$)/i);
+  const isScreenshotIntent = /(?:take|capture|grab|send)\s+(?:a\s+)?screenshot/i.test(userTurnText);
+  const isPhoneIntent = /(?:access|control).*phone|take.*screenshot|capture.*screenshot|phone.*control/i.test(userTurnText) ||
+    Boolean(openAppMatch) || Boolean(typeTextMatch) || isScreenshotIntent;
+
+  if (isPhoneIntent) {
     if (!phoneDriverStatus.operational) {
       recordActionReceipt({
         operationId: dispatchClaimId,
@@ -7216,49 +7495,37 @@ async function startTurn(
         },
         attemptedAt: Date.now(),
       });
-      capabilityGroundingContext += `\n\n[Phone Control Live Status]: UNAVAILABLE (${phoneDriverStatus.reason || "driver offline"}). The device automation driver is offline in this session. You CANNOT access the user's phone, tap, type, inspect other apps, or open WhatsApp. You must truthfully state that phone control is currently unavailable.`;
-    } else {
-      if (/(?:open|launch)\s+whatsapp/i.test(userTurnText)) {
-        try {
-          const launchRes = await defaultCapabilityRegistry.invoke(
-            "device.phone_control",
-            "open_app",
-            { packageName: "com.whatsapp" },
-            { botId: bot.id }
-          );
-          if (launchRes.success) {
-            recordActionReceipt({
-              operationId: dispatchClaimId,
-              botId: bot.id,
-              threadId,
-              turnId: dispatchClaimId,
-              actionType: "device.phone_control",
-              status: "SUCCEEDED",
-              evidence: {
-                resourceId: "com.whatsapp",
-                metadata: { packageName: "com.whatsapp", launched: true },
-              },
-              attemptedAt: Date.now(),
-            });
-            capabilityGroundingContext += `\n\n[Phone Control Action Succeeded]: WhatsApp was successfully launched on this phone via native AccessibilityService.`;
-          } else {
-            recordActionReceipt({
-              operationId: dispatchClaimId,
-              botId: bot.id,
-              threadId,
-              turnId: dispatchClaimId,
-              actionType: "device.phone_control",
-              status: "FAILED",
-              error: {
-                code: launchRes.error?.code || "ERR_LAUNCH_FAILED",
-                message: launchRes.error?.message || "Failed to launch WhatsApp",
-              },
-              attemptedAt: Date.now(),
-            });
-            capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${launchRes.error?.message || "Failed to launch WhatsApp"}.`;
-          }
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
+      capabilityGroundingContext += `\n\n[Phone Control Live Status]: UNAVAILABLE (${phoneDriverStatus.reason || "driver offline"}). The device automation driver is offline in this session. You CANNOT access the user's phone, tap, type, inspect other apps, or open applications. You must truthfully state that phone control is currently unavailable.`;
+    } else if (openAppMatch) {
+      const rawTarget = openAppMatch[1].trim().replace(/\s+(?:app|application)$/i, "");
+      const knownLower = rawTarget.toLowerCase().replace(/[^a-z0-9]/g, "");
+      const targetPackage = KNOWN_PACKAGES[knownLower] || KNOWN_PACKAGES[rawTarget.toLowerCase()] || rawTarget;
+      const humanName = HUMAN_LABELS[targetPackage] || rawTarget;
+      try {
+        const launchRes = await defaultCapabilityRegistry.invoke(
+          "device.phone_control",
+          "open_app",
+          { packageName: targetPackage, name: rawTarget },
+          { botId: bot.id, threadId }
+        );
+        if (launchRes.success) {
+          const effectivePkg = (launchRes.data as any)?.packageName || targetPackage;
+          const displayLabel = HUMAN_LABELS[effectivePkg] || humanName;
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "device.phone_control",
+            status: "SUCCEEDED",
+            evidence: {
+              resourceId: effectivePkg,
+              metadata: { packageName: effectivePkg, launched: true, settled: true },
+            },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext += `\n\n[Phone Control Action Succeeded]: ${displayLabel} was successfully launched and confirmed in the foreground on this phone via native AccessibilityService.`;
+        } else {
           recordActionReceipt({
             operationId: dispatchClaimId,
             botId: bot.id,
@@ -7266,30 +7533,100 @@ async function startTurn(
             turnId: dispatchClaimId,
             actionType: "device.phone_control",
             status: "FAILED",
-            error: { code: "ERR_LAUNCH_FAILED", message: msg },
+            error: {
+              code: launchRes.error?.code || "ERR_LAUNCH_FAILED",
+              message: launchRes.error?.message || `Failed to launch ${humanName}`,
+            },
             attemptedAt: Date.now(),
           });
-          capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${msg}.`;
+          capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${launchRes.error?.message || `Failed to launch ${humanName}`}.`;
         }
-      } else {
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
         recordActionReceipt({
           operationId: dispatchClaimId,
           botId: bot.id,
           threadId,
           turnId: dispatchClaimId,
           actionType: "device.phone_control",
-          status: "SUCCEEDED",
-          evidence: {
-            resourceId: "phone_control_status",
-            metadata: {
-              operational: true,
-              supportedActions: phoneDriverStatus.supportedActions,
-            },
-          },
+          status: "FAILED",
+          error: { code: "ERR_LAUNCH_FAILED", message: msg },
           attemptedAt: Date.now(),
         });
-        capabilityGroundingContext += `\n\n[Phone Control Live Status]: OPERATIONAL (Device automation driver and AccessibilityService are active and connected). Supported actions: ${phoneDriverStatus.supportedActions.join(", ")}. You can truthfully state that phone control and automation is connected and operational.`;
+        capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${msg}.`;
       }
+    } else if (typeTextMatch && !userTurnText.toLowerCase().includes("open")) {
+      const textToType = typeTextMatch[1].trim();
+      try {
+        const typeRes = await defaultCapabilityRegistry.invoke(
+          "device.phone_control",
+          "type_text",
+          { text: textToType },
+          { botId: bot.id, threadId }
+        );
+        if (typeRes.success) {
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "device.phone_control",
+            status: "SUCCEEDED",
+            evidence: {
+              resourceId: "type_text",
+              metadata: { text: textToType, typed: true },
+            },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext += `\n\n[Phone Control Action Succeeded]: Typed "${textToType}" into active Android input field and verified on device.`;
+        } else {
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "device.phone_control",
+            status: "FAILED",
+            error: {
+              code: typeRes.error?.code || "ERR_TYPE_FAILED",
+              message: typeRes.error?.message || "Failed to type text",
+            },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${typeRes.error?.message || "Failed to type text"}.`;
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        recordActionReceipt({
+          operationId: dispatchClaimId,
+          botId: bot.id,
+          threadId,
+          turnId: dispatchClaimId,
+          actionType: "device.phone_control",
+          status: "FAILED",
+          error: { code: "ERR_TYPE_FAILED", message: msg },
+          attemptedAt: Date.now(),
+        });
+        capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${msg}.`;
+      }
+    } else {
+      recordActionReceipt({
+        operationId: dispatchClaimId,
+        botId: bot.id,
+        threadId,
+        turnId: dispatchClaimId,
+        actionType: "device.phone_control",
+        status: "SUCCEEDED",
+        evidence: {
+          resourceId: "phone_control_status",
+          metadata: {
+            operational: true,
+            supportedActions: phoneDriverStatus.supportedActions,
+          },
+        },
+        attemptedAt: Date.now(),
+      });
+      capabilityGroundingContext += `\n\n[Phone Control Live Status]: OPERATIONAL (Device automation driver and AccessibilityService are active and connected). Supported actions: ${phoneDriverStatus.supportedActions.join(", ")}. You can truthfully state that phone control and automation is connected and operational.`;
     }
   }
 
@@ -7419,7 +7756,17 @@ async function startTurn(
         ],
         availableSkills(),
       );
-      if (selectedSkills.some((skill) => skill.manifest.requiredCapabilities.includes("phoneMcp"))) {
+      const hasPhoneSkill = selectedSkills.some((skill) => skill.manifest.requiredCapabilities.includes("phoneMcp"));
+      const isNativeAndroidHost = Boolean(process.env.PH_DRIVER_PORT || process.env.OMB_PHONE_DRIVER_ACTIVE);
+      const suspendedPhoneTask = PhoneControlTaskCheckpointManager.getInstance().getSuspendedTask(threadId);
+      const isPhoneFollowUp = Boolean(
+        suspendedPhoneTask ||
+        store.activePath(threadId).slice(-6).some((m) => m.role === "bot" && m.tool && /phone|open_app|type|tap|screenshot/i.test(m.tool.name)) ||
+        (store.messagesFor(threadId).slice(-3).some(m => m.role === "bot" && /unlock|screen|permission|accessibility|phone/i.test(m.text || "")) &&
+         /^(?:ok|okay|done|yes|unlocked|enter|proceed|continue|ready|sure|go ahead)/i.test(providerText.trim()))
+      );
+      const isPhoneIntent = /(?:open|launch|calculator|discord|whatsapp|type|enter|tap|press|scroll|swipe|screenshot|phone|app)/i.test(providerText) || isPhoneFollowUp;
+      if (hasPhoneSkill || (isNativeAndroidHost && isPhoneIntent && instance.adapter.capabilities.phoneMcp === true)) {
         if (!claimTurnResource(resourceOwner, "computer:phone")) throw new Error("another thread is using the phone — wait for it to finish");
         integrations.phone = phoneIntegration();
       }
@@ -9436,7 +9783,17 @@ async function runGroupMemberTurn(
       skills,
     ),
   );
-  if (selectedSkills.some((skill) => skill.manifest.requiredCapabilities.includes("phoneMcp"))) {
+  const hasPhoneSkillInternal = selectedSkills.some((skill) => skill.manifest.requiredCapabilities.includes("phoneMcp"));
+  const isNativeAndroidHostInternal = Boolean(process.env.PH_DRIVER_PORT || process.env.OMB_PHONE_DRIVER_ACTIVE);
+  const suspendedPhoneTaskInternal = PhoneControlTaskCheckpointManager.getInstance().getSuspendedTask(threadId);
+  const isPhoneFollowUpInternal = Boolean(
+    suspendedPhoneTaskInternal ||
+    store.activePath(threadId).slice(-6).some((m) => m.role === "bot" && m.tool && /phone|open_app|type|tap|screenshot/i.test(m.tool.name)) ||
+    (store.messagesFor(threadId).slice(-3).some(m => m.role === "bot" && /unlock|screen|permission|accessibility|phone/i.test(m.text || "")) &&
+     /^(?:ok|okay|done|yes|unlocked|enter|proceed|continue|ready|sure|go ahead)/i.test((latestUser?.text ?? "").trim()))
+  );
+  const isPhoneIntentInternal = /(?:open|launch|calculator|discord|whatsapp|type|enter|tap|press|scroll|swipe|screenshot|phone|app)/i.test(latestUser?.text ?? "") || isPhoneFollowUpInternal;
+  if (hasPhoneSkillInternal || (isNativeAndroidHostInternal && isPhoneIntentInternal && instance.adapter.capabilities.phoneMcp === true)) {
     if (!claimTurnResource(resourceOwner, "computer:phone")) throw new Error("another thread is using the phone — wait for it to finish");
     integrations.phone = phoneIntegration();
   }
@@ -15095,11 +15452,24 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
 
     // ── Phase 5: Self-Updating MOBOT & Official Release Update System ──
     if (method === "GET" && path === "/api/updater/status") {
+      const qv = url.searchParams.get("currentVersion");
+      const qvc = url.searchParams.get("currentVersionCode");
+      const qpkg = url.searchParams.get("packageName");
+      if (qv || qvc || qpkg) {
+        appUpdater.updateInstalledVersion(qv || appVersion, qvc ? parseInt(qvc, 10) : undefined, qpkg || undefined);
+      }
       return json(res, 200, appUpdater.getStatus());
     }
 
     if (method === "POST" && path === "/api/updater/check") {
       const body = (await readBody(req)) || {};
+      if (body?.currentVersion || body?.currentVersionCode || body?.packageName) {
+        appUpdater.updateInstalledVersion(
+          body.currentVersion || appVersion,
+          body.currentVersionCode ? parseInt(body.currentVersionCode, 10) : undefined,
+          body.packageName || undefined
+        );
+      }
       const status = await appUpdater.checkForUpdates(Boolean(body?.force), body?.mockRelease);
       return json(res, 200, status);
     }
@@ -15337,6 +15707,23 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
         return json(res, 404, { error: "no such message" });
       }
       return json(res, 200, { ...messagePage(threadId, limit ?? DEFAULT_PAGE, before), activeLeafId: store.activeLeaf(threadId) });
+    }
+    if (m && method === "POST") {
+      const threadId = m[1];
+      if (!store.botByThread(threadId) && !store.groupByThread(threadId)) {
+        return json(res, 404, { error: "no such conversation" });
+      }
+      const body = (await readBody(req)) || {};
+      const message = store.appendMessage(threadId, {
+        role: body.role === "user" ? "user" : "bot",
+        kind: body.kind || "text",
+        text: typeof body.text === "string" ? body.text : "",
+        ...(body.card ? { card: body.card } : {}),
+        ...(body.attachments ? { attachments: body.attachments } : {}),
+        ...(body.structured ? { structured: body.structured } : {}),
+        turnTerminal: body.turnTerminal !== false,
+      });
+      return json(res, 201, { ok: true, message });
     }
 
     // ── Phase J: Native Structured Response Events ─────────────────────

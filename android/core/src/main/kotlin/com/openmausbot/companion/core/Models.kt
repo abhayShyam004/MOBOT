@@ -555,7 +555,7 @@ data class MessageAttachment(
     val mime: String? = null,
     val name: String? = null,
 ) {
-    val isImage: Boolean get() = kind == "image"
+    val isImage: Boolean get() = kind == "image" || mime?.startsWith("image/") == true || path.endsWith(".png", true) || path.endsWith(".jpg", true) || path.endsWith(".jpeg", true) || path.endsWith(".webp", true)
 }
 
 /** What a bot's memory file costs against the load budget, and its hash so a

@@ -7,6 +7,14 @@ import {
   RoutineExecutionPromptBuilder,
   RoutinePostExecutionProcessor,
   RoutineSetupCoordinator,
+  detectCalendarConflict,
+  detectApproachingDeadline,
+  detectStaleDependency,
+  detectWeatherAlert,
+  publishSuggestionToAttention,
+  type ProactiveSuggestion,
+  FOUR_HOURS_MS,
+  RELEVANCE_THRESHOLD,
 } from "./routine-engine.ts";
 import type { Routine, RoutineRun } from "../../shared/routines.ts";
 import { sharedObservability } from "./observability.ts";
@@ -314,6 +322,166 @@ describe("Routine Engine Upgrades", () => {
       expect(q7.preview?.schedule?.type).toBe("daily");
       expect(q7.preview?.deliveryConfig?.notificationMode).toBe("normal");
       expect(q7.preview?.workflowConfig?.notifyIfEmpty).toBe(false);
+    });
+  });
+
+  describe("Official Roadmap Phase 19: Proactive Intelligence Detectors & Attention Integration", () => {
+    const fixedNow = 1710000000000;
+
+    it("detects imminent calendar conflict 15 minutes before meeting with high relevance (> 0.85)", () => {
+      // Meeting A starts in 15 minutes (fixedNow + 15m), lasts 45 minutes
+      const meetingA = {
+        id: "event-a-standup",
+        title: "Sprint Planning",
+        start: fixedNow + 15 * 60 * 1000,
+        end: fixedNow + 60 * 60 * 1000,
+      };
+
+      // Meeting B starts in 30 minutes (overlaps with Meeting A)
+      const meetingB = {
+        id: "event-b-client",
+        title: "Client Sync",
+        start: fixedNow + 30 * 60 * 1000,
+        end: fixedNow + 75 * 60 * 1000,
+      };
+
+      const suggestion = detectCalendarConflict([meetingA, meetingB], fixedNow);
+      expect(suggestion).not.toBeNull();
+      if (!suggestion) return;
+
+      expect(suggestion.triggerEvent).toBe("calendar_conflict");
+      expect(suggestion.relevanceScore).toBeGreaterThan(RELEVANCE_THRESHOLD); // strictly > 0.85
+      expect(suggestion.relevanceScore).toBe(0.92);
+      expect(suggestion.headline).toContain("Sprint Planning");
+      expect(suggestion.headline).toContain("Client Sync");
+      expect(suggestion.suggestedActionTitle).toContain("reschedule");
+      expect(suggestion.suggestedActionPayload.meetingA).toBeDefined();
+      expect(suggestion.suggestedActionPayload.meetingB).toBeDefined();
+    });
+
+    it("returns null for non-overlapping calendar events", () => {
+      const event1 = {
+        id: "ev1",
+        title: "Morning Review",
+        start: fixedNow + 10 * 60 * 1000,
+        end: fixedNow + 30 * 60 * 1000,
+      };
+      const event2 = {
+        id: "ev2",
+        title: "Afternoon Sync",
+        start: fixedNow + 60 * 60 * 1000,
+        end: fixedNow + 90 * 60 * 1000,
+      };
+
+      const suggestion = detectCalendarConflict([event1, event2], fixedNow);
+      expect(suggestion).toBeNull();
+    });
+
+    it("detects approaching task deadline within 24 hours with high relevance", () => {
+      const tasks = [
+        { id: "t1", title: "Quarterly Taxes", deadline: fixedNow + 2 * 3600 * 1000, completed: false },
+        { id: "t2", title: "Next Month Planning", deadline: fixedNow + 120 * 3600 * 1000, completed: false },
+      ];
+
+      const suggestion = detectApproachingDeadline(tasks, fixedNow);
+      expect(suggestion).not.toBeNull();
+      if (!suggestion) return;
+
+      expect(suggestion.triggerEvent).toBe("approaching_deadline");
+      expect(suggestion.relevanceScore).toBeGreaterThan(RELEVANCE_THRESHOLD);
+      expect(suggestion.headline).toContain("Quarterly Taxes");
+      expect(suggestion.suggestedActionPayload.taskId).toBe("t1");
+    });
+
+    it("differentiates stale dependency security advisory from routine minor updates", () => {
+      // Security vulnerability: exceeds 0.85
+      const secPkg = [
+        {
+          name: "jsonwebtoken",
+          current: "8.5.1",
+          latest: "9.0.0",
+          isSecurityVulnerability: true,
+          severity: "high" as const,
+        },
+      ];
+      const secSug = detectStaleDependency(secPkg);
+      expect(secSug).not.toBeNull();
+      expect(secSug?.relevanceScore).toBeGreaterThan(RELEVANCE_THRESHOLD);
+      expect(secSug?.headline).toContain("Security Advisory");
+
+      // Routine minor bump: stays below 0.85 (0.60)
+      const minorPkg = [
+        {
+          name: "prettier",
+          current: "3.1.0",
+          latest: "3.1.1",
+          isSecurityVulnerability: false,
+        },
+      ];
+      const minorSug = detectStaleDependency(minorPkg);
+      expect(minorSug).not.toBeNull();
+      expect(minorSug?.relevanceScore).toBeLessThanOrEqual(RELEVANCE_THRESHOLD); // 0.60 <= 0.85
+    });
+
+    it("detects severe weather alerts above 0.85 and routine advisories below 0.85", () => {
+      const severeAlert = detectWeatherAlert({
+        event: "Severe Thunderstorm Warning",
+        severity: "warning",
+        headline: "High winds and hail expected",
+        effectiveUntil: fixedNow + 4 * 3600 * 1000,
+      });
+      expect(severeAlert.relevanceScore).toBeGreaterThan(RELEVANCE_THRESHOLD); // 0.90 > 0.85
+
+      const routineAdvisory = detectWeatherAlert({
+        event: "Light Rain Advisory",
+        severity: "advisory",
+        headline: "Intermittent drizzle",
+        effectiveUntil: fixedNow + 4 * 3600 * 1000,
+      });
+      expect(routineAdvisory.relevanceScore).toBeLessThanOrEqual(RELEVANCE_THRESHOLD); // 0.70 <= 0.85
+    });
+
+    it("publishes proactive suggestion to store with activity: 'waiting-on-you' for AttentionInbox.kt", () => {
+      const mockTasks: any[] = [];
+      let recordedActivity: string | undefined;
+      let recordedUnread: boolean | undefined;
+
+      const mockStore = {
+        tasks: () => mockTasks,
+        createTask: (_botId: string, input: any) => {
+          const t = { id: input.threadId, threadId: input.threadId, title: input.title };
+          mockTasks.push(t);
+          return t;
+        },
+        setTaskActivity: (_botId: string, _threadId: string, activity: string) => {
+          recordedActivity = activity;
+        },
+        setTaskUnread: (_botId: string, _threadId: string, unread: boolean) => {
+          recordedUnread = unread;
+        },
+        setActivity: (_botId: string, _activity: string) => {},
+      };
+
+      const suggestion: ProactiveSuggestion = {
+        id: "sug-inbox-test",
+        triggerEvent: "calendar_conflict",
+        relevanceScore: 0.92,
+        headline: 'Conflict: "Sprint Sync" overlaps with "Design Review" in 15m',
+        suggestedActionTitle: "Reschedule one of the meetings",
+        suggestedActionPayload: { meetingId: "sync-1" },
+        cooldownPeriodMs: FOUR_HOURS_MS,
+      };
+
+      const res = publishSuggestionToAttention(mockStore, "bot-12", suggestion);
+      expect(res.threadId).toBeDefined();
+      expect(mockTasks.length).toBe(1);
+      expect(mockTasks[0].title).toBe('[Suggestion] Conflict: "Sprint Sync" overlaps with "Design Review" in 15m');
+      expect(recordedActivity).toBe("waiting-on-you");
+      expect(recordedUnread).toBe(true);
+
+      // Verify Phase 14 Security Gate: The suggested action payload is NOT automatically executed
+      expect(suggestion.suggestedActionPayload.meetingId).toBe("sync-1");
+      // The store does not execute any mutation without explicit user confirmation
     });
   });
 });

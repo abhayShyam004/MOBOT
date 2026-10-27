@@ -15,10 +15,17 @@ import type {
   DeviceCapability,
   CapabilityResult,
   CapabilityContext,
+  CapabilityHealthStatus,
   OperationSchema,
 } from './types.ts';
 import { humanLabelForPackage } from '../drivers/phone-proxy.ts';
-import { loadUserLocation, saveUserLocation, clearUserLocation, type UserLocation } from '../location-context.ts';
+import {
+  loadUserLocation,
+  saveUserLocation,
+  clearUserLocation,
+  resolveLocationContext,
+  type UserLocation,
+} from '../location-context.ts';
 import { DATA_DIR, loadConfig } from '../config.ts';
 import { defaultReminderManager } from '../reminders.ts';
 import {
@@ -870,6 +877,52 @@ export class AppsCapability implements DeviceCapability {
           },
         };
       }
+      const port = process.env.PH_DRIVER_PORT;
+      if (port && Number(port) > 0) {
+        try {
+          const token = process.env.PH_DRIVER_TOKEN || '';
+          const res = await fetch(`http://127.0.0.1:${port}/open_app`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+            body: JSON.stringify({ packageName: pkg }),
+          });
+          if (res.ok) {
+            const data: any = await res.json();
+            if (!data.ok) {
+              return {
+                success: false,
+                error: {
+                  code: data.code || 'ERR_OPEN_APP_FAILED',
+                  message: data.error || `Could not open application ${pkg}`,
+                  category: 'execution_failed',
+                },
+              };
+            }
+            if (data.settled === false && data.foregroundPackage && data.foregroundPackage !== 'unknown') {
+              return {
+                success: false,
+                error: {
+                  code: 'ERR_APP_LAUNCH_NOT_VERIFIED',
+                  message: data.error || `Application ${pkg} did not become foreground (current foreground package: ${data.foregroundPackage})`,
+                  category: 'execution_failed',
+                },
+              };
+            }
+            return {
+              success: true,
+              data: {
+                launched: true,
+                packageName: pkg,
+                settled: data.settled ?? true,
+                foregroundPackage: data.foregroundPackage,
+                message: data.message,
+              },
+            };
+          }
+        } catch {
+          // Fallback if loopback driver call encounters network error
+        }
+      }
       return {
         success: true,
         data: {
@@ -1281,6 +1334,64 @@ export class LocationCapability implements DeviceCapability {
 
   async execute(operation: string, params: Record<string, unknown>): Promise<CapabilityResult> {
     if (operation === 'get_location') {
+      const resolution = await resolveLocationContext({ customDataDir: DATA_DIR });
+      if (resolution.status === 'AVAILABLE' && resolution.location) {
+        return {
+          success: true,
+          data: {
+            status: 'AVAILABLE',
+            liveDeviceAvailable: resolution.location.provenance === 'DEVICE_LIVE',
+            location: resolution.location,
+            provenance: resolution.location.provenance,
+            message: `Current location is available with provenance ${resolution.location.provenance}.`,
+          },
+        };
+      }
+      if (resolution.status === 'PERMISSION_DENIED') {
+        return {
+          success: false,
+          error: {
+            code: 'ERR_LOCATION_PERMISSION_REVOKED',
+            message: resolution.policyNotice || 'Android location permission has been denied or revoked.',
+            category: 'permission_denied',
+          },
+          data: {
+            status: 'PERMISSION_DENIED',
+            liveDeviceAvailable: false,
+            provenance: 'UNKNOWN/UNAVAILABLE',
+            policyNotice: resolution.policyNotice,
+          },
+        };
+      }
+      if (resolution.status === 'DISABLED_BY_USER') {
+        return {
+          success: false,
+          error: {
+            code: 'ERR_LOCATION_DISABLED',
+            message: resolution.policyNotice || 'Location context disabled by user in Settings.',
+            category: 'permission_denied',
+          },
+          data: {
+            status: 'DISABLED_BY_USER',
+            liveDeviceAvailable: false,
+            provenance: 'UNKNOWN/UNAVAILABLE',
+            policyNotice: resolution.policyNotice,
+          },
+        };
+      }
+      if (resolution.status === 'STALE' && resolution.location) {
+        return {
+          success: true,
+          data: {
+            status: 'STALE',
+            liveDeviceAvailable: false,
+            location: resolution.location,
+            provenance: resolution.location.provenance,
+            message: 'Location fix is older than 15 minutes and may not reflect current location.',
+            policyNotice: resolution.policyNotice,
+          },
+        };
+      }
       const saved = loadUserLocation(DATA_DIR);
       if (saved && saved.enabled !== false && saved.provenance === 'SAVED_USER') {
         return {
@@ -1302,6 +1413,7 @@ export class LocationCapability implements DeviceCapability {
           savedLocation: null,
           provenance: 'UNKNOWN/UNAVAILABLE',
           message: 'Live device location is currently unavailable and no saved default location has been configured.',
+          policyNotice: resolution.policyNotice,
         },
       };
     }
@@ -1365,6 +1477,40 @@ export class LocationCapability implements DeviceCapability {
         category: 'invalid_input',
       },
     };
+  }
+
+  /**
+   * Official Roadmap Phase 13: Capability State Awareness live health probe.
+   */
+  async checkHealth(
+    _context?: CapabilityContext,
+    _signal?: AbortSignal
+  ): Promise<CapabilityHealthStatus> {
+    try {
+      const resolution = await resolveLocationContext({ customDataDir: DATA_DIR });
+      if (resolution.status === 'PERMISSION_DENIED') {
+        return {
+          capabilityId: this.id,
+          state: 'PERMISSION_REQUIRED',
+          lastCheckedMs: Date.now(),
+          diagnosticDetails: 'Location permission denied or revoked by Android OS.',
+          remediationAction: 'prompt_permission',
+        };
+      }
+      return {
+        capabilityId: this.id,
+        state: 'AVAILABLE',
+        lastCheckedMs: Date.now(),
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return {
+        capabilityId: this.id,
+        state: 'DEPENDENCY_MISSING',
+        lastCheckedMs: Date.now(),
+        diagnosticDetails: `Location store error: ${msg}`,
+      };
+    }
   }
 }
 
@@ -1435,6 +1581,84 @@ export class BrowserCapability implements DeviceCapability {
       outputSchema: { type: 'object' },
     },
   ];
+
+  /**
+   * Official Roadmap Phase 13: Capability State Awareness live health probe.
+   * Probes the loopback BrowserDriverServer on AB_DRIVER_PORT.
+   */
+  async checkHealth(
+    _context?: CapabilityContext,
+    signal?: AbortSignal
+  ): Promise<CapabilityHealthStatus> {
+    const driverPort = Number(process.env.AB_DRIVER_PORT ?? '0');
+    const driverToken = process.env.AB_DRIVER_TOKEN ?? '';
+
+    if (driverPort <= 0 || !driverToken) {
+      return {
+        capabilityId: this.id,
+        state: 'DRIVER_OFFLINE',
+        lastCheckedMs: Date.now(),
+        diagnosticDetails: 'Browser driver port (AB_DRIVER_PORT) or token is not configured in environment.',
+        remediationAction: 'restart_driver',
+      };
+    }
+
+    try {
+      const res = await fetch(`http://127.0.0.1:${driverPort}/sessions`, {
+        headers: { Authorization: `Bearer ${driverToken}` },
+        signal,
+      });
+
+      if (res.status === 401) {
+        return {
+          capabilityId: this.id,
+          state: 'AUTH_REQUIRED',
+          lastCheckedMs: Date.now(),
+          diagnosticDetails: 'Browser driver rejected capability token.',
+          remediationAction: 'prompt_auth',
+        };
+      }
+
+      if (!res.ok) {
+        return {
+          capabilityId: this.id,
+          state: 'DRIVER_OFFLINE',
+          lastCheckedMs: Date.now(),
+          diagnosticDetails: `Browser driver returned HTTP ${res.status}.`,
+          remediationAction: 'restart_driver',
+        };
+      }
+
+      const body = await res.json() as { ok?: boolean; error?: string };
+      if (body.ok === false) {
+        return {
+          capabilityId: this.id,
+          state: 'DRIVER_OFFLINE',
+          lastCheckedMs: Date.now(),
+          diagnosticDetails: body.error || 'Browser driver reported error.',
+          remediationAction: 'restart_driver',
+        };
+      }
+
+      return {
+        capabilityId: this.id,
+        state: 'AVAILABLE',
+        lastCheckedMs: Date.now(),
+      };
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (err instanceof Error && (err.name === 'AbortError' || msg.includes('aborted'))) {
+        throw err;
+      }
+      return {
+        capabilityId: this.id,
+        state: 'DRIVER_OFFLINE',
+        lastCheckedMs: Date.now(),
+        diagnosticDetails: `Browser driver unreachable on port ${driverPort}: ${msg}`,
+        remediationAction: 'restart_driver',
+      };
+    }
+  }
 
   async execute(
     operation: string,
@@ -1873,6 +2097,42 @@ export class ComposioServiceCapability implements DeviceCapability {
       success: false,
       error: { code: 'UNSUPPORTED_OPERATION', message: `ComposioService capability does not support '${operation}'`, category: 'invalid_input' },
     };
+  }
+
+  /**
+   * Official Roadmap Phase 13: Capability State Awareness live health probe.
+   * Probes Composio configuration and API connectivity.
+   */
+  async checkHealth(
+    _context?: CapabilityContext,
+    _signal?: AbortSignal
+  ): Promise<CapabilityHealthStatus> {
+    try {
+      const cfg = loadConfig();
+      const apiKey = cfg?.composio?.apiKey;
+      if (!apiKey || !apiKey.trim()) {
+        return {
+          capabilityId: this.id,
+          state: 'AUTH_REQUIRED',
+          lastCheckedMs: Date.now(),
+          diagnosticDetails: 'Composio API key is not configured in settings.',
+          remediationAction: 'prompt_auth',
+        };
+      }
+      return {
+        capabilityId: this.id,
+        state: 'AVAILABLE',
+        lastCheckedMs: Date.now(),
+      };
+    } catch {
+      return {
+        capabilityId: this.id,
+        state: 'AUTH_REQUIRED',
+        lastCheckedMs: Date.now(),
+        diagnosticDetails: 'Failed to evaluate Composio service configuration.',
+        remediationAction: 'prompt_auth',
+      };
+    }
   }
 }
 

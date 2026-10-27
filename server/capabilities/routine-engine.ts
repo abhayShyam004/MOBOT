@@ -855,3 +855,26 @@ export class RoutineSetupCoordinator {
     return lines.join("\n");
   }
 }
+
+// Proactive Intelligence System Exports (Phase 19)
+export {
+  type ProactiveTriggerEvent,
+  type ProactiveSuggestion,
+  type SurfaceSuggestionOptions,
+  type SuggestionEvaluationResult,
+  RELEVANCE_THRESHOLD,
+  FOUR_HOURS_MS,
+  FORTY_EIGHT_HOURS_MS,
+  ERR_SUGGESTION_SPAM_DETECTED,
+  SuggestionSpamError,
+  validateProactiveSuggestion,
+  computeDeduplicationKey,
+  ProactiveIntelligenceManager,
+  sharedProactiveManager,
+  detectCalendarConflict,
+  detectApproachingDeadline,
+  detectStaleDependency,
+  detectWeatherAlert,
+  publishSuggestionToAttention,
+} from "../proactive-intelligence.ts";
+

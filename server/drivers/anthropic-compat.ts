@@ -21,6 +21,7 @@ import { checkToolPermission, loadDiskPermissions } from "../permission-policy.t
 import { createChatToolApproval } from "./chat-tool-approval.ts";
 import { appendNative } from "./native.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
+import { isMassDeletionCommand } from "../capabilities/safety-policy.ts";
 
 const DRIVER_KIND = "anthropic-compat";
 const DEFAULT_URL = "https://api.anthropic.com";
@@ -466,7 +467,10 @@ export const AnthropicCompatDriver: ProviderDriver<AnthropicCompatConfig> = {
                   }
                 }
                 if (!handled) {
-                  const allowed = turn.approvalMode === "full"
+                  const cmdStr = String((args as any)?.command || (args as any)?.cmd || "");
+                  const isMassDel = (Boolean(cmdStr) && isMassDeletionCommand(cmdStr)) || isMassDeletionCommand(inputPreview ?? "")
+                    || ((args as any)?.recursive === true && ((args as any)?.path === "/" || (args as any)?.target === "/"));
+                  const allowed = (turn.approvalMode === "full" && !isMassDel)
                     || await approval.ask(call.name, inputPreview ?? "This tool has no arguments.");
                   abort.signal.throwIfAborted();
                   startItem();

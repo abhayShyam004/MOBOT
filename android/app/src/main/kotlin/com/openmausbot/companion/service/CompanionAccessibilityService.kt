@@ -62,11 +62,33 @@ class CompanionAccessibilityService : AccessibilityService() {
         Log.i(TAG, "CompanionAccessibilityService destroyed")
     }
 
+    /** Result of a semantic node interaction */
+    sealed class ClickResult {
+        object Success : ClickResult()
+        object NotFound : ClickResult()
+        object Disappeared : ClickResult()
+        object Restricted : ClickResult()
+        object NotEnabled : ClickResult()
+    }
+
     companion object {
         private const val TAG = "CompanionAccessibility"
 
+        /**
+         * Security Invariant (Phase 35): Accessibility actions must never interact
+         * with system permission dialogues attempting to silently grant dangerous permissions.
+         */
+        val RESTRICTED_SYSTEM_PACKAGES = setOf(
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+            "com.android.packageinstaller",
+            "com.google.android.packageinstaller",
+            "com.samsung.android.packageinstaller",
+            "com.samsung.android.permissioncontroller"
+        )
+
         @Volatile
-        private var instance: CompanionAccessibilityService? = null
+        internal var instance: CompanionAccessibilityService? = null
 
         @Volatile
         private var activePackage: String? = null
@@ -77,8 +99,32 @@ class CompanionAccessibilityService : AccessibilityService() {
         /** Retrieve currently active foreground package name */
         fun getForegroundPackage(): String {
             val service = instance ?: return "unknown"
-            return activePackage ?: service.rootInActiveWindow?.packageName?.toString() ?: "unknown"
+            val rootPkg = service.rootInActiveWindow?.packageName?.toString()
+            if (!rootPkg.isNullOrBlank() && rootPkg != "unknown") {
+                return rootPkg
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                try {
+                    val windows = service.windows
+                    for (win in windows) {
+                        if (win.isFocused || win.isActive) {
+                            val winPkg = win.root?.packageName?.toString()
+                            if (!winPkg.isNullOrBlank()) {
+                                return winPkg
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+            return activePackage ?: "unknown"
         }
+
+        /** Returns true if active foreground window is a restricted system permission dialogue */
+        fun isRestrictedWindow(): Boolean {
+            val pkg = getForegroundPackage().lowercase()
+            return RESTRICTED_SYSTEM_PACKAGES.any { pkg.startsWith(it) }
+        }
+
 
         /**
          * Dump active window UI hierarchy as semantic JSON nodes.
@@ -124,6 +170,7 @@ class CompanionAccessibilityService : AccessibilityService() {
             val desc = node.contentDescription?.toString() ?: ""
             val id = node.viewIdResourceName ?: ""
             val className = node.className?.toString() ?: ""
+            val isEnabled = node.isEnabled
             val isClickable = node.isClickable
             val isEditable = node.isEditable
             val isScrollable = node.isScrollable
@@ -139,19 +186,32 @@ class CompanionAccessibilityService : AccessibilityService() {
                     put(rect.right)
                     put(rect.bottom)
                 }
+                val boundsObj = JSONObject().apply {
+                    put("left", rect.left)
+                    put("top", rect.top)
+                    put("right", rect.right)
+                    put("bottom", rect.bottom)
+                }
 
+                val nodeId = "node_${rect.left}_${rect.top}_${rect.right}_${rect.bottom}_$count"
                 val obj = JSONObject().apply {
+                    put("nodeId", nodeId)
                     put("text", text)
                     put("description", desc)
                     put("id", id)
                     put("className", className)
                     put("bounds", boundsArray)
+                    put("boundsObj", boundsObj)
                     put("clickable", isClickable)
+                    put("isClickable", isClickable)
                     put("focusable", isFocusable)
                     put("focused", isFocused)
                     put("scrollable", isScrollable)
                     put("editable", isEditable)
+                    put("isEditable", isEditable)
+                    put("isEnabled", isEnabled)
                     put("package", node.packageName?.toString() ?: "")
+                    put("packageName", node.packageName?.toString() ?: "")
                 }
                 list.put(obj)
                 count++
@@ -169,10 +229,15 @@ class CompanionAccessibilityService : AccessibilityService() {
         /**
          * Click a semantic node matching the provided view ID or text/contentDescription.
          * Traverses to clickable ancestors if the matching node itself does not consume clicks.
+         * Enforces permission dialogue security invariants and checks target validity.
          */
-        fun clickNode(targetId: String?, targetText: String?, exact: Boolean = false): Boolean {
-            val service = instance ?: return false
-            val root = service.rootInActiveWindow ?: return false
+        fun clickNode(targetId: String?, targetText: String?, exact: Boolean = false): ClickResult {
+            val service = instance ?: return ClickResult.NotFound
+            if (isRestrictedWindow()) {
+                Log.w(TAG, "Security refusal: attempt to interact with restricted system window ${getForegroundPackage()}")
+                return ClickResult.Restricted
+            }
+            val root = service.rootInActiveWindow ?: return ClickResult.NotFound
             val candidates = mutableListOf<AccessibilityNodeInfo>()
 
             if (!targetId.isNullOrBlank()) {
@@ -195,17 +260,33 @@ class CompanionAccessibilityService : AccessibilityService() {
                 }
             }
 
+            if (candidates.isEmpty()) return ClickResult.NotFound
+
             for (target in candidates) {
+                // Invariant: target must be enabled
+                if (!target.isEnabled) return ClickResult.NotEnabled
+
+                // Invariant: verify node has not disappeared or changed text before action
+                if (!targetText.isNullOrBlank()) {
+                    val currentText = (target.text?.toString() ?: "").lowercase()
+                    val currentDesc = (target.contentDescription?.toString() ?: "").lowercase()
+                    val needle = targetText.lowercase().trim()
+                    if (!currentText.contains(needle) && !currentDesc.contains(needle)) {
+                        return ClickResult.Disappeared
+                    }
+                }
+
                 var current: AccessibilityNodeInfo? = target
                 while (current != null) {
                     if (current.isClickable) {
-                        return current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        val ok = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        return if (ok) ClickResult.Success else ClickResult.NotFound
                     }
                     current = current.parent
                 }
             }
 
-            return false
+            return ClickResult.NotFound
         }
 
         private fun collectAllNodes(
@@ -222,22 +303,9 @@ class CompanionAccessibilityService : AccessibilityService() {
             }
         }
 
-        /**
-         * Dispatch a tap gesture at the specified screen coordinates.
-         */
-        fun clickCoordinates(x: Float, y: Float): Boolean {
-            val service = instance ?: return false
-            val path = Path().apply {
-                moveTo(x, y)
-                lineTo(x, y)
-            }
-            val gesture = GestureDescription.Builder()
-                .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
-                .build()
-
+        private fun dispatchGestureSync(service: CompanionAccessibilityService, gesture: GestureDescription): Boolean {
             val latch = CountDownLatch(1)
             var success = false
-
             val dispatched = service.dispatchGesture(
                 gesture,
                 object : GestureResultCallback() {
@@ -245,7 +313,6 @@ class CompanionAccessibilityService : AccessibilityService() {
                         success = true
                         latch.countDown()
                     }
-
                     override fun onCancelled(gestureDescription: GestureDescription?) {
                         success = false
                         latch.countDown()
@@ -253,7 +320,6 @@ class CompanionAccessibilityService : AccessibilityService() {
                 },
                 null
             )
-
             if (!dispatched) return false
             try {
                 latch.await(3, TimeUnit.SECONDS)
@@ -264,10 +330,66 @@ class CompanionAccessibilityService : AccessibilityService() {
         }
 
         /**
+         * Dispatch a tap gesture at the specified screen coordinates.
+         */
+        fun clickCoordinates(x: Float, y: Float): Boolean {
+            val service = instance ?: return false
+            if (isRestrictedWindow()) return false
+            val path = Path().apply { moveTo(x, y); lineTo(x, y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 50))
+                .build()
+            return dispatchGestureSync(service, gesture)
+        }
+
+        /**
+         * Dispatch double tap gesture at screen coordinates.
+         */
+        fun doubleTapCoordinates(x: Float, y: Float): Boolean {
+            val service = instance ?: return false
+            if (isRestrictedWindow()) return false
+            val path1 = Path().apply { moveTo(x, y); lineTo(x, y) }
+            val path2 = Path().apply { moveTo(x, y); lineTo(x, y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path1, 0, 40))
+                .addStroke(GestureDescription.StrokeDescription(path2, 100, 40))
+                .build()
+            return dispatchGestureSync(service, gesture)
+        }
+
+        /**
+         * Dispatch long press gesture at screen coordinates (600ms hold).
+         */
+        fun longPressCoordinates(x: Float, y: Float): Boolean {
+            val service = instance ?: return false
+            if (isRestrictedWindow()) return false
+            val path = Path().apply { moveTo(x, y); lineTo(x, y) }
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, 600))
+                .build()
+            return dispatchGestureSync(service, gesture)
+        }
+
+        /**
+         * Dispatch swipe gesture with explicit coordinates and duration.
+         */
+        fun swipeCoordinates(startX: Float, startY: Float, endX: Float, endY: Float, durationMs: Long): Boolean {
+            val service = instance ?: return false
+            if (isRestrictedWindow()) return false
+            val path = Path().apply { moveTo(startX, startY); lineTo(endX, endY) }
+            val duration = durationMs.coerceIn(50, 2000)
+            val gesture = GestureDescription.Builder()
+                .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+                .build()
+            return dispatchGestureSync(service, gesture)
+        }
+
+        /**
          * Input text into currently focused editable field via ACTION_SET_TEXT.
          */
         fun inputText(text: String): Boolean {
             val service = instance ?: return false
+            if (isRestrictedWindow()) return false
             val root = service.rootInActiveWindow ?: return false
             val focus = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT)
                 ?: findFirstEditable(root)
@@ -294,6 +416,7 @@ class CompanionAccessibilityService : AccessibilityService() {
          */
         fun scroll(direction: String): Boolean {
             val service = instance ?: return false
+            if (isRestrictedWindow()) return false
             val root = service.rootInActiveWindow ?: return false
             val scrollable = findFirstScrollable(root)
             val norm = direction.lowercase()
@@ -371,6 +494,7 @@ class CompanionAccessibilityService : AccessibilityService() {
          */
         fun performGlobal(actionName: String): Boolean {
             val service = instance ?: return false
+            if (isRestrictedWindow()) return false
             val action = when (actionName.lowercase()) {
                 "back" -> GLOBAL_ACTION_BACK
                 "home" -> GLOBAL_ACTION_HOME
@@ -439,8 +563,12 @@ class CompanionAccessibilityService : AccessibilityService() {
         fun launchApp(context: Context, packageName: String): Boolean {
             return try {
                 val intent = context.packageManager.getLaunchIntentForPackage(packageName) ?: return false
-                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-                context.startActivity(intent)
+                intent.flags = (intent.flags and Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED.inv()) or
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+                val targetContext = instance ?: context
+                targetContext.startActivity(intent)
                 true
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to launch package $packageName: ${e.message}")

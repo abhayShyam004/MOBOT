@@ -2,10 +2,26 @@
 // are pure, so every spelling a driver can hand the poke site — and every
 // tool that must NOT count — is pinned down here.
 import { createHash } from "node:crypto";
+import zlib from "node:zlib";
 
 import { describe, expect, it } from "vitest";
 
-import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews, shouldSurfaceBrowserScreenInChat } from "./screen-frame-gate.ts";
+import {
+  screenFrameHash,
+  screenSurfaceForTool,
+  screenTouchingTool,
+  settledFrameIsNews,
+  shouldSurfaceBrowserScreenInChat,
+  determineResponseFormattingPlan,
+  validateResponseFormattingPlan,
+  stripRawBase64DataUris,
+  isProhibitedScreenFrame,
+  sanitizeMessageForChatStorage,
+  validateScreenFrameBytes,
+  ERR_CHAT_POLLUTION_BLOCKED,
+  ChatPollutionBlockedError,
+  type ResponseFormattingPlan,
+} from "./screen-frame-gate.ts";
 
 describe("screenTouchingTool", () => {
   it("strips the Claude driver's mcp__<server>__ prefix", () => {
@@ -264,4 +280,488 @@ describe("shouldSurfaceBrowserScreenInChat", () => {
     expect(shouldSurfaceBrowserScreenInChat({ userPrompt: "" })).toBe(false);
   });
 });
+
+describe("Official Roadmap Phase 16: Response Intelligence & Visual Telemetry Isolation (Scenarios 1-18)", () => {
+  // Scenario 1 — Routine factual question
+  it("Scenario 1: Routine factual questions receive concise short_conversational shape without superfluous headings", () => {
+    const factualPrompts = [
+      "What does DNS do?",
+      "Is this command safe?",
+      "What is the difference between RAM and storage?",
+      "Thanks, that worked.",
+      "What time is it in Tokyo?",
+    ];
+
+    for (const prompt of factualPrompts) {
+      const plan = determineResponseFormattingPlan({ userPrompt: prompt });
+      const validated: ResponseFormattingPlan = validateResponseFormattingPlan(plan);
+      expect(validated.shape).toBe("short_conversational");
+      expect(plan.shape).toBe("short_conversational");
+      expect(plan.useMarkdownTables).toBe(false);
+      expect(plan.requireExecutiveConclusion).toBe(false);
+      expect(plan.includeVisualAttachment).toBe(false);
+      expect(plan.maxWordsTarget).toBeLessThanOrEqual(80);
+
+      // Verify simulated concise answer avoids superfluous templates (Summary -> Steps -> Conclusion)
+      const simulatedAnswer = "DNS translates human-readable domain names into numerical IP addresses needed to route network traffic.";
+      expect(simulatedAnswer.startsWith("Summary:")).toBe(false);
+      expect(simulatedAnswer.includes("### Steps")).toBe(false);
+      expect(simulatedAnswer.includes("### Conclusion")).toBe(false);
+      expect(simulatedAnswer.split(".").filter(Boolean).length).toBeLessThanOrEqual(3);
+    }
+
+    // Validation handles null or malformed plans safely
+    const fallbackPlan = validateResponseFormattingPlan(null);
+    expect(fallbackPlan.shape).toBe("short_conversational");
+    expect(fallbackPlan.useMarkdownTables).toBe(false);
+  });
+
+  // Scenario 2 — Explicit structured report
+  it("Scenario 2: Explicit structured report requests produce structured_report shape with executive conclusion", () => {
+    const reportPrompts = [
+      "Provide a detailed architectural security audit report for the cloud deployment",
+      "Write a comprehensive engineering review of the database migration plan",
+      "Give me an in-depth analysis of the system performance bottlenecks",
+      "Explain in detail how the consensus algorithm handles network partitions",
+    ];
+
+    for (const prompt of reportPrompts) {
+      const plan = determineResponseFormattingPlan({ userPrompt: prompt });
+      expect(plan.shape).toBe("structured_report");
+      expect(plan.requireExecutiveConclusion).toBe(true);
+      expect(plan.useMarkdownTables).toBe(false);
+      expect(plan.maxWordsTarget).toBeGreaterThanOrEqual(300);
+    }
+  });
+
+  // Scenario 3 — Explicit code request
+  it("Scenario 3: Explicit code requests select code_block shape without embedding visual telemetry", () => {
+    const codePrompts = [
+      "Write a TypeScript function to parse semver strings",
+      "Give me the curl command to upload a file to the S3 bucket",
+      "Generate a Python script to calculate Fibonacci numbers iteratively",
+      "Show me the Dockerfile configuration for a multi-stage Node.js build",
+    ];
+
+    for (const prompt of codePrompts) {
+      const plan = determineResponseFormattingPlan({ userPrompt: prompt });
+      expect(plan.shape).toBe("code_block");
+      expect(plan.useMarkdownTables).toBe(false);
+      expect(plan.includeVisualAttachment).toBe(false);
+      expect(plan.requireExecutiveConclusion).toBe(false);
+    }
+
+    // Factual queries that merely mention the word "code" must NOT be forced into code_block
+    const factualWithCode = "What is bytecode in Java?";
+    const factualPlan = determineResponseFormattingPlan({ userPrompt: factualWithCode });
+    expect(factualPlan.shape).toBe("short_conversational");
+  });
+
+  // Scenario 4 — Genuine comparison
+  it("Scenario 4: Genuine comparisons select tabular_comparison shape and enable Markdown tables", () => {
+    const comparisonPrompts = [
+      "Compare PostgreSQL, MongoDB, and Redis across scalability, consistency, and latency in a comparison table",
+      "Evaluate the trade-offs between REST and GraphQL with a comparison matrix",
+      "Compare AWS Lambda vs Google Cloud Functions across pricing and cold start times",
+    ];
+
+    for (const prompt of comparisonPrompts) {
+      const plan = determineResponseFormattingPlan({ userPrompt: prompt });
+      expect(plan.shape).toBe("tabular_comparison");
+      expect(plan.useMarkdownTables).toBe(true);
+      expect(plan.requireExecutiveConclusion).toBe(true);
+    }
+  });
+
+  // Scenario 5 — Screenshot generated for internal observation
+  it("Scenario 5: Browser frames generated for internal tool observation are prohibited from chat history", () => {
+    const researchPrompt = "Research the cheapest flights to Tokyo next month";
+    expect(shouldSurfaceBrowserScreenInChat({ userPrompt: researchPrompt })).toBe(false);
+
+    const internalFrame = {
+      role: "bot",
+      kind: "screen",
+      surface: "browser",
+      png: "iVBORw0KGgo-browser-frame-internal-telemetry",
+    };
+
+    expect(isProhibitedScreenFrame(internalFrame, researchPrompt)).toBe(true);
+
+    let blockedCaught = false;
+    const sanitized = sanitizeMessageForChatStorage(internalFrame, {
+      userPrompt: researchPrompt,
+      onBlocked: (err) => {
+        blockedCaught = true;
+        expect(err.code).toBe(ERR_CHAT_POLLUTION_BLOCKED);
+      },
+    });
+
+    expect(blockedCaught).toBe(true);
+    expect(sanitized.blocked).toBe(true);
+    expect(sanitized.message).toBeNull();
+  });
+
+  // Scenario 6 — Explicit request for a screenshot
+  it("Scenario 6: Explicit screenshot request permits legitimate image deliverable in chat", () => {
+    const explicitPrompts = [
+      "Take a screenshot of the homepage and send it to me",
+      "Show me the page layout",
+      "Can I see the screen?",
+      "Provide visual proof of the booking confirmation",
+    ];
+
+    for (const prompt of explicitPrompts) {
+      const plan = determineResponseFormattingPlan({ userPrompt: prompt });
+      expect(plan.includeVisualAttachment).toBe(true);
+
+      const frame = {
+        role: "bot",
+        kind: "screen",
+        surface: "browser",
+        png: "iVBORw0KGgo-legitimate-requested-screenshot",
+      };
+
+      expect(isProhibitedScreenFrame(frame, prompt)).toBe(false);
+      const res = sanitizeMessageForChatStorage(frame, { userPrompt: prompt });
+      expect(res.blocked).toBe(false);
+      expect(res.message).not.toBeNull();
+    }
+  });
+
+  // Scenario 7 — Raw base64 injection
+  it("Scenario 7: Direct attempt to inject raw base64 data URI is blocked with ERR_CHAT_POLLUTION_BLOCKED", () => {
+    const rawBase64Msg = {
+      role: "bot",
+      kind: "text",
+      text: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+    };
+
+    expect(isProhibitedScreenFrame(rawBase64Msg, "Check this")).toBe(true);
+
+    let errorFired = false;
+    const res = sanitizeMessageForChatStorage(rawBase64Msg, {
+      userPrompt: "Check this",
+      onBlocked: (err) => {
+        errorFired = true;
+        expect(err.code).toBe(ERR_CHAT_POLLUTION_BLOCKED);
+      },
+    });
+
+    expect(errorFired).toBe(true);
+    expect(res.blocked).toBe(true);
+    expect(res.message).toBeNull();
+  });
+
+  // Scenario 8 — Mixed valid text and invalid visual payload
+  it("Scenario 8: Mixed message with valid text and prohibited base64 payload preserves text while stripping raw visual data", () => {
+    const rawDataUri = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    const mixedText = `The security audit identified 2 critical package vulnerabilities in package.json.\n\n![Screenshot](${rawDataUri})\n${rawDataUri}\n\nRecommended remediation is upgrading auth0-js to v9.20.`;
+
+    const cleaned = stripRawBase64DataUris(mixedText);
+    expect(cleaned).toContain("The security audit identified 2 critical package vulnerabilities in package.json.");
+    expect(cleaned).toContain("Recommended remediation is upgrading auth0-js to v9.20.");
+    expect(cleaned).not.toContain("data:image/");
+    expect(cleaned).not.toContain("iVBORw0KGgo");
+
+    const message = {
+      role: "bot",
+      kind: "text",
+      text: mixedText,
+    };
+
+    const res = sanitizeMessageForChatStorage(message, { userPrompt: "Audit packages" });
+    expect(res.blocked).toBe(false);
+    expect(res.message?.text).toBe(cleaned);
+  });
+
+  // Scenario 9 — Visual SSE continuity
+  it("Scenario 9: Visual telemetry remains available to Watch Computer SSE broadcast while excluded from chat storage", () => {
+    const sseBroadcastFrames: Array<{ kind: string; surface: string; png: string }> = [];
+    const chatStorageMessages: Array<{ kind: string; text?: string }> = [];
+
+    const mockBroadcast = (event: { kind: string; surface: string; png: string }) => {
+      sseBroadcastFrames.push(event);
+    };
+
+    const mockChatStore = (msg: { kind: string; surface?: string; png?: string; text?: string }, userPrompt: string) => {
+      const res = sanitizeMessageForChatStorage(msg as any, { userPrompt });
+      if (!res.blocked && res.message) {
+        chatStorageMessages.push(res.message as any);
+      }
+    };
+
+    const prompt = "Search for top AI news on Hacker News";
+    const frame = { kind: "screen", surface: "browser", png: "iVBORw0KGgo-live-browser-view" };
+
+    // 1. Live SSE delivery for Watch Computer
+    mockBroadcast(frame);
+    expect(sseBroadcastFrames.length).toBe(1);
+    expect(sseBroadcastFrames[0].kind).toBe("screen");
+
+    // 2. Chat storage gate
+    mockChatStore(frame, prompt);
+    // Frame is prohibited from chat storage
+    expect(chatStorageMessages.length).toBe(0);
+
+    // 3. Synthesized textual answer enters chat store
+    const textAnswer = { kind: "text", text: "Found 3 top AI stories on HN: 1. Model release, 2. Open weights discussion, 3. Benchmarks." };
+    mockChatStore(textAnswer, prompt);
+    expect(chatStorageMessages.length).toBe(1);
+    expect(chatStorageMessages[0].text).toContain("Found 3 top AI stories");
+  });
+
+  // Scenario 10 — Unrelated text-only turns
+  it("Scenario 10: Unrelated text-only follow-ups do not inherit visual attachments from previous browser sessions", () => {
+    const turn1Prompt = "Take a screenshot of the homepage";
+    const turn1Plan = determineResponseFormattingPlan({ userPrompt: turn1Prompt });
+    expect(turn1Plan.includeVisualAttachment).toBe(true);
+
+    // Turn 2 is an unrelated factual question
+    const turn2Prompt = "Now calculate 15 percent tip on a 120 dollar restaurant bill";
+    const turn2Plan = determineResponseFormattingPlan({ userPrompt: turn2Prompt });
+    expect(turn2Plan.shape).toBe("short_conversational");
+    expect(turn2Plan.includeVisualAttachment).toBe(false);
+  });
+
+  // Scenario 11 — History reconstruction
+  it("Scenario 11: History reconstruction sanitizes transcripts and rejects prohibited browser frames", () => {
+    const historicalMessages = [
+      { id: "m1", role: "user", kind: "text", text: "Find news" },
+      { id: "m2", role: "bot", kind: "screen", surface: "browser", png: "iVBORw0KGgo-polluted-history" },
+      { id: "m3", role: "bot", kind: "text", text: "Here is the summary." },
+    ];
+
+    const reconstructed = historicalMessages.filter((msg) => !isProhibitedScreenFrame(msg as any, "Find news"));
+    expect(reconstructed.length).toBe(2);
+    expect(reconstructed.map((m) => m.id)).toEqual(["m1", "m3"]);
+  });
+
+  // Scenario 12 — Message replay
+  it("Scenario 12: Replaying persisted messages filters out dropped frames from chat presentation", () => {
+    const rawEvents = [
+      { kind: "text", text: "Starting browse..." },
+      { kind: "screen", surface: "browser", png: "iVBORw0KGgo-replay-drop" },
+      { kind: "text", text: "Finished research." },
+    ];
+
+    const replayTarget: string[] = [];
+    for (const evt of rawEvents) {
+      const res = sanitizeMessageForChatStorage(evt as any, { userPrompt: "General query" });
+      if (!res.blocked && res.message) {
+        replayTarget.push(res.message.kind);
+      }
+    }
+
+    expect(replayTarget).toEqual(["text", "text"]);
+    expect(replayTarget.includes("screen")).toBe(false);
+  });
+
+  // Scenario 13 — Alternate message writer
+  it("Scenario 13: Alternate message writing boundaries enforce the prohibited frame gate", () => {
+    const writerAttempts = [
+      { role: "bot", kind: "screen", surface: "browser", png: "iVBORw0KGgo-alt-writer-1" },
+      { role: "bot", kind: "screen", surface: "browser", png: "iVBORw0KGgo-alt-writer-2" },
+    ];
+
+    for (const attempt of writerAttempts) {
+      expect(isProhibitedScreenFrame(attempt, "Read article")).toBe(true);
+      const res = sanitizeMessageForChatStorage(attempt, { userPrompt: "Read article" });
+      expect(res.blocked).toBe(true);
+      expect(res.code).toBe(ERR_CHAT_POLLUTION_BLOCKED);
+    }
+  });
+
+  // Scenario 14 — Explicit visual intent
+  it("Scenario 14: Explicit visual intent matches diverse user expressions", () => {
+    const visualQueries = [
+      "Show me what the website looks like",
+      "Send me a screenshot of your screen",
+      "Can I view the page?",
+      "Provide visual confirmation of the ticket",
+      "What does the checkout page look like?",
+    ];
+
+    for (const q of visualQueries) {
+      expect(shouldSurfaceBrowserScreenInChat({ userPrompt: q })).toBe(true);
+      const plan = determineResponseFormattingPlan({ userPrompt: q });
+      expect(plan.includeVisualAttachment).toBe(true);
+    }
+  });
+
+  // Scenario 15 — Invalid implicit visual intent
+  it("Scenario 15: Incidental mentions of screen or page do not trigger visual attachments", () => {
+    const nonVisualQueries = [
+      "Click the blue button on the page",
+      "The device screen is 6.5 inches",
+      "Scroll down to find the article author",
+      "Does this screen support HDR10?",
+      "Read the second paragraph on the page",
+    ];
+
+    for (const q of nonVisualQueries) {
+      expect(shouldSurfaceBrowserScreenInChat({ userPrompt: q })).toBe(false);
+      const plan = determineResponseFormattingPlan({ userPrompt: q });
+      expect(plan.includeVisualAttachment).toBe(false);
+    }
+  });
+
+  // Scenario 16 — Chat text remains clean
+  it("Scenario 16: Research output text is verified free of base64 payloads, [object Object], and raw JSON", () => {
+    const messyTelemetryText = `The research returned 3 findings.\n{"rawScreenshot": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA..."}\n[object Object]\nConclusion: All services healthy.`;
+
+    const cleaned = stripRawBase64DataUris(messyTelemetryText)
+      .replace(/\[object Object\]/g, "")
+      .replace(/\{"rawScreenshot":\s*""\}/g, "")
+      .trim();
+
+    expect(cleaned).not.toContain("data:image/");
+    expect(cleaned).not.toContain("iVBORw0KGgo");
+    expect(cleaned).toContain("The research returned 3 findings.");
+    expect(cleaned).toContain("Conclusion: All services healthy.");
+  });
+
+  // Scenario 17 — Watch Computer stream remains functional
+  it("Scenario 17: Watch Computer stream receives live frames while chat history remains clean", () => {
+    const watchComputerLiveFrames: string[] = [];
+    const chatTranscript: string[] = [];
+
+    const handleTurnEvent = (event: { kind: string; surface: string; png?: string; text?: string }, userPrompt: string) => {
+      // 1. Live observation SSE fanout
+      if (event.kind === "screen" && event.png) {
+        watchComputerLiveFrames.push(event.png);
+      }
+      // 2. Chat persistence gate
+      const res = sanitizeMessageForChatStorage(event as any, { userPrompt });
+      if (!res.blocked && res.message?.text) {
+        chatTranscript.push(res.message.text);
+      }
+    };
+
+    const prompt = "Navigate to github.com and read the trending repos";
+    handleTurnEvent({ kind: "screen", surface: "browser", png: "frame-1-github-home" }, prompt);
+    handleTurnEvent({ kind: "screen", surface: "browser", png: "frame-2-github-trending" }, prompt);
+    handleTurnEvent({ kind: "text", surface: "browser", text: "Top trending repo is langchain-ai." }, prompt);
+
+    expect(watchComputerLiveFrames).toEqual(["frame-1-github-home", "frame-2-github-trending"]);
+    expect(chatTranscript).toEqual(["Top trending repo is langchain-ai."]);
+  });
+
+  // Scenario 18 — Error and failure recovery
+  it("Scenario 18: Blocked chat pollution attempts recover gracefully without crashing or exposing raw stack traces", () => {
+    const prohibitedFrame = {
+      role: "bot",
+      kind: "screen",
+      surface: "browser",
+      png: "iVBORw0KGgo-exploit-pollution-attempt",
+    };
+
+    let blockedError: ChatPollutionBlockedError | null = null;
+    let turnCrashed = false;
+
+    try {
+      const res = sanitizeMessageForChatStorage(prohibitedFrame, {
+        userPrompt: "Regular question",
+        onBlocked: (err) => {
+          blockedError = err;
+        },
+      });
+
+      expect(res.blocked).toBe(true);
+      expect(res.code).toBe(ERR_CHAT_POLLUTION_BLOCKED);
+      expect(blockedError).not.toBeNull();
+      if (blockedError) {
+        const err = blockedError as ChatPollutionBlockedError;
+        expect(err.code).toBe(ERR_CHAT_POLLUTION_BLOCKED);
+      }
+    } catch {
+      turnCrashed = true;
+    }
+
+    expect(turnCrashed).toBe(false);
+  });
+
+  // Bug A Remediation: Screenshot Integrity & Black Image Elimination
+  describe("Bug A Remediation: Screenshot Integrity & Black Image Elimination", () => {
+    function generateTestPng(w: number, h: number, pixelLuminance: number = 0): Buffer {
+      const bpp = 4;
+      const stride = 1 + w * bpp;
+      const raw = Buffer.alloc(stride * h, 0);
+      for (let row = 0; row < h; row++) {
+        const rowOffset = row * stride;
+        raw[rowOffset] = 0; // Filter None
+        for (let col = 0; col < w; col++) {
+          const px = rowOffset + 1 + col * bpp;
+          raw[px] = pixelLuminance;     // R
+          raw[px + 1] = pixelLuminance; // G
+          raw[px + 2] = pixelLuminance; // B
+          raw[px + 3] = 255;            // A
+        }
+      }
+      const idat = zlib.deflateSync(raw);
+
+      const header = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const ihdr = Buffer.alloc(25);
+      ihdr.writeUInt32BE(13, 0);
+      ihdr.write("IHDR", 4);
+      ihdr.writeUInt32BE(w, 8);
+      ihdr.writeUInt32BE(h, 12);
+      ihdr[16] = 8;  // bit depth
+      ihdr[17] = 6;  // RGBA
+      ihdr[18] = 0;  // deflate
+      ihdr[19] = 0;  // filter
+      ihdr[20] = 0;  // interlace
+      ihdr.writeUInt32BE(0x12345678, 21);
+
+      const idatChunk = Buffer.alloc(12 + idat.length);
+      idatChunk.writeUInt32BE(idat.length, 0);
+      idatChunk.write("IDAT", 4);
+      idat.copy(idatChunk, 8);
+      idatChunk.writeUInt32BE(0x87654321, 8 + idat.length);
+
+      const iendChunk = Buffer.from([0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
+      return Buffer.concat([header, ihdr, idatChunk, iendChunk]);
+    }
+
+    it("accepts valid rendered PNG image buffers with luminance", () => {
+      const validPng = generateTestPng(32, 32, 200);
+      const res = validateScreenFrameBytes(validPng);
+      expect(res.valid).toBe(true);
+      expect(res.format).toBe("png");
+      expect(res.width).toBe(32);
+      expect(res.height).toBe(32);
+    });
+
+    it("rejects all-black unrendered PNG frames with ERR_SCREEN_CAPTURE_BLANK", () => {
+      const blackPng = generateTestPng(32, 32, 0);
+      const res = validateScreenFrameBytes(blackPng);
+      expect(res.valid).toBe(false);
+      expect(res.code).toBe("ERR_SCREEN_CAPTURE_BLANK");
+      expect(res.reason).toContain("completely black or blank");
+    });
+
+    it("rejects all-black frames even when user prompt explicitly requested a screenshot", () => {
+      const blackPng = generateTestPng(64, 64, 0);
+      const blackBase64 = blackPng.toString("base64");
+      const message = {
+        role: "bot",
+        kind: "screen",
+        surface: "browser",
+        png: blackBase64,
+      };
+
+      // Despite explicit screenshot prompt, black frames must be prohibited from chat history
+      expect(isProhibitedScreenFrame(message, "can you send a screenshot of it to me")).toBe(true);
+      const sanitizeRes = sanitizeMessageForChatStorage(message, { userPrompt: "can you send a screenshot of it to me" });
+      expect(sanitizeRes.blocked).toBe(true);
+      expect(sanitizeRes.code).toBe(ERR_CHAT_POLLUTION_BLOCKED);
+    });
+
+    it("rejects empty or corrupt payloads", () => {
+      expect(validateScreenFrameBytes(null).valid).toBe(false);
+      expect(validateScreenFrameBytes("").valid).toBe(false);
+      expect(validateScreenFrameBytes(Buffer.from([0, 1, 2])).valid).toBe(false);
+    });
+  });
+});
+
 

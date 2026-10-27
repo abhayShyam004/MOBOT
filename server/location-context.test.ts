@@ -20,6 +20,13 @@ import {
   ScopedLocationStore,
   validateProvenanceRecord,
   validateUserLocation,
+  resolveLocationContext,
+  LOCATION_FRESHNESS_TTL_MS,
+  isLocationContextDisabled,
+  setLocationContextEnabled,
+  setCachedDeviceFix,
+  clearCachedDeviceFix,
+  formatLocationResolutionPromptBlock,
   type ProvenanceRecord,
   type ProvenanceSource,
   type UserLocation,
@@ -1096,6 +1103,278 @@ describe("location-context", () => {
       const thirdPerson = resolveLocationIntent("My friend lives in Kyoto", null);
       expect(thirdPerson.effectiveLocation).toBeNull();
       expect(thirdPerson.scope).toBe("unrelated");
+    });
+  });
+
+  describe("Official Roadmap Phase 36: Location as Real Context (mobot_54_phases_prompt.md:1951-1995)", () => {
+    const fixedNow = 1_793_000_000_000; // Deterministic test epoch
+
+    beforeEach(() => {
+      clearCachedDeviceFix();
+    });
+
+    afterEach(() => {
+      clearCachedDeviceFix();
+    });
+
+    // ── 1. Freshness & Invariant: 15-minute boundary ──
+    describe("Freshness & 15-Minute Expiry Policy", () => {
+      it("resolves fresh hardware fix (age <= 15 min) as AVAILABLE with full coordinates", async () => {
+        const fixTimestamp = fixedNow - 5 * 60 * 1000; // 5 minutes old
+        const res = await resolveLocationContext({
+          referenceTimeMs: fixedNow,
+          customDataDir: tempDir,
+          mockProvider: async () => ({
+            permissionGranted: true,
+            rawCoordinates: { latitude: 37.7749, longitude: -122.4194, accuracyMeters: 12 },
+            timestampMs: fixTimestamp,
+            city: "San Francisco",
+          }),
+        });
+
+        expect(res.status).toBe("AVAILABLE");
+        expect(res.location).toBeDefined();
+        expect(res.location?.latitude).toBe(37.7749);
+        expect(res.location?.longitude).toBe(-122.4194);
+        expect(res.location?.accuracyMeters).toBe(12);
+        expect(res.location?.city).toBe("San Francisco");
+        expect(res.location?.provenance).toBe("DEVICE_LIVE");
+        expect(res.location?.timestampMs).toBe(fixTimestamp);
+      });
+
+      it("marks fix at exactly 15 minutes as AVAILABLE, but older than 15 minutes as STALE", async () => {
+        // Exactly at 15 minutes (900,000 ms)
+        const boundaryTimestamp = fixedNow - LOCATION_FRESHNESS_TTL_MS;
+        const resBoundary = await resolveLocationContext({
+          referenceTimeMs: fixedNow,
+          customDataDir: tempDir,
+          mockProvider: async () => ({
+            permissionGranted: true,
+            rawCoordinates: { latitude: 37.7749, longitude: -122.4194, accuracyMeters: 10 },
+            timestampMs: boundaryTimestamp,
+          }),
+        });
+        expect(resBoundary.status).toBe("AVAILABLE");
+
+        // 1 millisecond past 15 minutes (900,001 ms)
+        const expiredTimestamp = fixedNow - (LOCATION_FRESHNESS_TTL_MS + 1);
+        const resExpired = await resolveLocationContext({
+          referenceTimeMs: fixedNow,
+          customDataDir: tempDir,
+          mockProvider: async () => ({
+            permissionGranted: true,
+            rawCoordinates: { latitude: 37.7749, longitude: -122.4194, accuracyMeters: 10 },
+            timestampMs: expiredTimestamp,
+          }),
+        });
+        expect(resExpired.status).toBe("STALE");
+        expect(resExpired.location).toBeDefined();
+        expect(resExpired.location?.timestampMs).toBe(expiredTimestamp);
+        expect(resExpired.policyNotice).toContain("older than 15 minutes");
+      });
+
+      it("fails safely on invalid, zero, or future-dated timestamps", async () => {
+        // Future timestamp (> now + 60s)
+        const futureTimestamp = fixedNow + 5 * 60 * 1000;
+        const resFuture = await resolveLocationContext({
+          referenceTimeMs: fixedNow,
+          customDataDir: tempDir,
+          mockProvider: async () => ({
+            permissionGranted: true,
+            rawCoordinates: { latitude: 37.7749, longitude: -122.4194 },
+            timestampMs: futureTimestamp,
+          }),
+        });
+        expect(resFuture.status).toBe("UNKNOWN");
+        expect(resFuture.policyNotice).toContain("Future-dated");
+
+        // Invalid NaN timestamp
+        const resNaN = await resolveLocationContext({
+          referenceTimeMs: fixedNow,
+          customDataDir: tempDir,
+          mockProvider: async () => ({
+            permissionGranted: true,
+            rawCoordinates: { latitude: 37.7749, longitude: -122.4194 },
+            timestampMs: NaN,
+          }),
+        });
+        expect(resNaN.status).toBe("UNKNOWN");
+      });
+    });
+
+    // ── 2. Disabled-by-User Invariant ──
+    describe("Disabled-by-User Invariant", () => {
+      it("returns DISABLED_BY_USER immediately and NEVER calls provider when setting is disabled", async () => {
+        // Disable location in settings
+        setLocationContextEnabled(false, tempDir);
+        expect(isLocationContextDisabled(tempDir)).toBe(true);
+
+        let providerCalled = false;
+        const res = await resolveLocationContext({
+          customDataDir: tempDir,
+          referenceTimeMs: fixedNow,
+          mockProvider: async () => {
+            providerCalled = true;
+            return {
+              permissionGranted: true,
+              rawCoordinates: { latitude: 40.7128, longitude: -74.006 },
+            };
+          },
+        });
+
+        expect(res.status).toBe("DISABLED_BY_USER");
+        expect(res.location).toBeUndefined();
+        expect(providerCalled).toBe(false); // CRITICAL: Never attempted sensor read
+        expect(res.policyNotice).toContain("disabled by user");
+      });
+
+      it("does not allow cached location to bypass disabled setting", async () => {
+        // Populate cache with fresh fix
+        setCachedDeviceFix({
+          latitude: 37.7749,
+          longitude: -122.4194,
+          accuracyMeters: 5,
+          timestampMs: fixedNow - 1000,
+          provenance: "DEVICE_LIVE",
+        });
+
+        // Now user disables location context
+        setLocationContextEnabled(false, tempDir);
+
+        const res = await resolveLocationContext({
+          customDataDir: tempDir,
+          referenceTimeMs: fixedNow,
+        });
+
+        expect(res.status).toBe("DISABLED_BY_USER");
+        expect(res.location).toBeUndefined();
+      });
+
+      it("re-enabling location setting allows live resolution subject to permissions", async () => {
+        setLocationContextEnabled(false, tempDir);
+        const disabledRes = await resolveLocationContext({ customDataDir: tempDir });
+        expect(disabledRes.status).toBe("DISABLED_BY_USER");
+
+        // Re-enable
+        setLocationContextEnabled(true, tempDir);
+        expect(isLocationContextDisabled(tempDir)).toBe(false);
+
+        const enabledRes = await resolveLocationContext({
+          customDataDir: tempDir,
+          referenceTimeMs: fixedNow,
+          mockProvider: async () => ({
+            permissionGranted: true,
+            rawCoordinates: { latitude: 51.5074, longitude: -0.1278, accuracyMeters: 15 },
+            timestampMs: fixedNow,
+          }),
+        });
+
+        expect(enabledRes.status).toBe("AVAILABLE");
+        expect(enabledRes.location?.latitude).toBe(51.5074);
+      });
+    });
+
+    // ── 3. Permission Revocation & Failure Handling ──
+    describe("Permission Denial & ERR_LOCATION_PERMISSION_REVOKED", () => {
+      it("returns PERMISSION_DENIED when Android OS reports permission missing or revoked", async () => {
+        const res = await resolveLocationContext({
+          customDataDir: tempDir,
+          referenceTimeMs: fixedNow,
+          mockProvider: async () => ({
+            permissionGranted: false,
+          }),
+        });
+
+        expect(res.status).toBe("PERMISSION_DENIED");
+        expect(res.location).toBeUndefined();
+        expect(res.policyNotice).toContain("ERR_LOCATION_PERMISSION_REVOKED");
+      });
+
+      it("does not return cached live fix as AVAILABLE when permission is revoked", async () => {
+        // Cache had a fix
+        setCachedDeviceFix({
+          latitude: 37.7749,
+          longitude: -122.4194,
+          accuracyMeters: 5,
+          timestampMs: fixedNow - 1000,
+          provenance: "DEVICE_LIVE",
+        });
+
+        // But permission check fails (e.g. user revoked in Android settings)
+        const res = await resolveLocationContext({
+          customDataDir: tempDir,
+          referenceTimeMs: fixedNow,
+          mockProvider: async () => ({
+            permissionGranted: false,
+          }),
+        });
+
+        expect(res.status).toBe("PERMISSION_DENIED");
+        expect(res.location).toBeUndefined();
+      });
+    });
+
+    // ── 4. Provenance & Privacy Invariants ──
+    describe("Provenance & Privacy Invariants", () => {
+      it("preserves DEVICE_LIVE provenance and rejects synthetic fixture injection", async () => {
+        const syntheticRes = await resolveLocationContext({
+          customDataDir: tempDir,
+          referenceTimeMs: fixedNow,
+          mockProvider: async () => ({
+            permissionGranted: true,
+            rawCoordinates: { latitude: 37.7749, longitude: -122.4194 },
+            isSyntheticOrFixture: true, // Malicious or synthetic test payload
+          }),
+        });
+
+        expect(syntheticRes.status).toBe("UNKNOWN");
+        expect(syntheticRes.policyNotice).toContain("Synthetic or fixture location rejected");
+      });
+
+      it("never persists live GPS coordinates into long-term user profile without command", async () => {
+        // Resolving live GPS location
+        await resolveLocationContext({
+          customDataDir: tempDir,
+          referenceTimeMs: fixedNow,
+          mockProvider: async () => ({
+            permissionGranted: true,
+            rawCoordinates: { latitude: 48.8566, longitude: 2.3522, accuracyMeters: 8 },
+            timestampMs: fixedNow,
+          }),
+        });
+
+        // Verify user-location.json was NOT created or modified by live GPS read
+        const saved = loadUserLocation(tempDir);
+        expect(saved).toBeNull();
+      });
+
+      it("generates correct system prompt block matching resolution status", () => {
+        const disabledBlock = formatLocationResolutionPromptBlock({
+          status: "DISABLED_BY_USER",
+          policyNotice: "Disabled by user",
+        });
+        expect(disabledBlock).toContain("Status: DISABLED_BY_USER");
+        expect(disabledBlock).toContain("MANDATORY INVARIANT");
+
+        const deniedBlock = formatLocationResolutionPromptBlock({
+          status: "PERMISSION_DENIED",
+          policyNotice: "Permission revoked",
+        });
+        expect(deniedBlock).toContain("Status: PERMISSION_DENIED");
+
+        const staleBlock = formatLocationResolutionPromptBlock({
+          status: "STALE",
+          location: {
+            latitude: 37.7749,
+            longitude: -122.4194,
+            accuracyMeters: 10,
+            provenance: "DEVICE_LIVE",
+            timestampMs: fixedNow - 20 * 60 * 1000,
+          },
+        });
+        expect(staleBlock).toContain("Status: STALE");
+        expect(staleBlock).toContain("37.7749");
+      });
     });
   });
 });

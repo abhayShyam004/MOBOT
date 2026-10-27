@@ -11,7 +11,27 @@
     "adb",
     "my phone",
     "mobile app",
-    "on the phone"
+    "on the phone",
+    "phone control",
+    "open",
+    "launch",
+    "calculator",
+    "discord",
+    "whatsapp",
+    "tap",
+    "type",
+    "screenshot",
+    "app",
+    "apps",
+    "ok",
+    "enter",
+    "done",
+    "unlocked",
+    "proceed",
+    "continue",
+    "resume",
+    "go ahead",
+    "yes"
   ],
   "requiredCapabilities": ["phoneMcp"]
 }

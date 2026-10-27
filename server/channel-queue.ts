@@ -29,11 +29,14 @@ const queues = new Map<string, ChannelQueueEntry>(); // threadId -> waiting send
 export function restoreChannelMessages(): void {
   queues.clear();
   for (const row of chatFollowups("channel")) {
-    if (row.status !== "pending") continue;
+    if (row.status !== "pending" && row.status !== "dispatching" && row.status !== "interrupted") continue;
     const entry = queues.get(row.threadId) ?? { groupId: row.ownerId, items: [] };
     if (entry.groupId !== row.ownerId) throw new Error("queued task belongs to another channel");
     entry.items.push({ ...row.payload, id: row.id, mode: row.payload.mode ?? "chat" });
     queues.set(row.threadId, entry);
+    if (row.status !== "pending") {
+      settleChatFollowups([row.id], "pending");
+    }
   }
 }
 
@@ -54,6 +57,12 @@ export function queueChannelMessage(
 ): QueuedChannelMessage {
   const entry = queues.get(threadId) ?? { groupId, items: [] };
   if (entry.groupId !== groupId) throw new Error("queued task belongs to another channel");
+  if (options.sendId) {
+    const existing = entry.items.find((item) => item.sendId === options.sendId);
+    if (existing) {
+      return { id: existing.id };
+    }
+  }
   const item: ChannelQueueItem = {
     id: newId(),
     text,

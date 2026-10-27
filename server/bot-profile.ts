@@ -7,6 +7,22 @@ import { MAX_MCP_SERVERS, mcpServerNameError } from "./mcp-registry.ts";
 
 import type { BotRecord } from "./store.ts";
 
+export {
+  type RecommendationOption,
+  type RecommendationPayload,
+  type RecommendationRequestClass,
+  type HedgingDetectionResult,
+  ERR_EXCESSIVE_HEDGING,
+  ExcessiveHedgingError,
+  classifyRecommendationRequest,
+  detectExcessiveHedging,
+  validateRecommendationPayload,
+  evaluateRecommendation,
+  recoverFromExcessiveHedging,
+  GENERIC_DISCLAIMER_PATTERNS,
+  CONCLUSION_INDICATOR_PATTERNS,
+} from "./recommendation.ts";
+
 /** A name or title is quoted inside prompts and cards as one line — a
  * roster entry, a "Name: …" speaker line, the bracketed provenance note.
  * Text that can break out of that line (a newline, a control byte, the

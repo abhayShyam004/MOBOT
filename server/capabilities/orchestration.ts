@@ -24,6 +24,8 @@ import {
   evaluateActionOutcome,
   isConsequentialAction,
   ERR_EMPTY_OR_JUNK_PAYLOAD,
+  ERR_CONFIRMATION_REQUIRED,
+  ERR_CONFIRMATION_REJECTED,
 } from "./safety-policy.ts";
 import {
   type FailureClassification,
@@ -40,6 +42,7 @@ import {
   type ExecutionModality,
   type CapabilityMatchRequest,
   type CapabilityMatchResolution,
+  type ActionConfirmationGrant,
   ERR_NO_CAPABLE_TOOL,
 } from "./types.ts";
 
@@ -300,6 +303,8 @@ export interface AgentLoopStepPlan {
   operation?: string;
   params?: Record<string, unknown>;
   intentExplanation?: string;
+  confirmationGrant?: ActionConfirmationGrant;
+  confirmationToken?: string;
 }
 
 export interface AgentLoopStepResult {
@@ -334,6 +339,7 @@ export interface AgentExecutionLoopOptions {
   goalId?: string;
   botId?: string;
   threadId?: string;
+  approvalMode?: 'ask' | 'edits' | 'auto' | 'full';
   objective: string;
   canonicalGoal?: CanonicalGoalRecord;
   driftThreshold?: number;
@@ -357,6 +363,7 @@ export class AgentExecutionLoop {
   private readonly state: ExecutionLoopState;
   private readonly botId?: string;
   private readonly threadId?: string;
+  private readonly approvalMode: 'ask' | 'edits' | 'auto' | 'full';
   private readonly objective: string;
   private readonly canonicalGoal?: CanonicalGoalRecord;
   private readonly driftThreshold: number;
@@ -378,6 +385,7 @@ export class AgentExecutionLoop {
     this.driftThreshold = typeof options.driftThreshold === "number" ? options.driftThreshold : GOAL_DRIFT_THRESHOLD;
     this.botId = options.botId || options.canonicalGoal?.botId;
     this.threadId = options.threadId;
+    this.approvalMode = options.approvalMode || 'ask';
     this.availableFallbacks = options.fallbacks ? [...options.fallbacks] : [];
     // Invariant: re-anchor on formalObjective if canonicalGoal provided
     this.objective = options.canonicalGoal?.formalObjective || options.objective;
@@ -613,8 +621,33 @@ export class AgentExecutionLoop {
             plan.capabilityId,
             plan.operation,
             plan.params || {},
-            { signal, botId: this.botId }
+            {
+              signal,
+              botId: this.botId,
+              threadId: this.threadId,
+              approvalMode: this.approvalMode,
+              confirmationGrant: plan.confirmationGrant,
+              confirmationToken: plan.confirmationToken,
+            }
           );
+
+          if (capResult.error?.code === ERR_CONFIRMATION_REQUIRED) {
+            this.bus.emit("AGENT_LOOP_CONFIRMATION_REQUIRED", {
+              goalId: this.state.goalId,
+              turnNumber: this.state.turnNumber,
+              capabilityId: plan.capabilityId,
+              operation: plan.operation,
+              details: capResult.error.details,
+            });
+          } else if (capResult.error?.code === ERR_CONFIRMATION_REJECTED) {
+            this.bus.emit("AGENT_LOOP_CONFIRMATION_REJECTED", {
+              goalId: this.state.goalId,
+              turnNumber: this.state.turnNumber,
+              capabilityId: plan.capabilityId,
+              operation: plan.operation,
+              details: capResult.error.details,
+            });
+          }
 
           // Anti-pattern protection: raw HTTP 200 is not proof of success
           let verifiedSuccess = capResult.success;
@@ -624,7 +657,7 @@ export class AgentExecutionLoop {
               ? JSON.stringify(capResult.data).slice(0, 500)
               : "Capability execution succeeded";
           } else {
-            summary = capResult.error?.message || "Capability execution failed";
+            summary = capResult.error ? `${capResult.error.code}: ${capResult.error.message}` : "Capability execution failed";
             verifiedSuccess = false;
           }
 
@@ -633,7 +666,7 @@ export class AgentExecutionLoop {
             success: verifiedSuccess,
             rawOutput: capResult.data,
             resultSummary: summary,
-            error: capResult.error?.message,
+            error: capResult.error ? `${capResult.error.code}: ${capResult.error.message}` : undefined,
             metadata: typeof capResult.data === "object" && capResult.data ? (capResult.data as Record<string, unknown>) : undefined,
           };
         }

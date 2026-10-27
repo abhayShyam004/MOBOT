@@ -1,13 +1,18 @@
 package com.openmausbot.companion.host
 
 import android.Manifest
+import android.app.KeyguardManager
 import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.location.Location
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Build
 import android.os.CancellationSignal
+import android.os.PowerManager
+import android.provider.Settings
 import android.util.Base64
 import android.util.Log
 import androidx.core.content.ContextCompat
@@ -52,6 +57,73 @@ class PhoneDriverServer private constructor(
     private val stopping = AtomicBoolean(false)
     private val diagLog = ConcurrentLinkedDeque<String>()
 
+    // Centralized Background Execution & WakeLock Management (Official Phase 20)
+    private var executionWakeLock: PowerManager.WakeLock? = null
+    private var currentExecutionTaskId: String? = null
+    private var currentExecutionSessionId: String? = null
+    private var lastExecutionHeartbeatMs: Long = 0L
+
+    @Synchronized
+    private fun acquireExecutionWakeLock(taskId: String, sessionId: String, timeoutMs: Long = 10 * 60 * 1000L): JSONObject {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+            ?: return err("PowerManager unavailable on device", "ERR_POWER_MANAGER_UNAVAILABLE")
+        if (executionWakeLock == null) {
+            executionWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MOBOT:BackgroundExecutionWakeLock").apply {
+                setReferenceCounted(false)
+            }
+        }
+        try {
+            executionWakeLock?.acquire(timeoutMs)
+            currentExecutionTaskId = taskId
+            currentExecutionSessionId = sessionId
+            lastExecutionHeartbeatMs = System.currentTimeMillis()
+            log("Acquired BackgroundExecution WakeLock for task: $taskId, session: $sessionId (timeout: ${timeoutMs}ms)")
+        } catch (e: Exception) {
+            log("Failed to acquire execution WakeLock: ${e.message}")
+            return err("Failed to acquire wake lock: ${e.message}", "ERR_WAKELOCK_FAILED")
+        }
+        return getBackgroundExecutionState()
+    }
+
+    @Synchronized
+    private fun releaseExecutionWakeLock(taskId: String? = null): JSONObject {
+        if (taskId != null && currentExecutionTaskId != null && taskId != currentExecutionTaskId) {
+            log("Ignoring WakeLock release request for mismatched taskId: $taskId (current: $currentExecutionTaskId)")
+        } else {
+            if (executionWakeLock?.isHeld == true) {
+                try {
+                    executionWakeLock?.release()
+                    log("Released BackgroundExecution WakeLock for task: $currentExecutionTaskId")
+                } catch (e: Exception) {
+                    log("Error releasing WakeLock: ${e.message}")
+                }
+            }
+            currentExecutionTaskId = null
+            currentExecutionSessionId = null
+        }
+        return getBackgroundExecutionState()
+    }
+
+    private fun getBackgroundExecutionState(): JSONObject {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val isWhitelisted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && pm != null) {
+            pm.isIgnoringBatteryOptimizations(context.packageName)
+        } else {
+            true
+        }
+        val held = executionWakeLock?.isHeld == true
+        val pid = android.os.Process.myPid()
+        return JSONObject().apply {
+            put("ok", true)
+            put("sessionId", currentExecutionSessionId ?: "")
+            put("activeTaskId", currentExecutionTaskId ?: "")
+            put("foregroundServicePid", pid)
+            put("wakelockHeld", held)
+            put("batteryOptimizationWhitelisted", isWhitelisted)
+            put("executionHeartbeatMs", if (held && lastExecutionHeartbeatMs > 0) lastExecutionHeartbeatMs else System.currentTimeMillis())
+        }
+    }
+
     private fun log(line: String) {
         diagLog.addLast(line)
         while (diagLog.size > 300) diagLog.pollFirst()
@@ -60,6 +132,7 @@ class PhoneDriverServer private constructor(
 
     fun stopServer() {
         stopping.set(true)
+        releaseExecutionWakeLock()
         stop()
     }
 
@@ -77,6 +150,30 @@ class PhoneDriverServer private constructor(
             put("error", message)
             put("code", code)
         }
+    }
+
+    private fun isBitmapBlankOrBlack(bitmap: Bitmap): Boolean {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= 0 || height <= 0) return true
+        val sampleStepX = maxOf(1, width / 20)
+        val sampleStepY = maxOf(1, height / 20)
+        var allZero = true
+        var maxLuminance = 0
+        for (y in 0 until height step sampleStepY) {
+            for (x in 0 until width step sampleStepX) {
+                val pixel = bitmap.getPixel(x, y)
+                val r = (pixel shr 16) and 0xff
+                val g = (pixel shr 8) and 0xff
+                val b = pixel and 0xff
+                val lum = (r * 299 + g * 587 + b * 114) / 1000
+                if (lum > maxLuminance) maxLuminance = lum
+                if (r != 0 || g != 0 || b != 0) {
+                    allZero = false
+                }
+            }
+        }
+        return allZero || maxLuminance < 2
     }
 
     private fun parseRequestBody(session: IHTTPSession): Pair<JSONObject?, String?> {
@@ -131,11 +228,30 @@ class PhoneDriverServer private constructor(
                 method == Method.POST && uri == "/key" -> handleKey(safeBody)
                 method == Method.POST && uri == "/screenshot" -> handleScreenshot(safeBody)
                 method == Method.POST && (uri == "/open_app" || uri == "/launch") -> handleOpenApp(safeBody)
+                method == Method.POST && (uri == "/restore_host" || uri == "/restore_companion") -> handleRestoreHost(safeBody)
+                method == Method.POST && (uri == "/setup_permission" || uri == "/open_settings") -> handleSetupPermission(safeBody)
+                method == Method.GET && (uri == "/apps" || uri == "/launchable_apps") -> handleListApps()
                 method == Method.POST && uri == "/reach/schedule" -> handleReachSchedule(safeBody)
                 method == Method.POST && uri == "/reach/cancel" -> handleReachCancel(safeBody)
                 method == Method.POST && uri == "/reach/snooze" -> handleReachSnooze(safeBody)
                 method == Method.GET && uri == "/reach/events" -> handleReachList()
                 method == Method.GET && uri == "/reach/status" -> handleReachStatus()
+                // Official Phase 20: Background Execution & WakeLock Control
+                method == Method.GET && uri == "/background/state" -> reply(Response.Status.OK, getBackgroundExecutionState())
+                method == Method.POST && uri == "/background/acquire_wakelock" -> {
+                    val taskId = safeBody.optString("taskId", "")
+                    val sessionId = safeBody.optString("sessionId", "")
+                    val timeoutMs = safeBody.optLong("timeoutMs", 600000L)
+                    reply(Response.Status.OK, acquireExecutionWakeLock(taskId, sessionId, timeoutMs))
+                }
+                method == Method.POST && uri == "/background/release_wakelock" -> {
+                    val taskId = safeBody.optString("taskId", "").takeIf { it.isNotEmpty() }
+                    reply(Response.Status.OK, releaseExecutionWakeLock(taskId))
+                }
+                method == Method.POST && uri == "/background/heartbeat" -> {
+                    lastExecutionHeartbeatMs = System.currentTimeMillis()
+                    reply(Response.Status.OK, getBackgroundExecutionState())
+                }
                 else -> reply(Response.Status.NOT_FOUND, err("Endpoint not found: ${session.method} ${session.uri}", "ERR_NOT_FOUND"))
             }
         } catch (e: Exception) {
@@ -147,11 +263,17 @@ class PhoneDriverServer private constructor(
     private fun handleStatus(): Response {
         val ready = CompanionAccessibilityService.isReady()
         val fg = CompanionAccessibilityService.getForegroundPackage()
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        val isKeyguardLocked = km?.isKeyguardLocked == true
+        val isScreenInteractive = pm?.isInteractive == true
         val json = JSONObject().apply {
             put("ok", true)
             put("connected", ready)
             put("accessibilityEnabled", ready)
             put("foregroundPackage", fg)
+            put("keyguardLocked", isKeyguardLocked)
+            put("screenInteractive", isScreenInteractive)
             put("version", "1.0.0")
             put(
                 "reason",
@@ -169,15 +291,62 @@ class PhoneDriverServer private constructor(
                     put("open_app")
                     put("take_screenshot")
                     put("get_location")
+                    put("setup_permission")
+                    put("list_apps")
+                    put("restore_host")
                     put("reach_schedule")
                     put("reach_cancel")
                     put("reach_snooze")
                     put("reach_events")
                     put("reach_status")
+                    put("background_execution")
+                    put("acquire_wakelock")
+                    put("release_wakelock")
                 }
             )
         }
         return reply(Response.Status.OK, json)
+    }
+
+    private fun handleRestoreHost(body: JSONObject): Response {
+        return try {
+            val pm = context.packageManager
+            val intent = pm.getLaunchIntentForPackage(context.packageName)?.apply {
+                flags = (flags and Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED.inv()) or
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            } ?: return reply(Response.Status.INTERNAL_ERROR, err("Launch intent unavailable for ${context.packageName}", "RESTORE_FAILED"))
+
+            val targetContext = CompanionAccessibilityService.instance ?: context
+            targetContext.startActivity(intent)
+
+            var settled = false
+            var currentFg = CompanionAccessibilityService.getForegroundPackage()
+            val start = System.currentTimeMillis()
+            while (System.currentTimeMillis() - start < 3000) {
+                currentFg = CompanionAccessibilityService.getForegroundPackage()
+                if (currentFg == context.packageName || currentFg.startsWith("${context.packageName}.")) {
+                    settled = true
+                    break
+                }
+                try {
+                    Thread.sleep(150)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+
+            reply(Response.Status.OK, JSONObject().apply {
+                put("ok", true)
+                put("restored", settled)
+                put("foregroundPackage", currentFg)
+                put("packageName", context.packageName)
+                put("message", if (settled) "Restored ${context.packageName} to foreground" else "Restoration dispatched, foreground is $currentFg")
+            })
+        } catch (e: Exception) {
+            reply(Response.Status.INTERNAL_ERROR, err("Failed to restore host: ${e.message}", "ACTION_FAILED"))
+        }
     }
 
     private fun handleScreen(): Response {
@@ -197,6 +366,21 @@ class PhoneDriverServer private constructor(
             return reply(
                 Response.Status.OK,
                 err("ERR_ACCESSIBILITY_DISABLED: Accessibility service is not enabled in Android Settings.", "ACCESSIBILITY_DISABLED")
+            )
+        }
+
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        if (pm?.isInteractive == false || km?.isKeyguardLocked == true) {
+            return reply(
+                Response.Status.OK,
+                JSONObject().apply {
+                    put("ok", false)
+                    put("code", "ERR_SCREEN_LOCKED")
+                    put("error", "ERR_SCREEN_LOCKED: Device screen is locked or turned off. Interactive UI gestures require the screen to be awake and unlocked.")
+                    put("keyguardLocked", km?.isKeyguardLocked == true)
+                    put("screenInteractive", pm?.isInteractive == true)
+                }
             )
         }
 
@@ -282,6 +466,21 @@ class PhoneDriverServer private constructor(
             )
         }
 
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        if (pm?.isInteractive == false || km?.isKeyguardLocked == true) {
+            return reply(
+                Response.Status.OK,
+                JSONObject().apply {
+                    put("ok", false)
+                    put("code", "ERR_SCREEN_LOCKED")
+                    put("error", "ERR_SCREEN_LOCKED: Device screen is locked or turned off. Text injection requires the screen to be awake and unlocked.")
+                    put("keyguardLocked", km?.isKeyguardLocked == true)
+                    put("screenInteractive", pm?.isInteractive == true)
+                }
+            )
+        }
+
         val text = body.optString("text", "")
         if (text.isEmpty()) {
             return reply(Response.Status.BAD_REQUEST, err("text parameter is required", "INVALID_INPUT"))
@@ -303,6 +502,21 @@ class PhoneDriverServer private constructor(
             return reply(
                 Response.Status.OK,
                 err("ERR_ACCESSIBILITY_DISABLED: Accessibility service is not enabled in Android Settings.", "ACCESSIBILITY_DISABLED")
+            )
+        }
+
+        val km = context.getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val pm = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+        if (pm?.isInteractive == false || km?.isKeyguardLocked == true) {
+            return reply(
+                Response.Status.OK,
+                JSONObject().apply {
+                    put("ok", false)
+                    put("code", "ERR_SCREEN_LOCKED")
+                    put("error", "ERR_SCREEN_LOCKED: Device screen is locked or turned off. Scroll gestures require the screen to be awake and unlocked.")
+                    put("keyguardLocked", km?.isKeyguardLocked == true)
+                    put("screenInteractive", pm?.isInteractive == true)
+                }
             )
         }
 
@@ -369,6 +583,13 @@ class PhoneDriverServer private constructor(
         }
 
         val bmp = capturedBitmap!!
+        if (isBitmapBlankOrBlack(bmp)) {
+            bmp.recycle()
+            return reply(
+                Response.Status.OK,
+                err("ERR_SCREEN_CAPTURE_BLANK: Screen capture produced an all-black or blank frame", "ERR_SCREEN_CAPTURE_BLANK")
+            )
+        }
         return try {
             val screenshotsDir = File(context.cacheDir, "screenshots").apply { mkdirs() }
             // Prune old screenshots to strictly bound storage: retain at most 10 recent captures
@@ -390,11 +611,9 @@ class PhoneDriverServer private constructor(
                 put("path", screenshotFile.absolutePath)
                 put("width", bmp.width)
                 put("height", bmp.height)
-                if (body.optBoolean("includeBase64", false)) {
-                    val stream = ByteArrayOutputStream()
-                    bmp.compress(Bitmap.CompressFormat.PNG, 85, stream)
-                    put("base64", Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP))
-                }
+                val stream = ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.PNG, 85, stream)
+                put("base64", Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP))
             }
             reply(Response.Status.OK, json)
         } catch (e: Exception) {
@@ -404,17 +623,96 @@ class PhoneDriverServer private constructor(
         }
     }
 
-    private fun handleOpenApp(body: JSONObject): Response {
-        val pkg = body.optString("packageName", "").trim()
-        if (pkg.isEmpty()) {
-            return reply(Response.Status.BAD_REQUEST, err("packageName parameter is required", "INVALID_INPUT"))
+    private fun resolveTargetPackage(input: String): String {
+        val trimmed = input.trim()
+        val pm = context.packageManager
+        // 1. If exact package name has a launch intent, return it immediately
+        if (pm.getLaunchIntentForPackage(trimmed) != null) {
+            return trimmed
         }
+        val lower = trimmed.lowercase()
+        val normalizedInput = lower.replace(Regex("[^a-z0-9]"), "")
+
+        // 2. Dynamic Discovery: Query all installed launcher activities on the device
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val activities = pm.queryIntentActivities(launcherIntent, 0)
+
+        // Pass 2a: Exact case-insensitive match on app label
+        for (info in activities) {
+            val label = info.loadLabel(pm)?.toString()?.trim() ?: ""
+            if (label.equals(trimmed, ignoreCase = true)) {
+                return info.activityInfo.packageName
+            }
+        }
+
+        // Pass 2b: Normalized alphanumeric match on app label (e.g. "playstore" -> "Play Store", "myfiles" -> "My Files")
+        if (normalizedInput.isNotEmpty()) {
+            for (info in activities) {
+                val label = info.loadLabel(pm)?.toString() ?: ""
+                val normLabel = label.lowercase().replace(Regex("[^a-z0-9]"), "")
+                if (normLabel == normalizedInput) {
+                    return info.activityInfo.packageName
+                }
+            }
+        }
+
+        // Pass 2c: App label starts with or contains requested name as word
+        for (info in activities) {
+            val label = info.loadLabel(pm)?.toString()?.lowercase() ?: ""
+            if (label.startsWith(lower) || label.split(Regex("\\s+")).any { it == lower }) {
+                return info.activityInfo.packageName
+            }
+        }
+
+        // Pass 2d: Package name suffix or subcomponent matches (e.g. "chrome" -> "com.android.chrome", "deskclock" -> "com.google.android.deskclock")
+        for (info in activities) {
+            val pkgName = info.activityInfo.packageName.lowercase()
+            val suffix = pkgName.substringAfterLast('.')
+            if (suffix == lower || suffix == normalizedInput) {
+                return info.activityInfo.packageName
+            }
+        }
+
+        // Pass 2e: Package name contains requested query
+        for (info in activities) {
+            val pkgName = info.activityInfo.packageName.lowercase()
+            if (pkgName.contains(lower) || (normalizedInput.length >= 4 && pkgName.contains(normalizedInput))) {
+                return info.activityInfo.packageName
+            }
+        }
+
+        // 3. Optional generic alias fallback for common terms
+        val genericAliases = mapOf(
+            "browser" to "com.android.chrome",
+            "internet" to "com.android.chrome",
+            "email" to "com.google.android.gm",
+            "mail" to "com.google.android.gm",
+            "sms" to "com.google.android.apps.messaging",
+            "texting" to "com.google.android.apps.messaging",
+            "store" to "com.android.vending",
+            "settings" to "com.android.settings"
+        )
+        val aliasTarget = genericAliases[lower] ?: genericAliases[normalizedInput]
+        if (aliasTarget != null && pm.getLaunchIntentForPackage(aliasTarget) != null) {
+            return aliasTarget
+        }
+
+        return trimmed
+    }
+
+    private fun handleOpenApp(body: JSONObject): Response {
+        val rawInput = body.optString("packageName", "").ifEmpty { body.optString("name", "") }.trim()
+        if (rawInput.isEmpty()) {
+            return reply(Response.Status.BAD_REQUEST, err("packageName or name parameter is required", "INVALID_INPUT"))
+        }
+
+        val pkg = resolveTargetPackage(rawInput)
 
         val launched = CompanionAccessibilityService.launchApp(context, pkg)
         if (!launched) {
             return reply(
                 Response.Status.OK,
-                err("APP_NOT_LAUNCHABLE: Could not resolve launch intent for package '$pkg'", "APP_NOT_LAUNCHABLE")
+                err("APP_NOT_LAUNCHABLE: Could not resolve launch intent for application '$rawInput' (resolved package: '$pkg')", "APP_NOT_LAUNCHABLE")
             )
         }
 
@@ -435,15 +733,90 @@ class PhoneDriverServer private constructor(
             }
         }
 
+        val accessibilityReady = CompanionAccessibilityService.isReady()
+        if (!settled) {
+            if (accessibilityReady) {
+                // Accessibility is active, but target package never became foreground
+                val json = JSONObject().apply {
+                    put("ok", false)
+                    put("code", "ERR_APP_LAUNCH_NOT_VERIFIED")
+                    put("error", "ERR_APP_LAUNCH_NOT_VERIFIED: Target application '$pkg' did not become foreground (current: '$currentFg')")
+                    put("launched", false)
+                    put("packageName", pkg)
+                    put("settled", false)
+                    put("foregroundPackage", currentFg)
+                }
+                return reply(Response.Status.OK, json)
+            } else {
+                // Launch intent was dispatched, but foreground state cannot be confirmed because Accessibility Service is disabled
+                val json = JSONObject().apply {
+                    put("ok", true)
+                    put("launched", true)
+                    put("packageName", pkg)
+                    put("settled", false)
+                    put("foregroundPackage", "unknown")
+                    put("accessibilityEnabled", false)
+                    put("message", "Application '$pkg' launch intent was dispatched, but foreground state could not be verified because Accessibility Service is not enabled")
+                }
+                return reply(Response.Status.OK, json)
+            }
+        }
+
         val json = JSONObject().apply {
             put("ok", true)
             put("launched", true)
             put("packageName", pkg)
-            put("settled", settled)
+            put("settled", true)
             put("foregroundPackage", currentFg)
-            put("message", "Application '$pkg' launched successfully")
+            put("message", "Application '$pkg' launched and confirmed in foreground")
         }
         return reply(Response.Status.OK, json)
+    }
+
+    private fun handleSetupPermission(body: JSONObject): Response {
+        val type = body.optString("type", "accessibility").lowercase()
+        return try {
+            val intent = when (type) {
+                "accessibility" -> Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                "app_settings" -> Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+                "notifications" -> Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                else -> Intent(Settings.ACTION_SETTINGS)
+            }.apply {
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            val targetContext = CompanionAccessibilityService.instance ?: context
+            targetContext.startActivity(intent)
+            reply(Response.Status.OK, JSONObject().apply {
+                put("ok", true)
+                put("type", type)
+                put("opened", true)
+                put("message", "Opened $type settings on device")
+            })
+        } catch (e: Exception) {
+            reply(Response.Status.INTERNAL_ERROR, err("Failed to open settings: ${e.message}", "ACTION_FAILED"))
+        }
+    }
+
+    private fun handleListApps(): Response {
+        val pm = context.packageManager
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val resolveInfos = pm.queryIntentActivities(intent, 0)
+        val appsArray = JSONArray()
+        for (info in resolveInfos) {
+            val label = info.loadLabel(pm)?.toString() ?: ""
+            val packageName = info.activityInfo.packageName
+            val activityName = info.activityInfo.name
+            appsArray.put(JSONObject().apply {
+                put("name", label)
+                put("packageName", packageName)
+                put("activityName", activityName)
+            })
+        }
+        return reply(Response.Status.OK, JSONObject().apply {
+            put("ok", true)
+            put("count", appsArray.length())
+            put("apps", appsArray)
+        })
     }
 
     private fun handleLocation(body: JSONObject): Response {
@@ -547,6 +920,7 @@ class PhoneDriverServer private constructor(
         val triggerTimeMs = body.optLong("triggerTimeMs", 0L)
         val snoozeMinutes = body.optInt("snoozeMinutes", 10)
         val recurrence = if (body.has("recurrence") && !body.isNull("recurrence")) body.getString("recurrence") else null
+        val botName = body.optString("botName", "MOBOT").trim().ifEmpty { "MOBOT" }
 
         if (title.isBlank()) {
             return reply(Response.Status.BAD_REQUEST, err("Missing required 'title'", "ERR_INVALID_PARAMS"))
@@ -561,7 +935,8 @@ class PhoneDriverServer private constructor(
             message = message,
             triggerTimeMs = triggerTimeMs,
             snoozeMinutes = snoozeMinutes,
-            recurrence = recurrence
+            recurrence = recurrence,
+            botName = botName
         )
 
         val scheduler = ReachScheduler.getInstance(context)

@@ -320,4 +320,23 @@ class MarkdownTest {
         assertTrue(blocks[4] is MarkdownBlock.Paragraph)
         assertEquals("Done!", (blocks[4] as MarkdownBlock.Paragraph).text)
     }
+
+    @Test
+    fun `rejects raw base64 data URIs and raw image dumps while preserving clean text`() {
+        val rawBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+        val markdown = """
+            Valid synthesized response text before.
+            ![Prohibited Screen](data:image/png;base64,$rawBase64)
+            data:image/png;base64,$rawBase64
+            $rawBase64
+            Valid synthesized response text after.
+        """.trimIndent()
+        val blocks = Markdown.blocks(markdown)
+        assertEquals(2, blocks.size)
+        assertTrue(blocks[0] is MarkdownBlock.Paragraph)
+        assertEquals("Valid synthesized response text before.", (blocks[0] as MarkdownBlock.Paragraph).text)
+        assertTrue(blocks[1] is MarkdownBlock.Paragraph)
+        assertEquals("Valid synthesized response text after.", (blocks[1] as MarkdownBlock.Paragraph).text)
+        assertTrue(blocks.none { it is MarkdownBlock.Image })
+    }
 }

@@ -48,6 +48,7 @@ data class ReachEvent(
     val state: ReachEventState = ReachEventState.SCHEDULED,
     val snoozeMinutes: Int = 10,
     val snoozeCount: Int = 0,
+    val botName: String = "MOBOT",
 ) {
     fun toJson(): JSONObject = JSONObject().apply {
         put("id", id)
@@ -62,6 +63,7 @@ data class ReachEvent(
         put("state", state.name.lowercase())
         put("snoozeMinutes", snoozeMinutes)
         put("snoozeCount", snoozeCount)
+        put("botName", botName)
     }
 
     companion object {
@@ -79,6 +81,7 @@ data class ReachEvent(
                 state = ReachEventState.fromString(json.optString("state", "scheduled")),
                 snoozeMinutes = json.optInt("snoozeMinutes", 10),
                 snoozeCount = json.optInt("snoozeCount", 0),
+                botName = json.optString("botName", "MOBOT").trim().ifEmpty { "MOBOT" },
             )
         }
     }

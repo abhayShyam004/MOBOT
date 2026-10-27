@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
+import { type PersistentAgentJob, sharedPersistentJobManager } from "./tasks.ts";
 
 export type GoalStatus = "active" | "paused" | "completed" | "blocked";
 
@@ -741,6 +742,41 @@ export class GoalManager {
     }
     return Math.round((completedPoints / totalMilestones) * 100);
   }
+
+  createJobForGoal(goalId: string, threadId: string): PersistentAgentJob | null {
+    const goal = this.getGoal(goalId);
+    if (!goal) return null;
+    return sharedPersistentJobManager.createJob({
+      jobId: `job-${goal.id}`,
+      botId: goal.botId,
+      threadId,
+      title: goal.title,
+      objective: goal.objective,
+      milestones: goal.milestones.map((m) => ({ title: m.title })),
+    });
+  }
+
+  getJobForGoal(goalId: string): PersistentAgentJob | null {
+    return sharedPersistentJobManager.getJob(`job-${goalId}`) ?? sharedPersistentJobManager.getJob(goalId);
+  }
 }
 
 export const sharedGoalManager = new GoalManager();
+
+export {
+  type JobState,
+  type PersistentAgentJob,
+  type JobJournalEntry,
+  type JobCheckpointPayload,
+  ERR_CORRUPT_JOB_CHECKPOINT,
+  ERR_INVALID_JOB_TRANSITION,
+  ERR_JOB_ALREADY_CLAIMED,
+  ERR_JOB_VALIDATION_FAILED,
+  CorruptJobCheckpointError,
+  InvalidJobTransitionError,
+  JobAlreadyClaimedError,
+  JobValidationError,
+  validatePersistentAgentJob,
+  PersistentJobManager,
+  sharedPersistentJobManager,
+} from "./tasks.ts";

@@ -4,6 +4,7 @@ import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import com.openmausbot.companion.core.Session
+import com.openmausbot.companion.core.isWorking
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -117,12 +118,25 @@ class SessionLingerController(
             return
         }
         timer = scope.launch {
+            // While any bot task is actively working in the background (Official Phase 20),
+            // preserve the stream so long-running workflows complete and deliver notifications.
+            while (isAnyTaskWorking() && !foreground && openToken == token) {
+                delay(3_000L)
+            }
             delay(WINDOW_MILLIS)
             if (openToken != token || foreground) return@launch
+            if (isAnyTaskWorking()) return@launch
             session.disconnect()
             openToken = null
             timer = null
             anchor.stop(token)
+        }
+    }
+
+    /** True when any bot in the companion session has an active, busy, or working turn. */
+    fun isAnyTaskWorking(): Boolean {
+        return session.state.value.bots.any { bot ->
+            bot.tasks?.any { it.isWorking } == true || bot.busy == true || bot.activity == "working"
         }
     }
 

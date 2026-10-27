@@ -305,6 +305,7 @@ export interface WireMessage {
   /** screen messages: a frame of the bot's computer (base64 image) */
   png?: string;
   mime?: string;
+  surface?: "browser" | "computer" | Surface;
   at: number;
   /** the message this one follows; null = thread root. */
   parentId?: string | null;

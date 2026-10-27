@@ -29,13 +29,14 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
     <!--
-      MOBOT Reach: Native exact alarms, full-screen lockscreen presentation, vibration, wake lock
+      MOBOT Reach: Native exact alarms, full-screen lockscreen presentation, vibration, wake lock, earpiece audio routing
     -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
     <uses-permission android:name="android.permission.VIBRATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <!--
       Pairing QR only, and asked for only when the scanner is opened. The app is
       fully usable without it: the NSD list and a typed address are the other two

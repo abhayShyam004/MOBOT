@@ -38,8 +38,20 @@ class AndroidHostFiles(private val context: Context) : HarnessHost.Files {
     override fun browserSessionsDir(): File = File(root, "browser-sessions").apply { mkdirs() }
 
     override fun appVersion(): String = runCatching {
-        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.0.0"
-    }.getOrDefault("1.0.0")
+        context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "1.1.2"
+    }.getOrDefault("1.1.2")
+
+    override fun appVersionCode(): Long = runCatching {
+        val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            pInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            pInfo.versionCode.toLong()
+        }
+    }.getOrDefault(10102L)
+
+    override fun appPackageName(): String = context.packageName
 
     fun serverEntry(): File = File(serverRoot, HostFiles.SERVER_ENTRY)
 

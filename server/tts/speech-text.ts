@@ -20,10 +20,13 @@ function describeCodeBlock(fence: string): string {
   type SpokenLanguages = Record<string, string>;
   const spoken: SpokenLanguages = {
     ts: "TypeScript",
+    typescript: "TypeScript",
     tsx: "TypeScript",
     js: "JavaScript",
+    javascript: "JavaScript",
     jsx: "JavaScript",
     py: "Python",
+    python: "Python",
     sh: "shell",
     bash: "shell",
     zsh: "shell",
@@ -32,8 +35,14 @@ function describeCodeBlock(fence: string): string {
     yaml: "YAML",
     sql: "SQL",
     rs: "Rust",
+    rust: "Rust",
     go: "Go",
     swift: "Swift",
+    kt: "Kotlin",
+    kotlin: "Kotlin",
+    java: "Java",
+    html: "HTML",
+    css: "CSS",
     diff: "diff",
   };
   const name = spoken[lang.toLowerCase()];

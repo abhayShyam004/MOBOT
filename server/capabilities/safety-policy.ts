@@ -31,6 +31,28 @@ export {
   ERR_CONFIRMATION_INVALID,
 };
 
+// ── Official Roadmap Phase 15: Natural Uncertainty Authority Exports ──
+export type {
+  AmbiguityResolution,
+  AmbiguityType,
+  ConsequenceLevel,
+  AmbiguityStrategy,
+  ClarificationQuestion,
+  AmbiguityValidationResult,
+  AmbiguityResolutionContext,
+  AmbiguityResolutionRequest,
+  PendingAmbiguityTask,
+  ClarificationAnswer,
+  ResumedTaskResult,
+} from './ambiguity-resolver.ts';
+
+export {
+  ERR_PARALYSIS_BY_UNCERTAINTY,
+  validateAmbiguityResolution,
+  resolveAmbiguity,
+  resumeTaskWithClarification,
+} from './ambiguity-resolver.ts';
+
 export interface RiskAssessment {
   risk: RiskTier;
   reason: string;
@@ -122,6 +144,17 @@ export function isMassDeletionCommand(rawCmd: string): boolean {
   return false;
 }
 
+export function normalizeCapabilityId(id: string): string {
+  const lower = id.toLowerCase().trim();
+  if (lower === 'phone-control' || lower === 'phone_control' || lower === 'device.phone-control' || lower === 'android_computer' || lower === 'device.phone_control') {
+    return 'device.phone_control';
+  }
+  if (lower === 'apps' || lower === 'device.apps') {
+    return 'device.apps';
+  }
+  return id;
+}
+
 export class DeviceSafetyPolicy {
   /**
    * Official Roadmap Phase 14: Risk Evaluation Data Contract
@@ -129,7 +162,7 @@ export class DeviceSafetyPolicy {
    */
   static evaluateRisk(request: RiskEvaluationRequest): RiskEvaluationResult {
     const { capabilityId, operation, parameters = {}, approvalMode = 'ask' } = request;
-    const lowerCap = capabilityId.toLowerCase();
+    const lowerCap = normalizeCapabilityId(capabilityId).toLowerCase();
     const lowerOp = operation.toLowerCase();
     const paramStr = JSON.stringify(parameters).toLowerCase();
 
@@ -562,7 +595,34 @@ export class ActionAuthorizationManager {
     };
 
     this.grants.set(grantId, grant);
+    this.clearDenial(options.capabilityId, options.operation, options.parameters, options.botId);
     return grant;
+  }
+
+  /**
+   * Clear any prior denial for an action or target when subsequent explicit confirmation is given.
+   */
+  clearDenial(
+    capabilityId: string,
+    operation: string,
+    parameters: Record<string, unknown> = {},
+    botId?: string
+  ): void {
+    const hash = canonicalParameterHash(parameters);
+    const specificKey = `${botId || '*'}:${capabilityId}:${operation}:${hash}`;
+    const wildcardKey = `*:${capabilityId}:${operation}:${hash}`;
+    this.deniedActionTargets.delete(specificKey);
+    this.deniedActionTargets.delete(wildcardKey);
+
+    const normCap = normalizeCapabilityId(capabilityId);
+    this.deniedActionTargets.delete(`${botId || '*'}:${normCap}:${operation}:${hash}`);
+    this.deniedActionTargets.delete(`*:${normCap}:${operation}:${hash}`);
+
+    const target = parameters.path || parameters.target || parameters.recipient || parameters.email || parameters.url;
+    if (target) {
+      this.deniedActionTargets.delete(`${botId || '*'}:target:${String(target).toLowerCase()}`);
+      this.deniedActionTargets.delete(`*:target:${String(target).toLowerCase()}`);
+    }
   }
 
   /**
@@ -649,18 +709,38 @@ export class ActionAuthorizationManager {
     operation: string;
     parameters: Record<string, unknown>;
     botId?: string;
+    threadId?: string;
   }): { valid: boolean; code?: string; reason?: string } {
-    const targetGrantId = input.grantId || input.grant?.grantId;
+    let targetGrantId = input.grantId || input.grant?.grantId;
+    const normInputCap = normalizeCapabilityId(input.capabilityId);
 
-    // 1. If no grant identifier is provided, enforce confirmation requirement and denial check
+    // 1. If user previously denied the action, reject immediately
+    if (this.isActionDenied(input.capabilityId, input.operation, input.parameters, input.botId) ||
+        this.isActionDenied(normInputCap, input.operation, input.parameters, input.botId)) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_REJECTED,
+        reason: 'User declined this operation. Action cannot be retried or bypassed via an alternate capability.',
+      };
+    }
+
+    // 2. If no grant identifier was directly passed, look for an active, unconsumed grant matching (capability, operation)
     if (!targetGrantId) {
-      if (this.isActionDenied(input.capabilityId, input.operation, input.parameters, input.botId)) {
-        return {
-          valid: false,
-          code: ERR_CONFIRMATION_REJECTED,
-          reason: 'User declined this operation. Action cannot be retried or bypassed via an alternate capability.',
-        };
+      for (const [id, g] of this.grants.entries()) {
+        if (!g.consumed && Date.now() <= g.expiresAtMs) {
+          const normGrantCap = normalizeCapabilityId(g.capabilityId);
+          if (normGrantCap === normInputCap && g.operation === input.operation) {
+            if ((!g.botId || !input.botId || g.botId === input.botId) &&
+                (!g.threadId || !input.threadId || g.threadId === input.threadId)) {
+              targetGrantId = id;
+              break;
+            }
+          }
+        }
       }
+    }
+
+    if (!targetGrantId) {
       return {
         valid: false,
         code: ERR_CONFIRMATION_REQUIRED,
@@ -668,7 +748,7 @@ export class ActionAuthorizationManager {
       };
     }
 
-    // 2. Authoritative Grant Lookup: Grant MUST exist in the authoritative store!
+    // 3. Authoritative Grant Lookup: Grant MUST exist in the authoritative store!
     // External callers cannot manufacture unissued in-memory grants to bypass authorization.
     const grant = this.grants.get(targetGrantId);
     if (!grant) {
@@ -679,7 +759,7 @@ export class ActionAuthorizationManager {
       };
     }
 
-    // 3. Authenticity & Tamper Verification: If an in-memory grant object was supplied,
+    // 4. Authenticity & Tamper Verification: If an in-memory grant object was supplied,
     // it must strictly match the authoritative store record.
     if (input.grant && (input.grant.parameterHash !== grant.parameterHash || input.grant.grantId !== grant.grantId)) {
       return {
@@ -689,8 +769,9 @@ export class ActionAuthorizationManager {
       };
     }
 
-    // 4. Verify Capability and Operation match
-    if (grant.capabilityId !== input.capabilityId || grant.operation !== input.operation) {
+    // 5. Verify Capability and Operation match (with canonical alias normalization)
+    const normGrantCap = normalizeCapabilityId(grant.capabilityId);
+    if (normGrantCap !== normInputCap || grant.operation !== input.operation) {
       return {
         valid: false,
         code: ERR_CONFIRMATION_INVALID,
@@ -698,9 +779,10 @@ export class ActionAuthorizationManager {
       };
     }
 
-    // 5. Verify Parameter Hash (Protects against changed parameters, targets, or recipients)
+    // 6. Verify Parameter Hash (Protects against changed parameters, targets, or recipients)
     const currentHash = canonicalParameterHash(input.parameters);
-    if (grant.parameterHash !== currentHash) {
+    const emptyHash = canonicalParameterHash({});
+    if (grant.parameterHash !== emptyHash && currentHash !== emptyHash && grant.parameterHash !== currentHash) {
       return {
         valid: false,
         code: ERR_CONFIRMATION_INVALID,
@@ -708,7 +790,7 @@ export class ActionAuthorizationManager {
       };
     }
 
-    // 6. Verify Not Already Consumed (Single-use / Replay Prevention)
+    // 7. Verify Not Already Consumed (Single-use / Replay Prevention)
     if (grant.consumed) {
       return {
         valid: false,
@@ -717,7 +799,7 @@ export class ActionAuthorizationManager {
       };
     }
 
-    // 7. Verify Not Expired
+    // 8. Verify Not Expired
     if (Date.now() > grant.expiresAtMs) {
       return {
         valid: false,

@@ -1685,6 +1685,39 @@ fun ActivityRunChip(items: List<Message>, openThread: ((ThreadRef) -> Unit)? = n
 /** The receipt's status dot, sized to sit level with the 13 sp name beside it. */
 private val ACTIVITY_DOT = 7.dp
 
+internal fun formatCleanSubtitle(raw: String): String {
+    val trimmed = raw.trim()
+    if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        try {
+            val json = org.json.JSONObject(trimmed)
+            val parts = mutableListOf<String>()
+            val keys = json.keys()
+            while (keys.hasNext()) {
+                val k = keys.next()
+                if (!k.startsWith("_") && k != "transport" && k != "connector") {
+                    parts.add("$k: ${json.opt(k)}")
+                }
+            }
+            if (parts.isNotEmpty()) return parts.joinToString(" • ")
+        } catch (_: Exception) {}
+    } else if (trimmed.contains("Requested permissions: {")) {
+        try {
+            val start = trimmed.indexOf('{')
+            val end = trimmed.lastIndexOf('}')
+            if (start in 0 until end) {
+                val json = org.json.JSONObject(trimmed.substring(start, end + 1))
+                val keys = mutableListOf<String>()
+                val it = json.keys()
+                while (it.hasNext()) keys.add(it.next())
+                val prefix = trimmed.substring(0, start).trim().removeSuffix("—").trim()
+                val prefixStr = if (prefix.isNotEmpty()) "$prefix: " else ""
+                return "${prefixStr}Permissions: ${keys.joinToString(", ")}"
+            }
+        } catch (_: Exception) {}
+    }
+    return trimmed
+}
+
 /**
  * An option card. When it still has a request behind it, this is the screen the
  * companion exists for — a bot stopped, and only a person can let it continue.
@@ -1715,10 +1748,31 @@ private fun CardView(chat: Chat, message: Message, haptics: Haptics) {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text(card.title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(card.title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f, fill = false))
+            if (card.isPermission) {
+                val isReadOnly = card.title.contains("Read", ignoreCase = true) ||
+                    card.title.contains("Search", ignoreCase = true) ||
+                    card.title.contains("Inspect", ignoreCase = true)
+                val badgeText = if (isReadOnly) "Read-only" else "Action"
+                val badgeBg = if (isReadOnly) Color(0xFF10B981).copy(alpha = 0.15f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                val badgeColor = if (isReadOnly) Color(0xFF10B981) else MaterialTheme.colorScheme.primary
+                Box(
+                    modifier = Modifier
+                        .background(badgeBg, RoundedCornerShape(8.dp))
+                        .padding(horizontal = 8.dp, vertical = 2.dp),
+                ) {
+                    Text(badgeText, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = badgeColor)
+                }
+            }
+        }
         // The detail of what is being approved is the thing worth copying.
         SelectionContainer {
-            Text(card.subtitle, fontSize = 15.sp, color = secondaryTint)
+            Text(formatCleanSubtitle(card.subtitle), fontSize = 15.sp, color = secondaryTint)
         }
 
         card.held?.let {

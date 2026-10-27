@@ -73,6 +73,16 @@ export type ObservabilityEventType =
   // Official Roadmap Phase 12: Connected Service Intelligence
   | "CONNECTED_SERVICE_SUSPENDED"
   | "CONNECTED_SERVICE_RESUMED"
+  // Official Roadmap Phase 13: Capability State Awareness
+  | "CAPABILITY_HEALTH_PROBED"
+  | "CAPABILITY_STATE_CHANGED"
+  // Official Roadmap Phase 14: Risk-Aware Autonomy
+  | "CAPABILITY_RISK_EVALUATED"
+  | "CAPABILITY_CONFIRMATION_REQUIRED"
+  | "CAPABILITY_CONFIRMATION_GRANTED"
+  | "CAPABILITY_CONFIRMATION_REJECTED"
+  | "AGENT_LOOP_CONFIRMATION_REQUIRED"
+  | "AGENT_LOOP_CONFIRMATION_REJECTED"
   // Deep Routine System Upgrade Events
   | "ROUTINE_CREATED"
   | "ROUTINE_SETUP_STARTED"

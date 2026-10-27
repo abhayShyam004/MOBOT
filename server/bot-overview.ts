@@ -11,6 +11,7 @@ import { cronScheduleLabel } from "../shared/cron-label.ts";
 
 import type { Goal } from "./goals.ts";
 import type { Watch } from "./watches.ts";
+import { sharedPersistentJobManager } from "./tasks.ts";
 
 export interface CalendarItemOverview {
   id: string;
@@ -70,7 +71,7 @@ export interface AbilityOverview {
 export interface GoalOverview {
   id: string;
   title: string;
-  status: "active" | "paused" | "completed" | "blocked";
+  status: "active" | "paused" | "completed" | "blocked" | "QUEUED" | "RUNNING" | "PAUSED_FOR_USER" | "BLOCKED_DEPENDENCY" | "FAILED" | "CANCELLED";
   progress: number;
   milestoneCount: number;
   completedMilestones: number;
@@ -668,16 +669,36 @@ function buildAbilities(facts: OverviewFacts): AbilityOverview[] {
 }
 
 function buildGoalOverviews(facts: OverviewFacts): GoalOverview[] {
-  return (facts.goals ?? []).map((g) => ({
-    id: g.id,
-    title: g.title,
-    status: g.status,
-    progress: g.progress,
-    milestoneCount: g.milestones.length,
-    completedMilestones: g.milestones.filter((m) => m.completed).length,
-    nextAction: g.nextAction,
-    blockers: g.blockers,
-  }));
+  return (facts.goals ?? []).map((g) => {
+    const persistentJob = sharedPersistentJobManager.getJob(`job-${g.id}`) ?? sharedPersistentJobManager.getJob(g.id);
+    const status = (persistentJob ? persistentJob.state : g.status) as GoalOverview["status"];
+    const progress = persistentJob ? persistentJob.progressPercent : g.progress;
+    const completedMilestones = persistentJob
+      ? persistentJob.currentMilestoneIndex
+      : g.milestones.filter((m) => m.completed).length;
+    let nextAction = g.nextAction;
+    if (persistentJob) {
+      if (persistentJob.state === "PAUSED_FOR_USER") {
+        nextAction = "Authorization required: waiting for user confirmation";
+      } else if (persistentJob.state === "BLOCKED_DEPENDENCY") {
+        nextAction = "Blocked: waiting for dependency resolution";
+      } else if (persistentJob.state === "RUNNING") {
+        nextAction = `In progress: Milestone ${persistentJob.currentMilestoneIndex + 1}`;
+      }
+    }
+    const blockers = persistentJob?.failureReason ? [...g.blockers, persistentJob.failureReason] : g.blockers;
+
+    return {
+      id: g.id,
+      title: g.title,
+      status,
+      progress,
+      milestoneCount: g.milestones.length,
+      completedMilestones,
+      nextAction,
+      blockers,
+    };
+  });
 }
 
 function buildWatchOverviews(facts: OverviewFacts): WatchOverview[] {

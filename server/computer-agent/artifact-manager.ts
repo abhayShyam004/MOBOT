@@ -236,6 +236,23 @@ function sniffMagic(
   }
 
   // Extension / content-based heuristics
+  if (ext === ".geojson") {
+    try {
+      const parsed = JSON.parse(buffer.toString("utf8"));
+      return {
+        kind: "dataset",
+        mime: "application/geo+json",
+        metadata: {
+          isGeoJson: true,
+          type: typeof parsed?.type === "string" ? parsed.type : undefined,
+          featureCount: Array.isArray(parsed?.features) ? parsed.features.length : undefined,
+        },
+      };
+    } catch {
+      return { kind: "dataset", mime: "application/geo+json" };
+    }
+  }
+
   if (ext === ".json") {
     try {
       JSON.parse(buffer.toString("utf8"));
@@ -284,7 +301,11 @@ export function isInternalFilename(name: string): boolean {
     lower.endsWith(".tsx") ||
     lower.endsWith(".py") ||
     lower.endsWith(".sh") ||
-    lower.endsWith(".bash")
+    lower.endsWith(".bash") ||
+    lower.endsWith(".geojson") ||
+    lower.endsWith(".raw") ||
+    lower.endsWith(".part") ||
+    lower.startsWith("download-")
   ) {
     return true;
   }
@@ -303,11 +324,16 @@ export function isInternalFilename(name: string): boolean {
 export function artifactsFromToolOutput(
   output: unknown,
 ): Array<{ kind: ArtifactKind; path: string; mime?: string; name: string }> {
-  if (typeof output !== "string" || !output.includes("/api/attachments/")) return [];
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(output);
-  } catch {
+  if (!output) return [];
+  let parsed: unknown = output;
+  if (typeof output === "string") {
+    if (!output.includes("/api/attachments/")) return [];
+    try {
+      parsed = JSON.parse(output);
+    } catch {
+      return [];
+    }
+  } else if (typeof output !== "object") {
     return [];
   }
   const found: Array<{ kind: ArtifactKind; path: string; mime?: string; name: string }> = [];
@@ -318,9 +344,16 @@ export function artifactsFromToolOutput(
       for (const entry of value) visit(entry, depth + 1);
       return;
     }
+    if (typeof value === "string" && value.includes("/api/attachments/")) {
+      try {
+        const innerParsed = JSON.parse(value);
+        visit(innerParsed, depth + 1);
+      } catch {}
+      return;
+    }
     if (!value || typeof value !== "object") return;
     const record = value as Record<string, unknown>;
-    const urlPath = typeof record.urlPath === "string" ? record.urlPath : undefined;
+    const urlPath = typeof record.urlPath === "string" ? record.urlPath : (typeof record.path === "string" ? record.path : undefined);
     if (urlPath && urlPath.startsWith("/api/attachments/")) {
       const name = typeof record.name === "string" && record.name ? record.name : basename(urlPath);
       const visibility = typeof record.visibility === "string" ? record.visibility : "user_visible";

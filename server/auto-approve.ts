@@ -10,6 +10,8 @@
 
 import { supportsApprovalMode, type ApprovalMode } from "../shared/approval-mode.ts";
 import type { ProviderAdapter, RequestOutcome } from "./contracts.ts";
+import { isMassDeletionCommand } from "./capabilities/safety-policy.ts";
+import { isReadOnlyTool } from "./approval-humanizer.ts";
 
 /** A failed delivery is a runtime error, not another permission decision.
  * An expired ask must never become a fresh Allow/Deny card. */
@@ -96,6 +98,9 @@ export function autoVerdict(
     /** The provider is asking to widen its configured sandbox rather than
      * perform one ordinary action. Only explicit Full may synthesize this. */
     requiresExplicitApproval?: boolean;
+    command?: string;
+    parameters?: Record<string, unknown>;
+    summary?: string;
   },
 ): AutoVerdict {
   // A question is for a person, whatever channel it arrived on — and
@@ -104,9 +109,19 @@ export function autoVerdict(
   if (ASKS_A_PERSON.has(tool.replace(/^mcp__[^_]+__/, "").toLowerCase())) {
     return { approve: null, source: "no-grant" };
   }
-  // Full's promise is literal: even a sandbox widening is approved. Entering
-  // Full is separately consent-gated by the bot PATCH endpoint, and the
-  // request.opened caller invokes this for permissions only, never questions.
+
+  // Official Roadmap Phase 14 Invariant (mobot_54_phases_prompt.md:957):
+  // Never allow a "full auto" setting to silently execute irreversible mass deletions.
+  const cmd = context?.command || String(context?.parameters?.command || context?.parameters?.cmd || context?.summary || "");
+  if (cmd && isMassDeletionCommand(cmd)) {
+    return { approve: null, source: "explicit-approval-block" };
+  }
+  if (context?.parameters?.recursive === true && (context?.parameters?.path === "/" || context?.parameters?.target === "/")) {
+    return { approve: null, source: "explicit-approval-block" };
+  }
+
+  // Full's promise is literal for non-destructive operations: even a sandbox widening is approved.
+  // Entering Full is separately consent-gated by the bot PATCH endpoint.
   if (mode === "full") return { approve: `approved ${tool} (full access)`, source: "full-access" };
   if (context?.requiresExplicitApproval) return { approve: null, source: "explicit-approval-block" };
   if (mode === "auto" || mode === "custom") return { approve: null, source: "native-approval" };
@@ -136,9 +151,16 @@ export function approvalHeldNote(context: {
   source?: AutoVerdictSource;
   /** Questions are not permissions and are never held for a mode reason. */
   permission: boolean;
+  tool?: string;
+  summary?: string;
 }): HeldNoteKey | undefined {
   if (!context.permission) return undefined;
-  if (context.source === "explicit-approval-block") return "approval.held.sandbox";
+  if (context.source === "explicit-approval-block") {
+    if (context.tool && isReadOnlyTool(context.tool, context.summary)) {
+      return "approval.held.native";
+    }
+    return "approval.held.sandbox";
+  }
   if (context.source === "native-approval") return "approval.held.native";
   return undefined;
 }
@@ -148,6 +170,8 @@ export function approvalHeldNote(context: {
 export function approvalHeldReason(context: {
   source?: AutoVerdictSource;
   permission: boolean;
+  tool?: string;
+  summary?: string;
 }): string | undefined {
   const key = approvalHeldNote(context);
   return key && HELD_NOTE[key];

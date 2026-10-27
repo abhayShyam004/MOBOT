@@ -8,6 +8,7 @@ import {
   UpdaterManager,
   compareSemVer,
   createSafetyBackup,
+  deriveVersionCode,
   isUpdateAvailable,
   listSnapshots,
   parseReleaseManifest,
@@ -43,6 +44,54 @@ describe("SemVer comparison", () => {
     expect(isUpdateAvailable("1.9.0", "1.10.0")).toBe(true);
     expect(isUpdateAvailable("1.10.0", "1.9.0")).toBe(false);
     expect(isUpdateAvailable("1.0.0", "1.0.0")).toBe(false);
+  });
+
+  it("derives deterministic integer versionCode monotonically", () => {
+    expect(deriveVersionCode("1.0.0")).toBe(10000);
+    expect(deriveVersionCode("1.1.0")).toBe(10100);
+    expect(deriveVersionCode("1.1.1")).toBe(10101);
+    expect(deriveVersionCode("1.1.2")).toBe(10102);
+    expect(deriveVersionCode("2.0.0")).toBe(20000);
+    expect(deriveVersionCode("1.1.1-threads-preview")).toBe(10101);
+    expect(deriveVersionCode("invalid")).toBe(0);
+  });
+
+  it("prioritizes numeric versionCode over version string comparison", () => {
+    // 10101 -> 10102 is an update
+    expect(isUpdateAvailable("1.1.1", "1.1.2", { currentVersionCode: 10101, remoteVersionCode: 10102 })).toBe(true);
+    // 10102 -> 10102 is NOT an update
+    expect(isUpdateAvailable("1.1.2", "1.1.2", { currentVersionCode: 10102, remoteVersionCode: 10102 })).toBe(false);
+    // 10103 -> 10102 (installed newer than remote) is NOT an update
+    expect(isUpdateAvailable("1.1.3", "1.1.2", { currentVersionCode: 10103, remoteVersionCode: 10102 })).toBe(false);
+    // 10100 -> 10102 is an update
+    expect(isUpdateAvailable("1.1.0", "1.1.2", { currentVersionCode: 10100, remoteVersionCode: 10102 })).toBe(true);
+  });
+
+  it("prevents preview packages from being prompted with production package updates", () => {
+    const previewToStable = isUpdateAvailable("1.1.1-threads-preview", "1.1.1", {
+      currentVersionCode: 10101,
+      remoteVersionCode: 10101,
+      currentPackageName: "com.openmausbot.companion.preview",
+      targetPackageName: "com.openmausbot.companion",
+    });
+    expect(previewToStable).toBe(false);
+
+    const previewToNewerStable = isUpdateAvailable("1.1.1-threads-preview", "1.1.2", {
+      currentVersionCode: 10101,
+      remoteVersionCode: 10102,
+      currentPackageName: "com.openmausbot.companion.preview",
+      targetPackageName: "com.openmausbot.companion",
+    });
+    expect(previewToNewerStable).toBe(false);
+
+    // Same package name upgrades normally
+    const productionToNewerProduction = isUpdateAvailable("1.1.1", "1.1.2", {
+      currentVersionCode: 10101,
+      remoteVersionCode: 10102,
+      currentPackageName: "com.openmausbot.companion",
+      targetPackageName: "com.openmausbot.companion",
+    });
+    expect(productionToNewerProduction).toBe(true);
   });
 });
 
@@ -255,6 +304,8 @@ describe("UpdaterManager end-to-end lifecycle", () => {
       releaseNotes: "Feature update and performance optimizations.",
       publishedAt: "2026-10-18T10:00:00Z",
       channel: "stable",
+      versionCode: 10100,
+      packageName: "com.openmausbot.companion",
     };
 
     // Check
@@ -298,6 +349,8 @@ describe("UpdaterManager end-to-end lifecycle", () => {
       releaseNotes: "Test release",
       publishedAt: "2026-10-18T10:00:00Z",
       channel: "stable",
+      versionCode: 10100,
+      packageName: "com.openmausbot.companion",
     };
 
     await manager.checkForUpdates(false, mockRelease);
@@ -398,5 +451,58 @@ describe("UpdaterManager end-to-end lifecycle", () => {
     const status = await manager.checkForUpdates();
     // GitHub API will return 404 which resolves to up_to_date (no updates found) or error
     expect(["up_to_date", "error"]).toContain(status.status);
+  });
+
+  it("invalidates staged package and returns up_to_date when installed version matches or exceeds target", async () => {
+    const manager = new UpdaterManager({
+      currentVersion: "1.1.1",
+      currentVersionCode: 10101,
+      packageName: "com.openmausbot.companion",
+      dataDir: testDir,
+    });
+
+    const mockApk = Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.alloc(150, 42)]);
+    const mockHash = createHash("sha256").update(mockApk).digest("hex");
+    const mockRelease: ReleaseManifest = {
+      version: "1.1.2",
+      releaseTag: "v1.1.2",
+      name: "MOBOT v1.1.2",
+      downloadUrl: "https://example.com/update-1.1.2.apk",
+      fileName: "update-1.1.2.apk",
+      fileSizeBytes: mockApk.length,
+      checksumSha256: mockHash,
+      releaseNotes: "Fix repeating update prompt",
+      publishedAt: new Date().toISOString(),
+      channel: "stable",
+      versionCode: 10102,
+      packageName: "com.openmausbot.companion",
+    };
+
+    // 1. Initial check sees update available
+    const checkState = await manager.checkForUpdates(false, mockRelease);
+    expect(checkState.status).toBe("available");
+
+    // 2. Download stages the APK
+    const downloadState = await manager.downloadUpdate(async dest => {
+      writeFileSync(dest, mockApk);
+    });
+    expect(downloadState.status).toBe("ready_to_install");
+    expect(existsSync(downloadState.stagedApkPath!)).toBe(true);
+
+    // 3. User installs update: app restarts with version 1.1.2 / versionCode 10102
+    manager.updateInstalledVersion("1.1.2", 10102);
+
+    // 4. getStatus() must automatically invalidate staged package and report up_to_date
+    const postInstallStatus = manager.getStatus();
+    expect(postInstallStatus.status).toBe("up_to_date");
+    expect(postInstallStatus.stagedApkPath).toBeUndefined();
+    expect(postInstallStatus.release).toBeUndefined();
+    // Staged file was cleanly pruned
+    expect(existsSync(join(testDir, "updates", "update-1.1.2.apk"))).toBe(false);
+
+    // 5. Subsequent checkForUpdates() also reports up_to_date without prompt loop
+    const recheckStatus = await manager.checkForUpdates(false, mockRelease);
+    expect(recheckStatus.status).toBe("up_to_date");
+    expect(recheckStatus.stagedApkPath).toBeUndefined();
   });
 });

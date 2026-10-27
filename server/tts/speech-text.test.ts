@@ -5,6 +5,7 @@
 import { describe, expect, it } from "vitest";
 
 import { narrateTool, speakable, toUtterances } from "./speech-text.ts";
+import { determineConversationalCadencePolicy } from "../conversational-cadence.ts";
 
 describe("speakable", () => {
   it("names a code block instead of reading it", () => {
@@ -138,5 +139,88 @@ describe("narrateTool", () => {
   it("falls back to naming an unknown tool, without reading its argv", () => {
     expect(narrateTool("deploy_thing")).toBe("running deploy_thing");
     expect(narrateTool('curl -X POST "https://x/y" --data @{}')).toBeNull();
+  });
+});
+
+describe("Official Roadmap Phase 18: Conversational Speech & Cadence Integration", () => {
+  it("converts warm 1-sentence greeting replies into natural single utterances without awkward fragmentation", () => {
+    const greetingReply = "Hey! What are you working on today?";
+    const spoken = speakable(greetingReply);
+    expect(spoken).toBe("Hey! What are you working on today?");
+    const utterances = toUtterances(greetingReply);
+    // Short fragments like "Hey!" are glued to their neighbour for smooth synthesizer prosody
+    expect(utterances).toHaveLength(1);
+    expect(utterances[0]).toBe("Hey! What are you working on today?");
+  });
+
+  it("converts morning greetings into fluent speech without symbol artifacts", () => {
+    const morningReply = "Good morning! How can I help you today?";
+    const spoken = speakable(morningReply);
+    expect(spoken).toBe("Good morning! How can I help you today?");
+    const utterances = toUtterances(morningReply);
+    expect(utterances).toHaveLength(2);
+    expect(utterances[0]).toBe("Good morning!");
+    expect(utterances[1]).toBe("How can I help you today?");
+  });
+
+  it("converts canonical acknowledgement into a brief, spoken sentence", () => {
+    const ackReply = "Glad to hear that. Let me know when you're ready for the next step.";
+    const spoken = speakable(ackReply);
+    expect(spoken).toBe("Glad to hear that. Let me know when you're ready for the next step.");
+    const utterances = toUtterances(ackReply);
+    expect(utterances.length).toBeGreaterThanOrEqual(1);
+    expect(utterances.join(" ")).toContain("Glad to hear that");
+    expect(utterances.join(" ")).toContain("ready for the next step");
+  });
+
+  it("strips bullet points and markdown markers from conversational answers for clean speech delivery", () => {
+    const responseWithBullets = "- Checked the build status.\n- Fixed the trailing slash.\n- Deployed to staging.";
+    const spoken = speakable(responseWithBullets);
+    expect(spoken).not.toContain("-");
+    expect(spoken).toContain("Checked the build status. Fixed the trailing slash. Deployed to staging");
+  });
+
+  it("replaces large code blocks with spoken descriptions so voice does not recite code syntax", () => {
+    const codeAnswer = "Here is the implementation:\n\n```typescript\nexport function calculate(a: number, b: number): number {\n  return a + b;\n}\n```\n\nRun the tests to verify.";
+    const spoken = speakable(codeAnswer);
+    expect(spoken).toContain("TypeScript code block");
+    expect(spoken).not.toContain("export function");
+    expect(spoken).not.toContain("return a + b");
+    expect(spoken).toContain("Run the tests to verify");
+  });
+
+  it("converts markdown tables into spoken comma-separated rows without raw pipes or dashes", () => {
+    const tableAnswer = "Here are the metrics:\n\n| Engine | Latency | Status |\n| --- | --- | --- |\n| SQLite | 2ms | Healthy |\n| Postgres | 18ms | Online |\n";
+    const spoken = speakable(tableAnswer);
+    expect(spoken).not.toContain("|");
+    expect(spoken).not.toContain("---");
+    expect(spoken).toContain("SQLite, 2ms, Healthy");
+    expect(spoken).toContain("Postgres, 18ms, Online");
+  });
+
+  it("shortens file paths in spoken dialogue so directory structures are not recited", () => {
+    const pathAnswer = "I updated server/tts/speech-text.ts and android/app/src/main/AndroidManifest.xml.";
+    const spoken = speakable(pathAnswer);
+    expect(spoken).toContain("speech-text.ts");
+    expect(spoken).toContain("AndroidManifest.xml");
+    expect(spoken).not.toContain("server/tts/");
+    expect(spoken).not.toContain("android/app/src/main/");
+  });
+
+  it("integrates with ConversationalCadencePolicy to match speech target cadence", () => {
+    const casualPolicy = determineConversationalCadencePolicy("Hey MOBOT");
+    expect(casualPolicy.conversationalMode).toBe("casual");
+    expect(casualPolicy.targetSentenceCount).toBe(1);
+    expect(casualPolicy.suppressBulletPoints).toBe(true);
+
+    const workPolicy = determineConversationalCadencePolicy("Refactor the database migrations for SQLite");
+    expect(workPolicy.conversationalMode).toBe("work");
+    expect(workPolicy.targetSentenceCount).toBe(4);
+    expect(workPolicy.suppressBulletPoints).toBe(false);
+
+    const crisisPolicy = determineConversationalCadencePolicy("Production is down! Database crashed!");
+    expect(crisisPolicy.conversationalMode).toBe("crisis");
+    expect(crisisPolicy.targetSentenceCount).toBe(2);
+    expect(crisisPolicy.suppressBulletPoints).toBe(false);
   });
 });

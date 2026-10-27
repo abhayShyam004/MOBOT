@@ -630,6 +630,33 @@ describe("GoalManager", () => {
         const reloadedAGoals = reloaded.listGoals("bot-iso-A");
         expect(reloadedAGoals.length).toBe(2);
       });
+
+      it("integrates canonical goals with PersistentAgentJob (Phase 21)", () => {
+        const goal = manager.createGoal({
+          botId: "bot-job-int",
+          title: "Build durable offline pipeline",
+          objective: "Process multi-gigabyte files reliably across restarts",
+          milestones: [
+            { title: "M1: Validate inputs" },
+            { title: "M2: Process chunks" },
+            { title: "M3: Generate summary" },
+          ],
+        });
+
+        const job = manager.createJobForGoal(goal.id, "thread-job-int");
+        expect(job).not.toBeNull();
+        expect(job?.jobId).toBe(`job-${goal.id}`);
+        expect(job?.botId).toBe("bot-job-int");
+        expect(job?.threadId).toBe("thread-job-int");
+        expect(job?.title).toBe("Build durable offline pipeline");
+        expect(job?.state).toBe("QUEUED");
+
+        // Query job through goal manager
+        const fetched = manager.getJobForGoal(goal.id);
+        expect(fetched).not.toBeNull();
+        expect(fetched?.jobId).toBe(`job-${goal.id}`);
+        expect(fetched?.objective).toBe(goal.objective);
+      });
     });
   });
 });

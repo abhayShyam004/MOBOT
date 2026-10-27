@@ -86,26 +86,55 @@ export class DeviceCapabilityRegistry {
   }
 
   /**
+   * Resolve capability ID to its canonical registered ID, handling common aliases.
+   */
+  resolveCanonicalId(id: string): string {
+    const raw = String(id || '').trim();
+    if (this.capabilities.has(raw)) return raw;
+    const lower = raw.toLowerCase().replace(/[-_]/g, '');
+    for (const key of this.capabilities.keys()) {
+      const keyLower = key.toLowerCase().replace(/[-_]/g, '');
+      if (keyLower === lower || keyLower === `device${lower}` || `device${keyLower}` === lower) {
+        return key;
+      }
+    }
+    if (raw === 'phone-control' || raw === 'phone_control' || raw === 'device.phone-control' || raw === 'android_computer') {
+      if (this.capabilities.has('device.phone_control')) return 'device.phone_control';
+    }
+    if (raw === 'apps' || raw === 'device.app' || raw === 'app') {
+      if (this.capabilities.has('device.apps')) return 'device.apps';
+    }
+    if (raw === 'screenshot' || raw === 'device.screenshot') {
+      if (this.capabilities.has('device.screenshot')) return 'device.screenshot';
+    }
+    if (raw === 'reach' || raw === 'device.reach') {
+      if (this.capabilities.has('device.reach')) return 'device.reach';
+    }
+    return raw;
+  }
+
+  /**
    * Unregister an existing capability by ID.
    */
   unregister(id: string): boolean {
-    this.healthStates.delete(id);
-    this.probeGenerations.delete(id);
-    return this.capabilities.delete(id);
+    const canonicalId = this.resolveCanonicalId(id);
+    this.healthStates.delete(canonicalId);
+    this.probeGenerations.delete(canonicalId);
+    return this.capabilities.delete(canonicalId);
   }
 
   /**
    * Check if a capability exists.
    */
   has(id: string): boolean {
-    return this.capabilities.has(id);
+    return this.capabilities.has(this.resolveCanonicalId(id));
   }
 
   /**
    * Retrieve a capability by ID.
    */
   get(id: string): DeviceCapability | undefined {
-    return this.capabilities.get(id);
+    return this.capabilities.get(this.resolveCanonicalId(id));
   }
 
   /**
@@ -132,7 +161,8 @@ export class DeviceCapabilityRegistry {
    * Describe a capability in detail including full operation schemas.
    */
   describe(id: string): DeviceCapabilityDescription | undefined {
-    const cap = this.capabilities.get(id);
+    const canonicalId = this.resolveCanonicalId(id);
+    const cap = this.capabilities.get(canonicalId);
     if (!cap) return undefined;
     return {
       id: cap.id,
@@ -156,13 +186,14 @@ export class DeviceCapabilityRegistry {
    * Retrieve authoritative operational state of a capability.
    */
   getHealthStatus(capabilityId: string): CapabilityHealthStatus {
-    const cached = this.healthStates.get(capabilityId);
+    const canonicalId = this.resolveCanonicalId(capabilityId);
+    const cached = this.healthStates.get(canonicalId);
     if (cached) return cached;
 
-    const cap = this.capabilities.get(capabilityId);
+    const cap = this.capabilities.get(canonicalId);
     if (!cap) {
       return {
-        capabilityId,
+        capabilityId: canonicalId,
         state: 'DEPENDENCY_MISSING',
         lastCheckedMs: 0,
         diagnosticDetails: `Device capability '${capabilityId}' is not registered.`,
@@ -224,26 +255,27 @@ export class DeviceCapabilityRegistry {
     capabilityId: string,
     options?: { force?: boolean; signal?: AbortSignal; context?: CapabilityContext }
   ): Promise<CapabilityHealthStatus> {
-    const cached = this.healthStates.get(capabilityId);
+    const canonicalId = this.resolveCanonicalId(capabilityId);
+    const cached = this.healthStates.get(canonicalId);
     const now = Date.now();
     if (!options?.force && cached && cached.lastCheckedMs > 0 && now - cached.lastCheckedMs < 1000) {
       return cached;
     }
 
-    const cap = this.capabilities.get(capabilityId);
+    const cap = this.capabilities.get(canonicalId);
     if (!cap) {
       const missing: CapabilityHealthStatus = {
-        capabilityId,
+        capabilityId: canonicalId,
         state: 'DEPENDENCY_MISSING',
         lastCheckedMs: now,
         diagnosticDetails: `Device capability '${capabilityId}' is not registered.`,
       };
-      this.healthStates.set(capabilityId, missing);
+      this.healthStates.set(canonicalId, missing);
       return missing;
     }
 
-    const gen = (this.probeGenerations.get(capabilityId) || 0) + 1;
-    this.probeGenerations.set(capabilityId, gen);
+    const gen = (this.probeGenerations.get(canonicalId) || 0) + 1;
+    this.probeGenerations.set(canonicalId, gen);
 
     const timeoutCtrl = new AbortController();
     const timeoutTimer = setTimeout(() => {
@@ -357,7 +389,8 @@ export class DeviceCapabilityRegistry {
     params: Record<string, unknown> = {},
     context?: CapabilityContext
   ): Promise<CapabilityResult> {
-    const cap = this.capabilities.get(capabilityId);
+    const canonicalId = this.resolveCanonicalId(capabilityId);
+    const cap = this.capabilities.get(canonicalId);
     if (!cap) {
       return {
         success: false,
@@ -370,7 +403,7 @@ export class DeviceCapabilityRegistry {
     }
 
     // Official Roadmap Phase 13: Authoritative Pre-Dispatch Operational State Gate
-    const currentHealth = this.getHealthStatus(capabilityId);
+    const currentHealth = this.getHealthStatus(canonicalId);
     if (currentHealth.state !== 'AVAILABLE') {
       return {
         success: false,

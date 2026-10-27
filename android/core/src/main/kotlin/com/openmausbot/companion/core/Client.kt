@@ -1620,7 +1620,8 @@ class CompanionClient(
             if (dot <= 0) return false
             val stem = name.substring(0, dot)
             val extension = name.substring(dot + 1)
-            return stem.all { it in '0'..'9' || it in 'A'..'Z' || it in 'a'..'z' || it == '-' } &&
+            return stem.isNotEmpty() &&
+                stem.all { it in '0'..'9' || it in 'A'..'Z' || it in 'a'..'z' || it == '-' } &&
                 extension in setOf("png", "jpg", "gif", "webp")
         }
 

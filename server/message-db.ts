@@ -16,6 +16,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { DATA_DIR } from "./config.ts";
 import { peerProvenanceAuthor } from "./peer-provenance.ts";
+import { isProhibitedScreenFrame, stripRawBase64DataUris } from "./screen-frame-gate.ts";
 import type { Message } from "./store.ts";
 
 const DB_FILE = () => join(DATA_DIR, "messages.db");
@@ -344,9 +345,16 @@ function importLegacy(threadId: string, legacyFile: string): ThreadRows {
 }
 
 export function insertMessage(threadId: string, message: Message): void {
+  if (isProhibitedScreenFrame(message)) {
+    return;
+  }
+  let toPersist = message;
+  if (typeof toPersist.text === "string") {
+    toPersist = { ...toPersist, text: stripRawBase64DataUris(toPersist.text) };
+  }
   db()
     .prepare(UPSERT_MESSAGE)
-    .run(threadId, message.id, message.at, message.role, message.kind, message.text ?? null, JSON.stringify(message));
+    .run(threadId, toPersist.id, toPersist.at, toPersist.role, toPersist.kind, toPersist.text ?? null, JSON.stringify(toPersist));
 }
 
 /** A backup may only populate a fresh thread, never replace a transcript. */
@@ -358,7 +366,11 @@ export function importThread(threadId: string, messages: Message[], activeLeafId
         database.prepare("SELECT 1 FROM thread_state WHERE thread_id = ?").get(threadId)) {
       throw new Error("Cannot import over an existing conversation");
     }
-    for (const message of messages) insertMessage(threadId, message);
+    for (const message of messages) {
+      if (!isProhibitedScreenFrame(message)) {
+        insertMessage(threadId, message);
+      }
+    }
     setActiveLeaf(threadId, activeLeafId);
     database.exec("COMMIT");
   } catch (error) {

@@ -25,6 +25,7 @@ import { createChatToolApproval } from "./chat-tool-approval.ts";
 import { appendNative } from "./native.ts";
 import { readCodexCredential, codexCredentialExpired, refreshCodexCredential, type CodexCredential } from "./codex-native-auth.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
+import { isMassDeletionCommand } from "../capabilities/safety-policy.ts";
 
 /** The ChatGPT/Codex backend endpoint the CLI calls. */
 export const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -614,7 +615,10 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
                 }
               }
               if (!handled) {
-                const allowed = turn.approvalMode === "full"
+                const cmdStr = String((args as any)?.command || (args as any)?.cmd || "");
+                const isMassDel = (Boolean(cmdStr) && isMassDeletionCommand(cmdStr)) || isMassDeletionCommand(inputPreview ?? "")
+                  || ((args as any)?.recursive === true && ((args as any)?.path === "/" || (args as any)?.target === "/"));
+                const allowed = (turn.approvalMode === "full" && !isMassDel)
                   || await approval.ask(call.name, inputPreview ?? "This tool has no arguments.");
                 abort.signal.throwIfAborted();
                 startItem();

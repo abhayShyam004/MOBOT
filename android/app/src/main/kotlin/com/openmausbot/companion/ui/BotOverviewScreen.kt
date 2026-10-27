@@ -383,12 +383,33 @@ fun BotOverviewScreen(botId: String, onBack: () -> Unit) {
                                         color = AppTheme.colors.textPrimary,
                                         modifier = Modifier.weight(1f),
                                     )
-                                    Text(
-                                        "${goal.progress}%",
-                                        fontSize = 12.sp,
-                                        fontWeight = FontWeight.Medium,
-                                        color = AppTheme.colors.textSecondary,
-                                    )
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                    ) {
+                                        val statusColor = when (goal.status) {
+                                            "RUNNING", "active" -> AppTheme.colors.running
+                                            "PAUSED_FOR_USER", "paused" -> AppTheme.colors.caution
+                                            "COMPLETED", "completed" -> AppTheme.colors.positive
+                                            "BLOCKED_DEPENDENCY", "blocked", "FAILED" -> AppTheme.colors.danger
+                                            else -> AppTheme.colors.textSecondary
+                                        }
+                                        Text(
+                                            goal.status.uppercase(),
+                                            fontSize = 10.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = statusColor,
+                                            modifier = Modifier
+                                                .background(statusColor.copy(alpha = 0.12f), RoundedCornerShape(4.dp))
+                                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                                        )
+                                        Text(
+                                            "${goal.progress}%",
+                                            fontSize = 12.sp,
+                                            fontWeight = FontWeight.Medium,
+                                            color = AppTheme.colors.textSecondary,
+                                        )
+                                    }
                                 }
                                 if (goal.progress > 0) {
                                     LinearProgressIndicator(
@@ -403,6 +424,9 @@ fun BotOverviewScreen(botId: String, onBack: () -> Unit) {
                                 }
                                 goal.nextAction?.let {
                                     Text("Next: $it", fontSize = 12.sp, color = AppTheme.colors.textSecondary)
+                                }
+                                goal.blockers.firstOrNull()?.let {
+                                    Text("Blocker: $it", fontSize = 12.sp, color = AppTheme.colors.danger)
                                 }
                             }
                             HorizontalDivider(color = AppTheme.colors.hairline)

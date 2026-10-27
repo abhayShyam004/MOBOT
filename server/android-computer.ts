@@ -42,22 +42,140 @@ import { COMPUTER_AGENT_TOOLS } from "./computer-agent/agent-tools.ts";
 import { ProjectManager } from "./app-builder/project-manager.ts";
 import { checkToolPermission, loadDiskPermissions } from "./permission-policy.ts";
 
+const isMainScript = Boolean(
+  process.argv[1] &&
+  (process.argv[1].replace(/\\/g, "/").endsWith("android-computer.ts") ||
+   process.argv[1].replace(/\\/g, "/").endsWith("android-computer.js"))
+);
+
 const WORKSPACE = process.env.AC_WORKSPACE ?? "";
-if (!WORKSPACE) {
+if (!WORKSPACE && isMainScript) {
   process.stderr.write("android-computer: AC_WORKSPACE is not set\n");
   process.exit(2);
 }
-mkdirSync(WORKSPACE, { recursive: true });
-mkdirSync(join(WORKSPACE, ".tmp"), { recursive: true });
-
-const PROJECTS_DIR = process.env.OMB_PROJECTS_DIR || (process.env.OMB_DATA_DIR ? join(process.env.OMB_DATA_DIR, "projects") : join(WORKSPACE, "projects"));
-setProjectManager(new ProjectManager(PROJECTS_DIR));
+if (WORKSPACE) {
+  mkdirSync(WORKSPACE, { recursive: true });
+  mkdirSync(join(WORKSPACE, ".tmp"), { recursive: true });
+  const PROJECTS_DIR = process.env.OMB_PROJECTS_DIR || (process.env.OMB_DATA_DIR ? join(process.env.OMB_DATA_DIR, "projects") : join(WORKSPACE, "projects"));
+  setProjectManager(new ProjectManager(PROJECTS_DIR));
+}
 
 // ── Embedded Node runtime for the bot terminal ─────────────────────────────
 // Android denies execve of anything under app data (noexec mount), except
 // the APK's native library dir. The harness runs this very adapter with the
 // embedded node binary from that dir, so process.execPath IS an exec-allowed
 // node. Exposing it to the bot shell:
+
+// ── Official Roadmap Phase 35: Android-as-Computer (mobot_54_phases_prompt.md:1897-1948) ──
+export type AndroidGestureType = "tap" | "double_tap" | "long_press" | "type" | "swipe" | "press_key";
+
+export interface AndroidGestureAction {
+  gesture: AndroidGestureType;
+  coordinates?: { x: number; y: number };
+  swipeVector?: { startX: number; startY: number; endX: number; endY: number; durationMs: number };
+  inputText?: string;
+  keyCode?: number; // e.g. KeyEvent.KEYCODE_BACK, KEYCODE_HOME
+  targetNodeId?: string;
+}
+
+export interface AndroidUiSemanticNode {
+  nodeId: string;
+  packageName: string;
+  className: string;
+  text?: string;
+  contentDescription?: string;
+  bounds: { left: number; top: number; right: number; bottom: number };
+  isClickable: boolean;
+  isEditable: boolean;
+  isEnabled: boolean;
+}
+
+export const RESTRICTED_SYSTEM_PACKAGES = [
+  "com.android.permissioncontroller",
+  "com.google.android.permissioncontroller",
+  "com.android.packageinstaller",
+  "com.google.android.packageinstaller",
+  "com.samsung.android.packageinstaller",
+  "com.samsung.android.permissioncontroller",
+] as const;
+
+/**
+ * Validate that an Android gesture action does not target restricted system permission dialogues.
+ * Invariant: Accessibility actions must never interact with system permission dialogues attempting to silently grant dangerous permissions.
+ */
+export function validateGestureActionSafety(
+  _action: AndroidGestureAction,
+  activePackage?: string
+): { safe: boolean; reason?: string } {
+  if (activePackage) {
+    const pkgLower = activePackage.toLowerCase();
+    if (RESTRICTED_SYSTEM_PACKAGES.some((p) => pkgLower.startsWith(p))) {
+      return {
+        safe: false,
+        reason: `ERR_SECURITY_RESTRICTED: Accessibility actions are prohibited on system permission dialog '${activePackage}' to prevent silent permission granting.`,
+      };
+    }
+  }
+  return { safe: true };
+}
+
+/**
+ * Parse raw accessibility hierarchy response into normalized AndroidUiSemanticNode array.
+ */
+export function parseAndroidUiHierarchy(raw: unknown): AndroidUiSemanticNode[] {
+  if (!raw || typeof raw !== "object") return [];
+  const nodes = Array.isArray((raw as any).nodes) ? (raw as any).nodes : [];
+  return nodes.map((n: any, idx: number) => {
+    const b = n.boundsObj || (Array.isArray(n.bounds) && n.bounds.length >= 4 ? {
+      left: n.bounds[0],
+      top: n.bounds[1],
+      right: n.bounds[2],
+      bottom: n.bounds[3],
+    } : { left: 0, top: 0, right: 0, bottom: 0 });
+
+    return {
+      nodeId: typeof n.nodeId === "string" ? n.nodeId : `node_${b.left}_${b.top}_${b.right}_${b.bottom}_${idx}`,
+      packageName: typeof n.package === "string" ? n.package : (typeof n.packageName === "string" ? n.packageName : ""),
+      className: typeof n.className === "string" ? n.className : "",
+      text: typeof n.text === "string" && n.text.trim() ? n.text : undefined,
+      contentDescription: typeof n.description === "string" && n.description.trim() ? n.description : (typeof n.contentDescription === "string" ? n.contentDescription : undefined),
+      bounds: b,
+      isClickable: Boolean(n.clickable ?? n.isClickable),
+      isEditable: Boolean(n.editable ?? n.isEditable),
+      isEnabled: Boolean(n.isEnabled ?? true),
+    };
+  });
+}
+
+/**
+ * Serialize an AndroidGestureAction into driver-compatible request payload.
+ */
+export function serializeAndroidGesture(action: AndroidGestureAction): Record<string, unknown> {
+  const base: Record<string, unknown> = { gesture: action.gesture };
+  if (action.coordinates) {
+    base.x = action.coordinates.x;
+    base.y = action.coordinates.y;
+  }
+  if (action.swipeVector) {
+    base.swipeVector = action.swipeVector;
+  }
+  if (action.inputText) {
+    base.text = action.inputText;
+  }
+  if (action.targetNodeId) {
+    base.targetNodeId = action.targetNodeId;
+  }
+  if (typeof action.keyCode === "number") {
+    const keyMap: Record<number, string> = {
+      4: "back",
+      3: "home",
+      187: "recents",
+      83: "notifications",
+    };
+    base.key = keyMap[action.keyCode] || String(action.keyCode);
+  }
+  return base;
+}
 //   node — a symlink in <workspace>/.omb-bin pointing at process.execPath;
 //          exec() follows the symlink to the exec-allowed target (verified
 //          on device; the symlink file itself may live on noexec app data).
@@ -1785,38 +1903,40 @@ function handle(message: RpcMessage): void {
   replyError(id, "method not supported", -32601);
 }
 
-process.stdin.setEncoding("utf8");
-process.stdin.on("data", (chunk: string) => {
-  buffer += chunk;
-  let newline: number;
-  while ((newline = buffer.indexOf("\n")) !== -1) {
-    const line = buffer.slice(0, newline);
-    buffer = buffer.slice(newline + 1);
-    if (!line.trim()) continue;
-    if (++frames > MAX_FRAMES) {
-      process.stderr.write("android-computer: frame limit exceeded\n");
-      process.exit(2);
-    }
-    if (Buffer.byteLength(line) > FRAME_BYTES) {
-      process.stderr.write("android-computer: frame too large\n");
-      process.exit(2);
-    }
-    let message: RpcMessage;
-    try {
-      message = JSON.parse(line);
-    } catch {
-      // Unparseable frames cannot be tied to a request id; nothing to reply to.
-      process.stderr.write("android-computer: invalid JSON frame\n");
-      continue;
-    }
-    try {
-      handle(message);
-    } catch (error) {
-      const id = (message as { id?: unknown }).id;
-      if (typeof id === "number" || typeof id === "string") {
-        replyError(id, error instanceof Error ? error.message : String(error));
+if (isMainScript) {
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (chunk: string) => {
+    buffer += chunk;
+    let newline: number;
+    while ((newline = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, newline);
+      buffer = buffer.slice(newline + 1);
+      if (!line.trim()) continue;
+      if (++frames > MAX_FRAMES) {
+        process.stderr.write("android-computer: frame limit exceeded\n");
+        process.exit(2);
+      }
+      if (Buffer.byteLength(line) > FRAME_BYTES) {
+        process.stderr.write("android-computer: frame too large\n");
+        process.exit(2);
+      }
+      let message: RpcMessage;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        // Unparseable frames cannot be tied to a request id; nothing to reply to.
+        process.stderr.write("android-computer: invalid JSON frame\n");
+        continue;
+      }
+      try {
+        handle(message);
+      } catch (error) {
+        const id = (message as { id?: unknown }).id;
+        if (typeof id === "number" || typeof id === "string") {
+          replyError(id, error instanceof Error ? error.message : String(error));
+        }
       }
     }
-  }
-});
-process.stdin.on("end", () => process.exit(0));
+  });
+  process.stdin.on("end", () => process.exit(0));
+}

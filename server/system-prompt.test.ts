@@ -22,6 +22,9 @@ import {
   ANDROID_COMPUTER_SYSTEM_PROMPT,
   SIGN_IN_PROMPT,
   CAPABILITY_GUIDANCE_PROMPT,
+  RESPONSE_INTELLIGENCE_PROMPT,
+  NATURAL_CONVERSATION_PROMPT,
+  PROACTIVE_INTELLIGENCE_PROMPT,
 } from "./system-prompt.ts";
 
 describe("buildSystemPrompt", () => {
@@ -213,5 +216,142 @@ describe("shared sentences", () => {
     // Contract is a stable section, not volatile
     expect(built.stable).toContain("=== AUTHORITATIVE AGENT CONTRACT ===");
     expect(built.volatile).not.toContain("=== AUTHORITATIVE AGENT CONTRACT ===");
+  });
+
+  describe("Official Roadmap Phase 16: Response Intelligence Prompts & Formatting Invariants", () => {
+    it("instructs model to adapt formatting dynamically without forcing rigid templates", () => {
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("ADAPTIVE FORMATTING & CADENCE");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("Eliminate rigid templates");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("Simple factual questions");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("1 to 3 sentences without superfluous headings");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("Do NOT mechanically prepend 'Summary' or append 'Steps' and 'Conclusion'");
+    });
+
+    it("supports structured reports, code blocks, and markdown tables for appropriate tasks", () => {
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("STRUCTURED TECHNICAL REPORTS");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("USABLE CODE BLOCKS");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("explanations kept separate from code");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("MEANINGFUL COMPARISONS");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("use Markdown tables to maximize readability");
+    });
+
+    it("strictly separates browser screenshots and prohibits raw base64 data URIs in chat", () => {
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("VISUAL TELEMETRY DECOUPLING & ZERO BASE64 IN CHAT");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("Visual frames stream exclusively to Watch Computer SSE");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("NEVER output raw base64 data URIs (data:image/...)");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("unless explicit visual intent is established");
+    });
+
+    it("preserves Phase 15 natural uncertainty and Phase 14 risk-aware autonomy invariants", () => {
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("INVARIANT PRESERVATION");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("Preserve Phase 15 natural uncertainty resolution");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).toContain("Phase 14 risk-aware autonomy checkpoints");
+      expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("RESPONSE INTELLIGENCE & ADAPTIVE FORMATTING (Official Phase 16)");
+    });
+
+    it("contains no contradictory instructions demanding fixed templates or disclaimers", () => {
+      expect(RESPONSE_INTELLIGENCE_PROMPT).not.toContain("always include summary and conclusion");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).not.toContain("every response must have steps");
+      expect(RESPONSE_INTELLIGENCE_PROMPT).not.toContain("As an AI");
+    });
+  });
+
+  describe("Official Roadmap Phase 17: Judgment and Recommendations Prompt Invariants", () => {
+    it("instructs model to evaluate trade-offs and provide explicit recommendations", async () => {
+      const { RECOMMENDATION_SYSTEM_PROMPT, ANDROID_COMPUTER_SYSTEM_PROMPT } = await import("./system-prompt.ts");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("OPINIONATED TEAMMATE");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("take a clear position");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("recommend the best-supported choice");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("Do NOT dump endless neutral lists of pros and cons");
+      expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("JUDGMENT AND RECOMMENDATIONS (Official Phase 17)");
+    });
+
+    it("enforces primary decision criterion and decisive rationale with critical trade-off", async () => {
+      const { RECOMMENDATION_SYSTEM_PROMPT } = await import("./system-prompt.ts");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("PRIMARY DECISION CRITERION");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("DECISIVE RATIONALE & CRITICAL TRADE-OFF");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("critical trade-off");
+    });
+
+    it("strictly separates technical facts from judgment and bans false benchmarks", async () => {
+      const { RECOMMENDATION_SYSTEM_PROMPT } = await import("./system-prompt.ts");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("SEPARATE FACTS FROM JUDGMENT");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("CALIBRATED ACCURACY");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("Never fabricate benchmarks");
+    });
+
+    it("prohibits ERR_EXCESSIVE_HEDGING on advice requests and distinguishes factual queries", async () => {
+      const { RECOMMENDATION_SYSTEM_PROMPT } = await import("./system-prompt.ts");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("ANTI-HEDGING INVARIANT & ERR_EXCESSIVE_HEDGING");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("it depends");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("both have merit");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("FACTUAL VS ADVICE DISTINCTION");
+      expect(RECOMMENDATION_SYSTEM_PROMPT).toContain("Purely factual queries ('What is SQLite?') receive direct factual explanations");
+    });
+  });
+
+  describe("Official Roadmap Phase 18: Natural Conversation Prompt Invariants", () => {
+    it("instructs model to adapt conversational cadence and dialogue style", () => {
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("NATURAL CONVERSATION & CONVERSATIONAL CADENCE (Official Phase 18)");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("CONVERSATIONAL CADENCE");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("respond with natural cadence rather than structured technical memos");
+      expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("NATURAL CONVERSATION & CADENCE (Official Phase 18)");
+    });
+
+    it("enforces greeting invariant: 1-sentence warm reply, not a feature menu or catalogue", () => {
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("GREETING INVARIANT");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("receives a 1-sentence warm reply, NOT a feature menu or capability catalogue");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("Outputting >100 words for a greeting is an explicit violation (ERR_UNNATURAL_VERBOSITY)");
+    });
+
+    it("enforces concise natural acknowledgement for user gratitude", () => {
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("ACKNOWLEDGEMENT INVARIANT");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("Thanks, that worked!");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("Glad to hear that. Let me know when you're ready for the next step.");
+    });
+
+    it("maintains conversational context continuity across rapid back-and-forth dialogue", () => {
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("CONVERSATIONAL CONTEXT CONTINUITY");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("retain context, referents ('it', 'that', 'the second one'), and progress without asking 'What do you mean?'");
+    });
+
+    it("strictly prohibits canned introductory template and preserves technical depth", () => {
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("STRICT PROHIBITION");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("Hello! I am MOBOT, your AI assistant. How may I assist you today with your coding, research, or productivity goals?");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("PRESERVE TECHNICAL DEPTH");
+      expect(NATURAL_CONVERSATION_PROMPT).toContain("maintain full technical precision, structured formatting, and safety checks");
+    });
+  });
+
+  describe("Official Roadmap Phase 19: Proactive Intelligence Prompt Invariants", () => {
+    it("instructs model on proactive intelligence, relevance scoring, and attention management", () => {
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("PROACTIVE INTELLIGENCE & ATTENTION MANAGEMENT (Official Phase 19)");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("RELEVANCE THRESHOLD");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("Strictly exceed 0.85 relevance score (score > 0.85)");
+      expect(ANDROID_COMPUTER_SYSTEM_PROMPT).toContain("PROACTIVE INTELLIGENCE & ATTENTION MANAGEMENT (Official Phase 19)");
+    });
+
+    it("enforces 4-hour global cooldown and ERR_SUGGESTION_SPAM_DETECTED recovery", () => {
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("4-HOUR GLOBAL COOLDOWN & ERR_SUGGESTION_SPAM_DETECTED");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("At most one proactive suggestion per 4-hour window");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("silent attention queue");
+    });
+
+    it("enforces 48-hour dismissal invariant based on deterministic deduplication keys", () => {
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("48-HOUR DISMISSAL INVARIANT");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("Dismissed suggestions must never re-trigger within 48 hours");
+    });
+
+    it("enforces non-intrusive active turn deferral and Attention Inbox integration", () => {
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("ACTIVE TURN DEFERRAL");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("Never interrupt an active user turn with an unrelated proactive suggestion");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("ATTENTION INBOX INTEGRATION");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("Surface high-relevance alerts");
+    });
+
+    it("preserves Phase 14 confirmation gates: suggestions are recommendations, never authorization", () => {
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("SECURITY & CONFIRMATION");
+      expect(PROACTIVE_INTELLIGENCE_PROMPT).toContain("State changes require explicit user authorization");
+    });
   });
 });

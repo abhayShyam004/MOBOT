@@ -178,3 +178,34 @@ describe("soul (standing instructions)", () => {
     expect(parseBotProfilePatch({ soul: 5 } as never)).toEqual({ ok: false, error: "soul must be a string" });
   });
 });
+
+describe("Official Roadmap Phase 17: Judgment & Recommendations Authority in Bot Profile", () => {
+  it("exports RecommendationPayload contract and ERR_EXCESSIVE_HEDGING", async () => {
+    const {
+      ERR_EXCESSIVE_HEDGING,
+      ExcessiveHedgingError,
+      validateRecommendationPayload,
+      detectExcessiveHedging,
+      classifyRecommendationRequest,
+    } = await import("./bot-profile.ts");
+
+    expect(ERR_EXCESSIVE_HEDGING).toBe("ERR_EXCESSIVE_HEDGING");
+    expect(new ExcessiveHedgingError().code).toBe("ERR_EXCESSIVE_HEDGING");
+    expect(typeof validateRecommendationPayload).toBe("function");
+    expect(typeof detectExcessiveHedging).toBe("function");
+    expect(typeof classifyRecommendationRequest).toBe("function");
+  });
+
+  it("evaluates recommendations with trade-offs and fact-opinion separation", async () => {
+    const { evaluateRecommendation } = await import("./bot-profile.ts");
+    const rec = evaluateRecommendation({
+      userPrompt: "Which database should I use for a lightweight local mobile app: SQLite or PostgreSQL?",
+    });
+
+    expect(rec.recommendedOption).toBe("SQLite");
+    expect(rec.rationale).toContain("embedded");
+    expect(rec.criticalTradeoff).toBeDefined();
+    expect(rec.distinctionBetweenFactAndOpinion).toContain("Fact:");
+    expect(rec.distinctionBetweenFactAndOpinion).toContain("Judgment:");
+  });
+});

@@ -58,15 +58,63 @@ export function compareSemVer(aStr: string, bStr: string): number {
   if (a.minor !== b.minor) return a.minor - b.minor;
   if (a.patch !== b.patch) return a.patch - b.patch;
 
-  if (!a.prerelease && b.prerelease) return 1;
-  if (a.prerelease && !b.prerelease) return -1;
   if (a.prerelease && b.prerelease) {
     return a.prerelease.localeCompare(b.prerelease);
   }
+  if (!a.prerelease && b.prerelease) return 1;
+  if (a.prerelease && !b.prerelease) return -1;
   return 0;
 }
 
-export function isUpdateAvailable(currentVersion: string, remoteVersion: string): boolean {
+export function deriveVersionCode(version: string): number {
+  const semver = parseSemVer(version);
+  if (!semver) return 0;
+  return semver.major * 10000 + semver.minor * 100 + semver.patch;
+}
+
+export interface UpdateAvailabilityOptions {
+  currentVersionCode?: number;
+  remoteVersionCode?: number;
+  currentPackageName?: string;
+  targetPackageName?: string;
+}
+
+export function isUpdateAvailable(
+  currentVersion: string,
+  remoteVersion: string,
+  options?: UpdateAvailabilityOptions
+): boolean {
+  const currentPkg = options?.currentPackageName;
+  const targetPkg = options?.targetPackageName;
+
+  // Package identity boundary: Never advertise a production package as an in-place
+  // update for a preview package (or vice versa), which would create duplicate
+  // launcher icons or installation collisions.
+  if (currentPkg && targetPkg && currentPkg !== targetPkg) {
+    if (currentPkg.endsWith(".preview") && !targetPkg.endsWith(".preview")) {
+      return false;
+    }
+  }
+
+  const curCode = options?.currentVersionCode ?? deriveVersionCode(currentVersion);
+  const remCode = options?.remoteVersionCode ?? deriveVersionCode(remoteVersion);
+
+  // Monotonic integer versionCode comparison is the primary authority in Android package management.
+  if (curCode > 0 && remCode > 0) {
+    return remCode > curCode;
+  }
+
+  // Base SemVer comparison without prerelease penalty when base versions match.
+  const curSem = parseSemVer(currentVersion);
+  const remSem = parseSemVer(remoteVersion);
+  if (curSem && remSem) {
+    if (curSem.major !== remSem.major) return remSem.major > curSem.major;
+    if (curSem.minor !== remSem.minor) return remSem.minor > curSem.minor;
+    if (curSem.patch !== remSem.patch) return remSem.patch > curSem.patch;
+    // Same major.minor.patch means the release is not newer.
+    return false;
+  }
+
   return compareSemVer(remoteVersion, currentVersion) > 0;
 }
 
@@ -81,6 +129,8 @@ export interface ReleaseManifest {
   releaseNotes: string;
   publishedAt: string;
   channel: "stable" | "beta";
+  versionCode: number;
+  packageName: string;
 }
 
 export interface GitHubAsset {
@@ -100,14 +150,19 @@ export interface GitHubRelease {
   assets?: GitHubAsset[];
 }
 
-export function parseReleaseManifest(release: GitHubRelease): ReleaseManifest | null {
+export function parseReleaseManifest(release: GitHubRelease, options?: { preferredArch?: string }): ReleaseManifest | null {
   if (!release || release.draft) return null;
   const version = release.tag_name ? release.tag_name.replace(/^[vV]/, "") : "";
   if (!parseSemVer(version)) return null;
 
   const assets = release.assets || [];
-  const apkAsset = assets.find(a => a.name.toLowerCase().endsWith(".apk"));
-  if (!apkAsset) return null;
+  const apkAssets = assets.filter(a => a.name.toLowerCase().endsWith(".apk"));
+  if (apkAssets.length === 0) return null;
+
+  const preferredArch = options?.preferredArch || "arm64-v8a";
+  const archMatch = apkAssets.find(a => a.name.toLowerCase().includes(preferredArch));
+  const universalMatch = apkAssets.find(a => a.name.toLowerCase().includes("universal"));
+  const apkAsset = archMatch || universalMatch || apkAssets[0];
 
   let checksum = "";
   const bodyText = release.body || "";
@@ -121,6 +176,18 @@ export function parseReleaseManifest(release: GitHubRelease): ReleaseManifest | 
     }
   }
 
+  let versionCode = deriveVersionCode(version);
+  const vcMatch = bodyText.match(/versionCode[:\s=]+(\d+)/i);
+  if (vcMatch) {
+    versionCode = parseInt(vcMatch[1], 10);
+  }
+
+  let packageName = "com.openmausbot.companion";
+  const pkgMatch = bodyText.match(/package[:\s=]+([a-zA-Z0-9._]+)/i);
+  if (pkgMatch) {
+    packageName = pkgMatch[1].trim();
+  }
+
   return {
     version,
     releaseTag: release.tag_name,
@@ -132,6 +199,8 @@ export function parseReleaseManifest(release: GitHubRelease): ReleaseManifest | 
     releaseNotes: release.body || "No release notes provided.",
     publishedAt: release.published_at,
     channel: release.prerelease ? "beta" : "stable",
+    versionCode,
+    packageName,
   };
 }
 
@@ -145,6 +214,8 @@ export function normalizeReleaseManifest(m: any): ReleaseManifest {
   const releaseNotes = m.releaseNotes || m.body || m.notes || "";
   const publishedAt = m.publishedAt || m.published_at || new Date().toISOString();
   const channel = m.channel || "stable";
+  const versionCode = typeof m.versionCode === "number" ? m.versionCode : deriveVersionCode(version);
+  const packageName = m.packageName || "com.openmausbot.companion";
   return {
     version,
     releaseTag,
@@ -156,6 +227,8 @@ export function normalizeReleaseManifest(m: any): ReleaseManifest {
     releaseNotes,
     publishedAt,
     channel,
+    versionCode,
+    packageName,
   };
 }
 
@@ -626,7 +699,10 @@ export type UpdateStatus =
 export interface UpdaterState {
   status: UpdateStatus;
   currentVersion: string;
+  currentVersionCode?: number;
   targetVersion?: string;
+  targetVersionCode?: number;
+  targetPackageName?: string;
   release?: ReleaseManifest;
   downloadProgress?: {
     downloadedBytes: number;
@@ -643,6 +719,8 @@ export interface UpdaterState {
 export class UpdaterManager {
   private status: UpdateStatus = "idle";
   private currentVersion: string;
+  private currentVersionCode: number;
+  private packageName: string;
   private dataDir: string;
   private githubRepo: string;
   private activeRelease: ReleaseManifest | null = null;
@@ -653,17 +731,64 @@ export class UpdaterManager {
   private stagedApkPath?: string;
   private isLocked = false;
 
-  constructor(options: { currentVersion: string; dataDir: string; githubRepo?: string }) {
+  constructor(options: {
+    currentVersion: string;
+    currentVersionCode?: number;
+    packageName?: string;
+    dataDir: string;
+    githubRepo?: string;
+  }) {
     this.currentVersion = options.currentVersion;
+    this.currentVersionCode = options.currentVersionCode ?? deriveVersionCode(options.currentVersion);
+    this.packageName = options.packageName ?? (options.currentVersion.includes("preview") ? "com.openmausbot.companion.preview" : "com.openmausbot.companion");
     this.dataDir = options.dataDir;
     this.githubRepo = options.githubRepo || DEFAULT_GITHUB_REPO;
   }
 
+  updateInstalledVersion(version: string, versionCode?: number, packageName?: string): void {
+    this.currentVersion = version;
+    this.currentVersionCode = versionCode ?? deriveVersionCode(version);
+    if (packageName) this.packageName = packageName;
+    this.invalidateIfUpToDate();
+  }
+
+  private invalidateIfUpToDate(): void {
+    if (!this.activeRelease && !this.stagedApkPath) return;
+
+    const targetVer = this.activeRelease?.version;
+    const targetCode = this.activeRelease?.versionCode ?? (targetVer ? deriveVersionCode(targetVer) : 0);
+    const targetPkg = this.activeRelease?.packageName ?? "com.openmausbot.companion";
+
+    const isStillNewer = targetVer
+      ? isUpdateAvailable(this.currentVersion, targetVer, {
+          currentVersionCode: this.currentVersionCode,
+          remoteVersionCode: targetCode,
+          currentPackageName: this.packageName,
+          targetPackageName: targetPkg,
+        })
+      : false;
+
+    if (!isStillNewer) {
+      if (this.stagedApkPath && existsSync(this.stagedApkPath)) {
+        try { rmSync(this.stagedApkPath, { force: true }); } catch {}
+      }
+      this.stagedApkPath = undefined;
+      this.activeRelease = null;
+      if (this.status === "available" || this.status === "ready_to_install" || this.status === "installing") {
+        this.status = "up_to_date";
+      }
+    }
+  }
+
   getStatus(): UpdaterState {
+    this.invalidateIfUpToDate();
     return {
       status: this.status,
       currentVersion: this.currentVersion,
+      currentVersionCode: this.currentVersionCode,
       targetVersion: this.activeRelease?.version,
+      targetVersionCode: this.activeRelease?.versionCode,
+      targetPackageName: this.activeRelease?.packageName,
       release: this.activeRelease || undefined,
       downloadProgress: this.status === "downloading" ? { ...this.downloadProgress } : undefined,
       lastCheckedAt: this.lastCheckedAt,
@@ -698,16 +823,30 @@ export class UpdaterManager {
       if (!release) {
         this.status = "up_to_date";
         this.activeRelease = null;
+        if (this.stagedApkPath && existsSync(this.stagedApkPath)) {
+          try { rmSync(this.stagedApkPath, { force: true }); } catch {}
+          this.stagedApkPath = undefined;
+        }
         return this.getStatus();
       }
 
-      const hasUpdate = isUpdateAvailable(this.currentVersion, release.version);
+      const hasUpdate = isUpdateAvailable(this.currentVersion, release.version, {
+        currentVersionCode: this.currentVersionCode,
+        remoteVersionCode: release.versionCode,
+        currentPackageName: this.packageName,
+        targetPackageName: release.packageName,
+      });
+
       if (hasUpdate || force) {
         this.activeRelease = release;
         this.status = "available";
       } else {
         this.activeRelease = null;
         this.status = "up_to_date";
+        if (this.stagedApkPath && existsSync(this.stagedApkPath)) {
+          try { rmSync(this.stagedApkPath, { force: true }); } catch {}
+          this.stagedApkPath = undefined;
+        }
       }
 
       return this.getStatus();
@@ -809,6 +948,11 @@ export class UpdaterManager {
         }
         return validation;
       }
+      if (this.stagedApkPath && existsSync(this.stagedApkPath)) {
+        try { rmSync(this.stagedApkPath, { force: true }); } catch {}
+      }
+      this.stagedApkPath = undefined;
+      this.activeRelease = null;
       this.status = "complete";
       return validation;
     } catch (err) {

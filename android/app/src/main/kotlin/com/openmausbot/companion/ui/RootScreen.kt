@@ -98,6 +98,7 @@ fun CompanionRoot(
     val context = LocalContext.current
     var updaterStatus by remember { mutableStateOf<UpdaterStatusResponse?>(null) }
     var updateDialogDismissed by rememberSaveable { mutableStateOf(false) }
+    var dismissedVersionCode by rememberSaveable { mutableStateOf(0L) }
 
     LaunchedEffect(connection != null) {
         if (connection == null) return@LaunchedEffect
@@ -105,7 +106,27 @@ fun CompanionRoot(
             try {
                 val st = session.getUpdaterStatus()
                 updaterStatus = st
-                if (st?.status == "available") {
+
+                val currentCode = runCatching {
+                    val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+                    if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                        pInfo.longVersionCode
+                    } else {
+                        @Suppress("DEPRECATION")
+                        pInfo.versionCode.toLong()
+                    }
+                }.getOrDefault(0L)
+
+                val targetCode = st?.targetVersionCode ?: st?.release?.versionCode ?: 0L
+                val targetPkg = st?.targetPackageName ?: st?.release?.packageName
+                val isMatchingApp = targetPkg == null || targetPkg == context.packageName
+
+                // Clear dismissal if a newer release versionCode appears
+                if (targetCode > dismissedVersionCode && targetCode > currentCode) {
+                    updateDialogDismissed = false
+                }
+
+                if (st?.status == "available" && targetCode > currentCode && isMatchingApp) {
                     session.downloadUpdate()
                 }
             } catch (_: Exception) {}
@@ -368,11 +389,29 @@ fun CompanionRoot(
             if (route != OnboardingRoute.PAIRING && route != OnboardingRoute.CHATS) {
                 ActionErrorDialog(session, navigator = null)
             }
-            if (updaterStatus?.status == "ready_to_install" && !updateDialogDismissed) {
+            val currentCode = runCatching {
+                val pInfo = context.packageManager.getPackageInfo(context.packageName, 0)
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                    pInfo.longVersionCode
+                } else {
+                    @Suppress("DEPRECATION")
+                    pInfo.versionCode.toLong()
+                }
+            }.getOrDefault(0L)
+
+            val targetCode = updaterStatus?.targetVersionCode ?: updaterStatus?.release?.versionCode ?: 0L
+            val targetPkg = updaterStatus?.targetPackageName ?: updaterStatus?.release?.packageName
+            val isMatchingApp = targetPkg == null || targetPkg == context.packageName
+            val isActuallyNewer = targetCode > currentCode
+
+            if (updaterStatus?.status == "ready_to_install" && !updateDialogDismissed && isActuallyNewer && isMatchingApp) {
                 val rel = updaterStatus?.release
-                val versionText = rel?.version ?: "1.1.1"
+                val versionText = rel?.version ?: "1.1.2"
                 AlertDialog(
-                    onDismissRequest = { updateDialogDismissed = true },
+                    onDismissRequest = {
+                        updateDialogDismissed = true
+                        dismissedVersionCode = targetCode
+                    },
                     title = { Text("Update Ready") },
                     text = {
                         Text("MOBOT $versionText has been downloaded and verified. Would you like to install it now?")
@@ -415,7 +454,10 @@ fun CompanionRoot(
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { updateDialogDismissed = true }) {
+                        TextButton(onClick = {
+                            updateDialogDismissed = true
+                            dismissedVersionCode = targetCode
+                        }) {
                             Text("Later")
                         }
                     }

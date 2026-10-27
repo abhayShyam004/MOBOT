@@ -3,9 +3,11 @@
 import { spawn } from "node:child_process";
 import { accessSync, constants, existsSync } from "node:fs";
 import { createInterface } from "node:readline";
-import { delimiter, join } from "node:path";
+import { delimiter, join, basename } from "node:path";
 import { homedir } from "node:os";
 import { checkToolPermission, loadDiskPermissions } from "../permission-policy.ts";
+import { saveImage } from "../attachments.ts";
+import { validateScreenFrameBytes } from "../screen-frame-gate.ts";
 
 type Json = Record<string, unknown>;
 export type Device = { serial: string; state: string; model: string; connection: "usb" | "network" | "emulator" };
@@ -121,7 +123,10 @@ export const KNOWN_PACKAGES: Record<string, string> = {
   contacts: "com.samsung.android.app.contacts",
   camera: "com.sec.android.app.camera",
   clock: "com.sec.android.app.clockpackage",
-  calculator: "com.sec.android.app.popupcalculator",
+  calculator: "com.google.android.calculator",
+  googlecalculator: "com.google.android.calculator",
+  samsungcalculator: "com.sec.android.app.popupcalculator",
+  discord: "com.discord",
   files: "com.sec.android.app.myfiles",
   myfiles: "com.sec.android.app.myfiles",
   companion: "com.openmausbot.companion",
@@ -854,6 +859,11 @@ const TOOLS = [
     description: "Press an Android navigation or keyboard key.",
     inputSchema: { type: "object", properties: { key: { type: "string", enum: Object.keys(KEYCODES) }, serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } }, required: ["key"] },
   },
+  {
+    name: "restore_host",
+    description: "Restore the MOBOT companion application to the foreground after controlling another app. Call this when completed interacting with third-party apps unless the user explicitly requested to leave the app open.",
+    inputSchema: { type: "object", properties: { serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } } },
+  },
 ] as const;
 
 type ToolResult = {
@@ -909,31 +919,81 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
       return textResult(formatScreenState(state));
     }
 
+    if (name === "restore_host") {
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/restore_host", { method: "POST" });
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Failed to restore host application");
+        return textResult(JSON.stringify({
+          status: "ok",
+          restored: data.restored ?? true,
+          foregroundPackage: data.foregroundPackage,
+          message: data.message || "Restored companion host application to foreground",
+        }));
+      }
+      return textResult(JSON.stringify({
+        status: "ok",
+        restored: true,
+        message: "Host restoration simulated in desktop ADB environment",
+      }));
+    }
+
     if (name === "screenshot") {
+      let pngBuffer: Buffer;
       if (isNativeDriverActive()) {
         const data = await callNativeDriver("/screenshot", { method: "POST", body: { includeBase64: true } });
         if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Screenshot failed");
-        return {
-          content: [
-            { type: "text", text: `Native Android screenshot from ${serial}` },
-            { type: "image", data: data.base64, mimeType: "image/png" },
-          ],
-        };
+        if (!data.base64) throw new PhoneActionError("ACTION_FAILED", "Native driver did not return base64 screenshot data");
+        pngBuffer = Buffer.from(data.base64, "base64");
+      } else {
+        const png = await onDevice(serial, ["exec-out", "screencap", "-p"], true);
+        if (!png.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) {
+          throw new PhoneActionError("ACTION_FAILED", "Android returned an invalid screenshot");
+        }
+        pngBuffer = png;
       }
-      const png = await onDevice(serial, ["exec-out", "screencap", "-p"], true);
-      if (!png.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))) {
-        throw new PhoneActionError("ACTION_FAILED", "Android returned an invalid screenshot");
-      }
+
+      validateScreenFrameBytes(pngBuffer);
+
+      const saved = saveImage(pngBuffer, "image/png");
+      const filename = basename(saved.path);
+      const urlPath = `/api/attachments/${filename}`;
+
       return {
         content: [
-          { type: "text", text: `Android screenshot from ${serial}` },
-          { type: "image", data: png.toString("base64"), mimeType: "image/png" },
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "ok",
+              message: `Native Android screenshot from ${serial}`,
+              urlPath,
+              path: urlPath,
+              kind: "image",
+              mime: "image/png",
+              name: filename,
+              visibility: "user_visible",
+            }),
+          },
+          { type: "image", data: pngBuffer.toString("base64"), mimeType: "image/png" },
         ],
       };
     }
 
     if (name === "list_apps") {
-      const query = typeof args.query === "string" ? args.query : undefined;
+      const query = typeof args.query === "string" ? args.query.toLowerCase() : undefined;
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/apps");
+        if (data.ok && Array.isArray(data.apps)) {
+          let list = data.apps as Array<{ name: string; packageName: string; activityName?: string }>;
+          if (query) {
+            list = list.filter(a => a.name.toLowerCase().includes(query) || a.packageName.toLowerCase().includes(query));
+          }
+          if (list.length === 0) {
+            return textResult(query ? `No matching installed apps found for "${query}".` : "No installed apps found.");
+          }
+          const formatted = list.map(a => `${a.name} (${a.packageName}) [LAUNCHABLE / ENABLED]`).join("\n");
+          return textResult(formatted);
+        }
+      }
       const apps = await listAppCatalog(serial, query);
       if (apps.length === 0) {
         return textResult(query ? `No matching installed apps found for "${query}".` : "No installed apps found.");
@@ -948,19 +1008,15 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
       const appName = String(args.name ?? "");
       if (isNativeDriverActive()) {
         const cleaned = appName.trim();
-        const [actOutput, installed] = await Promise.all([
-          onDevice(serial, [
-            "shell", "cmd", "package", "query-activities", "--brief",
-            "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER",
-          ]).catch(() => Buffer.from("")),
-          getInstalledPackages(serial),
-        ]);
-        const launchableMap = parseLaunchableActivities(actOutput.toString("utf8"));
-        const matches = findPackages(cleaned, Array.from(launchableMap.keys()));
-        const targetPkg = matches.length === 1 ? matches[0] : (findPackages(cleaned, Array.from(installed))[0] || cleaned);
-        const data = await callNativeDriver("/open_app", { method: "POST", body: { packageName: targetPkg } });
+        // Dynamic discovery: pass requested name or package directly to native driver
+        // which queries PackageManager dynamically on the Android device
+        const data = await callNativeDriver("/open_app", {
+          method: "POST",
+          body: { packageName: cleaned, name: cleaned }
+        });
         if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || `Could not open ${appName}`);
-        return textResult(`${humanLabelForPackage(targetPkg)} is open.`);
+        const effectivePkg = data.packageName || cleaned;
+        return textResult(`${humanLabelForPackage(effectivePkg)} is open.`);
       }
       const res = await openApp(serial, appName);
       return textResult(res);

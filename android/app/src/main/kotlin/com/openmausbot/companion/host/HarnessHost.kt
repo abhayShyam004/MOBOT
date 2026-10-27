@@ -55,8 +55,10 @@ class HarnessHost(
         /** Phase 7: per-bot browser session state root handed to the
          *  android_browser MCP server via AB_SESSIONS_ROOT. */
         fun browserSessionsDir(): File
-        /** In-app updater: passing current Android app version to host environment. */
-        fun appVersion(): String = "1.0.0"
+        /** In-app updater: passing current Android app version and identity to host environment. */
+        fun appVersion(): String = "1.1.2"
+        fun appVersionCode(): Long = 10102L
+        fun appPackageName(): String = "com.openmausbot.companion"
         /** Device crash-injection point, preview builds only; null otherwise. */
         fun crashPoint(): String? = null
     }
@@ -411,6 +413,8 @@ class HarnessHost(
             "PH_DRIVER_PORT" to PhoneDriverServer.currentPort().toString(),
             "PH_DRIVER_TOKEN" to PhoneDriverServer.currentToken(),
             "APP_VERSION" to files.appVersion(),
+            "APP_VERSION_CODE" to files.appVersionCode().toString(),
+            "APP_PACKAGE_NAME" to files.appPackageName(),
             // The host-identity token is deliberately *not* here. A child's
             // `/proc/<pid>/environ` is readable by the agent PTY on this device
             // (measured), so an environment secret is a public secret. It is

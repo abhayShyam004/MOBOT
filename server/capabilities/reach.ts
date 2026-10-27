@@ -28,6 +28,7 @@ export interface ReachEventDto {
   state: 'scheduled' | 'ringing' | 'answered' | 'snoozed' | 'dismissed' | 'completed' | 'cancelled' | 'missed';
   snoozeMinutes: number;
   snoozeCount: number;
+  botName?: string;
 }
 
 /**
@@ -216,6 +217,7 @@ export class ReachCapability implements DeviceCapability {
           message: { type: 'string', description: 'Detailed reminder text to be spoken aloud upon answering.' },
           time: { type: ['string', 'number'], description: 'Trigger time (e.g. "in 10 minutes", "at 6:30 AM tomorrow", or ISO string).' },
           snoozeMinutes: { type: 'number', description: 'Default snooze interval in minutes (default: 10).' },
+          botName: { type: 'string', description: 'Name of the calling bot (e.g. Twelve, Togepi, MOBOT).' },
         },
         required: ['title', 'time'],
       },
@@ -369,6 +371,7 @@ export class ReachCapability implements DeviceCapability {
           const message = String(params.message || title).trim();
           const triggerTimeMs = parseReachTriggerTime(params.time as string | number);
           const snoozeMinutes = typeof params.snoozeMinutes === 'number' ? params.snoozeMinutes : 10;
+          const botName = params.botName ? String(params.botName).trim() : 'Twelve';
 
           if (this.isDriverAvailable()) {
             const resp = await this.callNativeDriver('/reach/schedule', {
@@ -379,6 +382,7 @@ export class ReachCapability implements DeviceCapability {
                 message,
                 triggerTimeMs,
                 snoozeMinutes,
+                botName,
               },
               signal: context?.signal,
             });
@@ -405,6 +409,7 @@ export class ReachCapability implements DeviceCapability {
               state: 'scheduled',
               snoozeMinutes,
               snoozeCount: 0,
+              botName,
             };
             const saved = defaultHermeticReachMockStore.schedule(event);
             return {

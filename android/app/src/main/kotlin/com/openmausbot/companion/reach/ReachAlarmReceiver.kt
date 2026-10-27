@@ -90,8 +90,8 @@ class ReachAlarmReceiver : BroadcastReceiver() {
             val channelId = if (isCall) CHANNEL_CALLS else CHANNEL_ALARMS
             val category = if (isCall) NotificationCompat.CATEGORY_CALL else NotificationCompat.CATEGORY_ALARM
 
-            val title = if (isCall) "MOBOT Call Reminder: ${event.title}" else "MOBOT Alarm: ${event.title}"
-            val contentText = if (event.message.isNotBlank()) event.message else "Tap to answer or dismiss"
+            val title = if (isCall) "${event.botName} Call Reminder: ${event.title}" else "MOBOT Alarm: ${event.title}"
+            val contentText = if (event.message.isNotBlank()) event.message else "Tap to answer call from ${event.botName}"
 
             val notification = NotificationCompat.Builder(context, channelId)
                 .setSmallIcon(R.mipmap.ic_launcher)

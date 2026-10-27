@@ -18,6 +18,8 @@ import { newId, type ModelSelection } from "./contracts.ts";
 import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { enforceResponseLength } from "./response-length.ts";
+import { isProhibitedScreenFrame } from "./screen-frame-gate.ts";
+import { canonicalizeAssistantResponse } from "./canonical-response.ts";
 import { removeDocumentsForThread } from "./turn-files.ts";
 import { botAvatarProfile } from "../shared/bot-avatar.ts";
 import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
@@ -113,7 +115,16 @@ export type TaskPatch = Partial<Pick<TaskRecord, typeof TASK_PATCH_FIELDS[number
 function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number }>(message: T, userPrompt?: string): T {
   if (message.role !== "bot") return message;
   const out = { ...message };
-  if (typeof out.text === "string") out.text = enforceResponseLength(redactSecretsInText(out.text), { userPrompt });
+  if (typeof out.text === "string") {
+    const canonical = canonicalizeAssistantResponse(out.text, { userPrompt });
+    out.text = canonical.text;
+    if (canonical.structured && !(out as any).structured) {
+      (out as any).structured = canonical.structured;
+      if (!out.text && (out as any).kind === "text") {
+        (out as any).kind = "structured";
+      }
+    }
+  }
   if (out.tool?.name) {
     out.tool = { ...out.tool, name: redactSecretsInText(out.tool.name) };
     if (out.tool.summary) out.tool.summary = redactSecretsInText(out.tool.summary);
@@ -1246,6 +1257,10 @@ export class Store {
   appendMessage(threadId: string, message: Omit<Message, "id" | "at"> & { at?: number }): Message {
     const t = this.thread(threadId);
     const lastUserPrompt = [...t.messages].reverse().find((m) => m.role === "user" && m.kind === "text")?.text;
+    if (isProhibitedScreenFrame(message, lastUserPrompt)) {
+      // ERR_CHAT_POLLUTION_BLOCKED: Drops prohibited screen frame from chat storage
+      return { id: newId(), at: Date.now(), role: "bot", kind: "screen", turnTerminal: false } as Message;
+    }
     const full: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message, lastUserPrompt) };
     t.messages.push(full);
     t.activeLeafId = full.id;
@@ -1274,9 +1289,13 @@ export class Store {
    * reads turn → artifact → follow-up and the leaf stays where it was. */
   insertMessageAfter(threadId: string, anchorId: string | undefined, message: Omit<Message, "id" | "at">): Message {
     const t = this.thread(threadId);
+    const lastUserPrompt = [...t.messages].reverse().find((m) => m.role === "user" && m.kind === "text")?.text;
+    if (isProhibitedScreenFrame(message, lastUserPrompt)) {
+      // ERR_CHAT_POLLUTION_BLOCKED: Drops prohibited screen frame from chat storage
+      return { id: newId(), at: Date.now(), role: "bot", kind: "screen", turnTerminal: false } as Message;
+    }
     const anchorExists = anchorId !== undefined && t.messages.some((m) => m.id === anchorId);
     if (!anchorExists || t.activeLeafId === anchorId) return this.appendMessage(threadId, message);
-    const lastUserPrompt = [...t.messages].reverse().find((m) => m.role === "user" && m.kind === "text")?.text;
     const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message, lastUserPrompt), parentId: anchorId };
     const children = t.messages.filter((m) => m.parentId === anchorId);
     t.messages.push(full);

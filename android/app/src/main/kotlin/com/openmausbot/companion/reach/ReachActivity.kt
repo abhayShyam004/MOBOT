@@ -46,6 +46,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -138,6 +139,8 @@ class ReachActivity : ComponentActivity() {
         ReachAudioPlayer.stopRinging(this)
         cancelNotification(event)
         ReachStore.getInstance(this).updateState(event.id, ReachEventState.ANSWERED)
+        // Route voice output to the smaller earpiece speaker near the ear
+        ttsSpeaker?.routeToEarpiece()
         speakReminderText(event)
     }
 
@@ -240,50 +243,72 @@ fun CallReminderView(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.SpaceBetween
     ) {
-        // Top branding
+        // Top branding showing calling bot identity
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Spacer(modifier = Modifier.height(32.dp))
             Text(
-                text = "MOBOT CALL REMINDER",
-                color = Color(0xFF64B5F6),
-                fontSize = 13.sp,
+                text = "INCOMING CALL FROM ${event.botName.uppercase()}",
+                color = Color(0xFF38BDF8),
+                fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
                 letterSpacing = 2.sp
             )
             Text(
-                text = "Local scheduled reminder • Not a phone call",
+                text = "MOBOT Voice Reminder • Earpiece Audio",
                 color = Color(0xFF90A4AE),
-                fontSize = 11.sp,
+                fontSize = 12.sp,
                 modifier = Modifier.padding(top = 4.dp)
             )
         }
 
-        // Center content card
+        // Center content card with bot avatar and identity
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
             modifier = Modifier.padding(horizontal = 16.dp)
         ) {
             Box(
                 modifier = Modifier
-                    .size(96.dp)
+                    .size(104.dp)
                     .clip(CircleShape)
-                    .background(Color(0xFF1E293B)),
+                    .background(
+                        Brush.radialGradient(
+                            listOf(Color(0xFF0284C7), Color(0xFF0369A1))
+                        )
+                    ),
                 contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.Call,
-                    contentDescription = "MOBOT Reach",
-                    tint = Color(0xFF38BDF8),
-                    modifier = Modifier.size(48.dp)
+                Text(
+                    text = event.botName.take(1).uppercase(),
+                    color = Color.White,
+                    fontSize = 44.sp,
+                    fontWeight = FontWeight.Bold
                 )
             }
 
-            Spacer(modifier = Modifier.height(24.dp))
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Text(
+                text = event.botName,
+                color = Color.White,
+                fontSize = 28.sp,
+                fontWeight = FontWeight.Bold,
+                textAlign = TextAlign.Center
+            )
+
+            Text(
+                text = if (answered) "Connected with ${event.botName}" else "Calling you...",
+                color = if (answered) Color(0xFF4ADE80) else Color(0xFF38BDF8),
+                fontSize = 15.sp,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.padding(top = 4.dp)
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
 
             Text(
                 text = event.title,
-                color = Color.White,
-                fontSize = 24.sp,
+                color = Color(0xFFE2E8F0),
+                fontSize = 18.sp,
                 fontWeight = FontWeight.SemiBold,
                 textAlign = TextAlign.Center
             )
@@ -296,12 +321,21 @@ fun CallReminderView(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = "Connected • Speaking Reminder",
-                            color = Color(0xFF4ADE80),
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Medium
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFF4ADE80))
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Playing through Earpiece (Private Audio)",
+                                color = Color(0xFF4ADE80),
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
                         Spacer(modifier = Modifier.height(8.dp))
                         Text(
                             text = if (event.message.isNotBlank()) event.message else event.title,
@@ -314,9 +348,10 @@ fun CallReminderView(
             } else {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "Incoming Reminder Alert...",
+                    text = "Pick up to hear voice reminder privately near ear",
                     color = Color(0xFF94A3B8),
-                    fontSize = 14.sp
+                    fontSize = 13.sp,
+                    textAlign = TextAlign.Center
                 )
             }
         }

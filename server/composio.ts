@@ -1910,7 +1910,7 @@ export const CURATED_SLUGS = CURATED.map((c) => c.slug);
 // ── Phase 12 Connected Service Intelligence ─────────────────────────────
 
 export interface ServiceRequirement {
-  serviceName: "gmail" | "github" | "googlecalendar" | "slack" | "linear";
+  serviceName: "gmail" | "github" | "googlecalendar" | "slack" | "linear" | "whatsapp";
   actionDescription: string;
   requiredScopes: string[];
   connectionStatus: "connected" | "disconnected" | "expired" | "rate_limited";
@@ -2171,7 +2171,7 @@ export const defaultServiceSuspensionManager = new ServiceSuspensionManager();
 
 export async function evaluateServiceRequirement(
   cfg: AppConfig,
-  serviceName: "gmail" | "github" | "googlecalendar" | "slack" | "linear",
+  serviceName: "gmail" | "github" | "googlecalendar" | "slack" | "linear" | "whatsapp",
   actionDescription: string,
 ): Promise<ServiceRequirement> {
   const norm = canonicalToolkitSlug(serviceName);

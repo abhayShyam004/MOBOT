@@ -912,7 +912,20 @@ export function resolveLocationIntent(
  * Builds the structural system prompt block for user location context.
  */
 export function formatLocationPromptBlock(location: UserLocation | null): string {
-  if (!location || location.enabled === false || location.provenance === "UNKNOWN/UNAVAILABLE") {
+  if (location && location.enabled === false) {
+    return (
+      " PERSISTENT USER LOCATION CONTEXT:\n" +
+      "- Status: DISABLED_BY_USER (Provenance: UNKNOWN/UNAVAILABLE)\n" +
+      "- Live device location: DISABLED (user disabled location context in Settings).\n" +
+      "- Saved default location: DISABLED\n" +
+      "- MANDATORY INVARIANTS:\n" +
+      "  1. ZERO FABRICATION: You MUST NEVER invent, fabricate, assume, or guess a user location. NEVER substitute any arbitrary, demo, mock, or unconfigured location.\n" +
+      "  2. Direct Location Questions: The user has explicitly disabled location context in Settings. State plainly and truthfully that location context has been disabled by the user.\n" +
+      "  3. Explicit User Context: The user may still provide an explicit location for any specific query (e.g. 'restaurants in Seattle').\n" +
+      "  4. Non-Geographic Tasks: For unrelated tasks (coding, math, general science, creative writing), NEVER mention or speculate about location."
+    );
+  }
+  if (!location || location.provenance === "UNKNOWN/UNAVAILABLE") {
     return (
       " PERSISTENT USER LOCATION CONTEXT:\n" +
       "- Status: UNKNOWN/UNAVAILABLE (Provenance: UNKNOWN/UNAVAILABLE)\n" +
@@ -1384,4 +1397,431 @@ export class ScopedLocationStore {
 }
 
 export const defaultScopedLocationStore = new ScopedLocationStore();
+
+// ════════════════════════════════════════════════════════════════════════════
+// Official Roadmap Phase 36: Location as Real Context
+// Specification: mobot_54_phases_prompt.md:1951-1995
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface LocationContextResolution {
+  status:
+    | "AVAILABLE"
+    | "PERMISSION_DENIED"
+    | "DISABLED_BY_USER"
+    | "STALE"
+    | "UNKNOWN";
+  location?: {
+    latitude: number;
+    longitude: number;
+    accuracyMeters: number;
+    city?: string;
+    region?: string;
+    country?: string;
+    provenance: LocationProvenance;
+    timestampMs: number;
+  };
+  policyNotice?: string;
+}
+
+export const LOCATION_FRESHNESS_TTL_MS = 15 * 60 * 1000; // 15 minutes = 900,000 ms
+
+export interface CachedDeviceFix {
+  latitude: number;
+  longitude: number;
+  accuracyMeters: number;
+  city?: string;
+  region?: string;
+  country?: string;
+  provenance: LocationProvenance;
+  timestampMs: number;
+  provider?: string;
+}
+
+let cachedDeviceFix: CachedDeviceFix | null = null;
+let lastRefreshTriggeredMs = 0;
+const MIN_REFRESH_INTERVAL_MS = 30_000; // Throttle background GPS polls to at most once per 30s
+
+export function getCachedDeviceFix(): CachedDeviceFix | null {
+  return cachedDeviceFix ? { ...cachedDeviceFix } : null;
+}
+
+export function setCachedDeviceFix(fix: CachedDeviceFix | null): void {
+  cachedDeviceFix = fix ? { ...fix } : null;
+}
+
+export function clearCachedDeviceFix(): void {
+  cachedDeviceFix = null;
+  lastRefreshTriggeredMs = 0;
+}
+
+export function isLocationContextDisabled(customDataDir: string = DATA_DIR): boolean {
+  const filePath = join(customDataDir, LOCATION_FILE);
+  if (existsSync(filePath)) {
+    try {
+      const content = readFileSync(filePath, "utf8");
+      const parsed = JSON.parse(content);
+      if (parsed && parsed.enabled === false) {
+        return true;
+      }
+    } catch {}
+  }
+  const configPath = join(customDataDir, "config.json");
+  if (existsSync(configPath)) {
+    try {
+      const cfg = JSON.parse(readFileSync(configPath, "utf8"));
+      if (cfg?.profile?.location && cfg.profile.location.enabled === false) {
+        return true;
+      }
+    } catch {}
+  }
+  return false;
+}
+
+export function setLocationContextEnabled(
+  enabled: boolean,
+  customDataDir: string = DATA_DIR
+): boolean {
+  if (customDataDir === DATA_DIR && (process.env.VITEST || process.env.NODE_ENV === "test")) {
+    throw new Error("Tests must NEVER mutate production DATA_DIR! Provide an isolated fixture directory.");
+  }
+  const filePath = join(customDataDir, LOCATION_FILE);
+  try {
+    mkdirSync(customDataDir, { recursive: true });
+    let existing: Record<string, unknown> = {};
+    if (existsSync(filePath)) {
+      try {
+        existing = JSON.parse(readFileSync(filePath, "utf8"));
+      } catch {}
+    }
+    existing.enabled = enabled;
+    existing.updatedAt = Date.now();
+    if (!existing.provenance) {
+      existing.provenance = "SAVED_USER";
+    }
+    writeFileAtomic(filePath, JSON.stringify(existing, null, 2), { mode: 0o600 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function validateLocationCoordinates(
+  lat: unknown,
+  lng: unknown,
+  accuracyMeters?: unknown
+): boolean {
+  if (typeof lat !== "number" || !Number.isFinite(lat) || lat < -90 || lat > 90) {
+    return false;
+  }
+  if (typeof lng !== "number" || !Number.isFinite(lng) || lng < -180 || lng > 180) {
+    return false;
+  }
+  if (
+    accuracyMeters !== undefined &&
+    (typeof accuracyMeters !== "number" || !Number.isFinite(accuracyMeters) || accuracyMeters < 0)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function evaluateLocationFreshness(
+  timestampMs: unknown,
+  referenceTimeMs: number = Date.now(),
+  ttlMs: number = LOCATION_FRESHNESS_TTL_MS
+): {
+  status: "AVAILABLE" | "STALE" | "UNKNOWN";
+  ageMs: number;
+  valid: boolean;
+  reason?: string;
+} {
+  if (typeof timestampMs !== "number" || !Number.isFinite(timestampMs) || timestampMs <= 0) {
+    return { status: "UNKNOWN", ageMs: -1, valid: false, reason: "Invalid timestamp: not a positive finite number" };
+  }
+  // Clock skew tolerance: reject timestamps more than 60s in the future
+  if (timestampMs > referenceTimeMs + 60_000) {
+    return { status: "UNKNOWN", ageMs: -1, valid: false, reason: "Future-dated timestamp rejected" };
+  }
+  const ageMs = Math.max(0, referenceTimeMs - timestampMs);
+  if (ageMs > ttlMs) {
+    return { status: "STALE", ageMs, valid: true, reason: `Location fix is older than ${ttlMs / 60000} minutes` };
+  }
+  return { status: "AVAILABLE", ageMs, valid: true };
+}
+
+async function fetchNativeDeviceLocation(refresh = false): Promise<any> {
+  const port = process.env.PH_DRIVER_PORT;
+  const token = process.env.PH_DRIVER_TOKEN || "";
+  if (!port || Number(port) <= 0) return null;
+
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}/location`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({ refresh }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+export interface LocationResolverOptions {
+  customDataDir?: string;
+  referenceTimeMs?: number;
+  ttlMs?: number;
+  forceDisabled?: boolean;
+  allowBackgroundRefresh?: boolean;
+  mockProvider?: () => Promise<{
+    permissionGranted: boolean;
+    rawCoordinates?: { latitude: number; longitude: number; accuracyMeters?: number };
+    timestampMs?: number;
+    city?: string;
+    region?: string;
+    country?: string;
+    isSyntheticOrFixture?: boolean;
+    status?: "AVAILABLE" | "PERMISSION_DENIED" | "UNKNOWN";
+  } | null>;
+}
+
+export async function resolveLocationContext(
+  options: LocationResolverOptions = {}
+): Promise<LocationContextResolution> {
+  const now = options.referenceTimeMs ?? Date.now();
+  const ttl = options.ttlMs ?? LOCATION_FRESHNESS_TTL_MS;
+  const customDataDir = options.customDataDir ?? DATA_DIR;
+
+  // 1. Authoritative Boundary Check: DISABLED_BY_USER
+  if (options.forceDisabled || isLocationContextDisabled(customDataDir)) {
+    return {
+      status: "DISABLED_BY_USER",
+      policyNotice: "Location context is disabled by user in Settings. Background GPS polls and location usage are prohibited.",
+    };
+  }
+
+  // 2. Hardware / Provider Query
+  let providerResult: {
+    permissionGranted: boolean;
+    rawCoordinates?: { latitude: number; longitude: number; accuracyMeters?: number };
+    timestampMs?: number;
+    city?: string;
+    region?: string;
+    country?: string;
+    isSyntheticOrFixture?: boolean;
+    status?: "AVAILABLE" | "PERMISSION_DENIED" | "UNKNOWN";
+  } | null = null;
+
+  if (options.mockProvider) {
+    providerResult = await options.mockProvider();
+  } else if (Boolean(process.env.PH_DRIVER_PORT && Number(process.env.PH_DRIVER_PORT) > 0)) {
+    try {
+      const resp = await fetchNativeDeviceLocation(false);
+      if (resp && typeof resp === "object") {
+        if (resp.code === "ERR_LOCATION_PERMISSION_REVOKED" || resp.status === "PERMISSION_DENIED") {
+          providerResult = { permissionGranted: false };
+        } else if (resp.ok && resp.location) {
+          providerResult = {
+            permissionGranted: true,
+            rawCoordinates: {
+              latitude: resp.location.latitude,
+              longitude: resp.location.longitude,
+              accuracyMeters: resp.location.accuracyMeters,
+            },
+            timestampMs: resp.location.timestampMs,
+            city: resp.location.city,
+            region: resp.location.region,
+            country: resp.location.country,
+          };
+        }
+      }
+    } catch {
+      // Driver fetch error
+    }
+  }
+
+  if (providerResult) {
+    // Permission denial / revocation handling
+    if (!providerResult.permissionGranted) {
+      // Invariant: Do not return cached coordinates when permission is revoked
+      return {
+        status: "PERMISSION_DENIED",
+        policyNotice: "ERR_LOCATION_PERMISSION_REVOKED: Android location permission is not granted or has been revoked.",
+      };
+    }
+
+    // Fixture / synthetic contamination check
+    if (providerResult.isSyntheticOrFixture) {
+      recordProvenanceDiagnostic({
+        code: "ERR_PROVENANCE_CONTAMINATION",
+        message: "Rejected synthetic or fixture device location payload from provider",
+        timestamp: now,
+        source: "DEVICE_LIVE",
+        isSynthetic: true,
+      });
+      return {
+        status: "UNKNOWN",
+        policyNotice: "Synthetic or fixture location rejected from production context.",
+      };
+    }
+
+    if (providerResult.rawCoordinates) {
+      const { latitude, longitude, accuracyMeters = 20 } = providerResult.rawCoordinates;
+      if (!validateLocationCoordinates(latitude, longitude, accuracyMeters)) {
+        return {
+          status: "UNKNOWN",
+          policyNotice: "Device provider returned invalid coordinates.",
+        };
+      }
+
+      const fixTimestamp = providerResult.timestampMs ?? now;
+      const freshness = evaluateLocationFreshness(fixTimestamp, now, ttl);
+
+      const resolvedLoc = {
+        latitude,
+        longitude,
+        accuracyMeters,
+        city: providerResult.city,
+        region: providerResult.region,
+        country: providerResult.country,
+        provenance: "DEVICE_LIVE" as LocationProvenance,
+        timestampMs: fixTimestamp,
+      };
+
+      if (!freshness.valid) {
+        return {
+          status: "UNKNOWN",
+          policyNotice: freshness.reason || "Invalid location timestamp",
+        };
+      }
+
+      if (freshness.status === "AVAILABLE") {
+        setCachedDeviceFix(resolvedLoc);
+        return {
+          status: "AVAILABLE",
+          location: resolvedLoc,
+        };
+      } else {
+        // STALE
+        setCachedDeviceFix(resolvedLoc);
+        if (options.allowBackgroundRefresh !== false && (now - lastRefreshTriggeredMs >= MIN_REFRESH_INTERVAL_MS)) {
+          lastRefreshTriggeredMs = now;
+          fetchNativeDeviceLocation(true).catch(() => {});
+        }
+        return {
+          status: "STALE",
+          location: resolvedLoc,
+          policyNotice: `Location fix is older than ${ttl / 60000} minutes (stale).`,
+        };
+      }
+    }
+  }
+
+  // 3. Cached Live Fix Evaluation (if hardware not probed or had no fix)
+  if (cachedDeviceFix) {
+    const freshness = evaluateLocationFreshness(cachedDeviceFix.timestampMs, now, ttl);
+    if (freshness.valid) {
+      if (freshness.status === "AVAILABLE") {
+        return {
+          status: "AVAILABLE",
+          location: { ...cachedDeviceFix },
+        };
+      } else {
+        if (options.allowBackgroundRefresh !== false && (now - lastRefreshTriggeredMs >= MIN_REFRESH_INTERVAL_MS)) {
+          lastRefreshTriggeredMs = now;
+          fetchNativeDeviceLocation(true).catch(() => {});
+        }
+        return {
+          status: "STALE",
+          location: { ...cachedDeviceFix },
+          policyNotice: `Cached location fix is older than ${ttl / 60000} minutes (stale).`,
+        };
+      }
+    }
+  }
+
+  // 4. Saved User Profile Location
+  const saved = loadUserLocation(customDataDir);
+  if (saved && saved.enabled !== false && saved.provenance === "SAVED_USER") {
+    if (
+      saved.latitude !== undefined &&
+      saved.longitude !== undefined &&
+      validateLocationCoordinates(saved.latitude, saved.longitude)
+    ) {
+      const ts = saved.updatedAt || saved.collectedAtMs || now;
+      const freshness = evaluateLocationFreshness(ts, now, ttl);
+      const loc = {
+        latitude: saved.latitude,
+        longitude: saved.longitude,
+        accuracyMeters: 50,
+        city: saved.city,
+        region: saved.region,
+        country: saved.country,
+        provenance: "SAVED_USER" as LocationProvenance,
+        timestampMs: ts,
+      };
+      if (freshness.status === "AVAILABLE") {
+        return {
+          status: "AVAILABLE",
+          location: loc,
+        };
+      } else {
+        return {
+          status: "STALE",
+          location: loc,
+          policyNotice: "Saved profile location timestamp is stale.",
+        };
+      }
+    }
+  }
+
+  // 5. UNKNOWN
+  return {
+    status: "UNKNOWN",
+    policyNotice: "No live device location or saved location is currently available.",
+  };
+}
+
+export function formatLocationResolutionPromptBlock(res: LocationContextResolution): string {
+  if (res.status === "DISABLED_BY_USER") {
+    return (
+      " PERSISTENT USER LOCATION CONTEXT:\n" +
+      "- Status: DISABLED_BY_USER (User disabled location context in Settings)\n" +
+      "- Live device location: DISABLED\n" +
+      "- MANDATORY INVARIANT: The user has explicitly turned off location context. NEVER attempt, speculate, guess, or use location.\n"
+    );
+  }
+  if (res.status === "PERMISSION_DENIED") {
+    return (
+      " PERSISTENT USER LOCATION CONTEXT:\n" +
+      "- Status: PERMISSION_DENIED (Android OS location permission denied or revoked)\n" +
+      "- Live device location: UNAVAILABLE\n" +
+      "- MANDATORY INVARIANT: Location permission is missing. If the user asks for nearby items or current location, inform them truthfully that location permission is denied.\n"
+    );
+  }
+  if (res.status === "STALE" && res.location) {
+    return (
+      " PERSISTENT USER LOCATION CONTEXT:\n" +
+      "- Status: STALE (Fix is older than 15 minutes; background refresh requested)\n" +
+      `- Last known coordinates: ${res.location.latitude.toFixed(4)}, ${res.location.longitude.toFixed(4)} (Accuracy: ~${Math.round(res.location.accuracyMeters)}m)\n` +
+      `- Timestamp: ${new Date(res.location.timestampMs).toISOString()}\n` +
+      "- Provenance: " + res.location.provenance + "\n" +
+      "- MANDATORY INVARIANT: This location fix is stale. Do not present it as a guaranteed live reading without noting its age.\n"
+    );
+  }
+  if (res.status === "AVAILABLE" && res.location) {
+    return (
+      " PERSISTENT USER LOCATION CONTEXT:\n" +
+      "- Status: AVAILABLE\n" +
+      `- Coordinates: ${res.location.latitude.toFixed(4)}, ${res.location.longitude.toFixed(4)} (Accuracy: ~${Math.round(res.location.accuracyMeters)}m)\n` +
+      `- Timestamp: ${new Date(res.location.timestampMs).toISOString()}\n` +
+      "- Provenance: " + res.location.provenance + "\n"
+    );
+  }
+  return formatLocationPromptBlock(null);
+}
+
 

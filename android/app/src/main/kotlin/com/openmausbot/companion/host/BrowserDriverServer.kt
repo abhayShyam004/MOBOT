@@ -352,6 +352,10 @@ class BrowserDriverServer private constructor(
                 view.translationX = 0f
                 view.draw(Canvas(b))
                 view.translationX = oldTranslation
+                if (isBitmapBlankOrBlack(b)) {
+                    b.recycle()
+                    throw IllegalStateException("ERR_SCREEN_CAPTURE_BLANK: WebView render resulted in blank or all-black frame")
+                }
                 val stream = ByteArrayOutputStream()
                 b.compress(Bitmap.CompressFormat.JPEG, 70, stream)
                 b.recycle()
@@ -365,6 +369,30 @@ class BrowserDriverServer private constructor(
         if (!latch.await(20, TimeUnit.SECONDS)) throw IllegalStateException("screenshot timed out")
         error[0]?.let { throw IllegalArgumentException(it) }
         return captured[0] ?: throw IllegalStateException("screenshot produced no image")
+    }
+
+    private fun isBitmapBlankOrBlack(bitmap: Bitmap): Boolean {
+        val width = bitmap.width
+        val height = bitmap.height
+        if (width <= 0 || height <= 0) return true
+        val sampleStepX = maxOf(1, width / 20)
+        val sampleStepY = maxOf(1, height / 20)
+        var allZero = true
+        var maxLuminance = 0
+        for (y in 0 until height step sampleStepY) {
+            for (x in 0 until width step sampleStepX) {
+                val pixel = bitmap.getPixel(x, y)
+                val r = (pixel shr 16) and 0xff
+                val g = (pixel shr 8) and 0xff
+                val b = pixel and 0xff
+                val lum = (r * 299 + g * 587 + b * 114) / 1000
+                if (lum > maxLuminance) maxLuminance = lum
+                if (r != 0 || g != 0 || b != 0) {
+                    allZero = false
+                }
+            }
+        }
+        return allZero || maxLuminance < 2
     }
 
     private fun cookies(name: String): JSONObject {

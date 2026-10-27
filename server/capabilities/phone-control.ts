@@ -9,13 +9,91 @@
  * - Communicates with in-app PhoneDriverServer over loopback HTTP or falls back to ADB
  */
 
-import {
+import { basename } from 'node:path';
+import type {
   DeviceCapability,
   CapabilityResult,
   CapabilityContext,
+  CapabilityHealthStatus,
   OperationSchema,
+  CapabilityErrorCategory,
 } from './types.ts';
 import { checkLivePhoneControlAvailability } from './action-truthfulness.ts';
+import { validateScreenFrameBytes } from '../screen-frame-gate.ts';
+import { saveImage } from '../attachments.ts';
+
+export type PhoneControlState =
+  | 'UNAVAILABLE'
+  | 'DRIVER_STARTING'
+  | 'DRIVER_NOT_READY'
+  | 'DRIVER_READY'
+  | 'ACCESSIBILITY_DISABLED'
+  | 'ACCESSIBILITY_CONNECTING'
+  | 'ACCESSIBILITY_DISCONNECTED'
+  | 'ACCESSIBILITY_READY'
+  | 'PERMISSION_SETUP_REQUIRED'
+  | 'AWAITING_USER_SYSTEM_ACTION'
+  | 'APP_LAUNCH_REQUESTED'
+  | 'APP_FOREGROUND_PENDING'
+  | 'APP_FOREGROUND_VERIFIED'
+  | 'TARGET_CONTENT_PENDING'
+  | 'TARGET_CONTENT_VERIFIED'
+  | 'INTERACTION_PENDING'
+  | 'INTERACTION_VERIFIED'
+  | 'SCREEN_CAPTURE_PENDING'
+  | 'SCREEN_CAPTURE_VERIFIED'
+  | 'RECOVERABLE_FAILURE'
+  | 'TERMINAL_FAILURE';
+
+export interface PhoneControlStatusReport {
+  state: PhoneControlState;
+  operational: boolean;
+  accessibilityEnabled: boolean;
+  connected: boolean;
+  foregroundPackage: string;
+  mode: 'native_loopback' | 'adb_usb' | 'offline';
+  reason?: string;
+  timestampMs: number;
+}
+
+export interface SuspendedPhoneControlTask {
+  taskId: string;
+  threadId: string;
+  botId: string;
+  objective: string;
+  missingRequirement: 'accessibility' | 'notification' | 'overlay' | 'provider';
+  pendingAction: {
+    capabilityId: string;
+    operation: string;
+    parameters: Record<string, unknown>;
+  };
+  state: PhoneControlState;
+  createdAtMs: number;
+}
+
+export class PhoneControlTaskCheckpointManager {
+  private static instance: PhoneControlTaskCheckpointManager;
+  private readonly checkpoints = new Map<string, SuspendedPhoneControlTask>();
+
+  static getInstance(): PhoneControlTaskCheckpointManager {
+    if (!PhoneControlTaskCheckpointManager.instance) {
+      PhoneControlTaskCheckpointManager.instance = new PhoneControlTaskCheckpointManager();
+    }
+    return PhoneControlTaskCheckpointManager.instance;
+  }
+
+  suspendTask(checkpoint: SuspendedPhoneControlTask): void {
+    this.checkpoints.set(checkpoint.threadId, checkpoint);
+  }
+
+  getSuspendedTask(threadId: string): SuspendedPhoneControlTask | undefined {
+    return this.checkpoints.get(threadId);
+  }
+
+  clearTask(threadId: string): void {
+    this.checkpoints.delete(threadId);
+  }
+}
 
 export class PhoneControlCapability implements DeviceCapability {
   readonly id = 'device.phone_control';
@@ -184,9 +262,55 @@ export class PhoneControlCapability implements DeviceCapability {
         },
       },
     },
+    {
+      name: 'setup_permission',
+      description: 'Initiate user-controlled permission setup flow (accessibility settings, app details settings, or notifications) on Android.',
+      risk: 'low',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          type: { type: 'string', enum: ['accessibility', 'app_settings', 'notifications'], description: 'Type of permission setup to open' },
+        },
+      },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          opened: { type: 'boolean' },
+          type: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+    },
+    {
+      name: 'list_apps',
+      description: 'List installed launchable applications directly from native Android PackageManager.',
+      risk: 'low',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          apps: { type: 'array' },
+          count: { type: 'number' },
+        },
+      },
+    },
+    {
+      name: 'restore_host',
+      description: 'Restore the MOBOT companion application to the foreground after controlling another app.',
+      risk: 'low',
+      inputSchema: { type: 'object', properties: {} },
+      outputSchema: {
+        type: 'object',
+        properties: {
+          restored: { type: 'boolean' },
+          foregroundPackage: { type: 'string' },
+          message: { type: 'string' },
+        },
+      },
+    },
   ];
 
-  private async callNativeDriver(endpoint: string, options: { method?: string; body?: unknown } = {}): Promise<any> {
+  private async callNativeDriver(endpoint: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}): Promise<any> {
     const port = process.env.PH_DRIVER_PORT;
     const token = process.env.PH_DRIVER_TOKEN || '';
     if (!port || Number(port) <= 0) {
@@ -200,6 +324,7 @@ export class PhoneControlCapability implements DeviceCapability {
         Authorization: `Bearer ${token}`,
       },
       body: options.body ? JSON.stringify(options.body) : undefined,
+      signal: options.signal,
     });
 
     if (!res.ok) {
@@ -208,6 +333,86 @@ export class PhoneControlCapability implements DeviceCapability {
     }
 
     return await res.json();
+  }
+
+  /**
+   * Official Roadmap Phase 13: Capability State Awareness live health probe.
+   */
+  async checkHealth(
+    _context?: CapabilityContext,
+    signal?: AbortSignal
+  ): Promise<CapabilityHealthStatus> {
+    const truthStatus = checkLivePhoneControlAvailability();
+    if (!truthStatus.operational && truthStatus.reason?.toLowerCase().includes("mock")) {
+      return {
+        capabilityId: this.id,
+        state: 'DRIVER_OFFLINE',
+        lastCheckedMs: Date.now(),
+        diagnosticDetails: truthStatus.reason,
+        remediationAction: 'restart_driver',
+      };
+    }
+
+    const nativePort = process.env.PH_DRIVER_PORT;
+    const isNativeAvailable = Boolean(nativePort && Number(nativePort) > 0);
+
+    if (isNativeAvailable) {
+      try {
+        const statusData = await this.callNativeDriver('/status', { signal });
+        if (statusData.accessibilityEnabled === false || statusData.reason?.includes('AccessibilityService not enabled')) {
+          return {
+            capabilityId: this.id,
+            state: 'PERMISSION_REQUIRED',
+            lastCheckedMs: Date.now(),
+            diagnosticDetails: statusData.reason || 'AccessibilityService permission is disabled or not granted.',
+            remediationAction: 'prompt_permission',
+          };
+        }
+        if (!statusData.connected) {
+          return {
+            capabilityId: this.id,
+            state: 'DRIVER_OFFLINE',
+            lastCheckedMs: Date.now(),
+            diagnosticDetails: statusData.reason || 'Native driver not connected',
+            remediationAction: 'restart_driver',
+          };
+        }
+        return {
+          capabilityId: this.id,
+          state: 'AVAILABLE',
+          lastCheckedMs: Date.now(),
+        };
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (err instanceof Error && (err.name === 'AbortError' || msg.includes('aborted'))) {
+          throw err;
+        }
+        return {
+          capabilityId: this.id,
+          state: 'DRIVER_OFFLINE',
+          lastCheckedMs: Date.now(),
+          diagnosticDetails: `Native phone driver offline: ${msg}`,
+          remediationAction: 'restart_driver',
+        };
+      }
+    }
+
+    if (process.env.OMB_PHONE_DRIVER_ACTIVE === '1') {
+      return {
+        capabilityId: this.id,
+        state: 'AVAILABLE',
+        lastCheckedMs: Date.now(),
+        diagnosticDetails: 'Physical USB ADB phone driver is active',
+      };
+    }
+
+    return {
+      capabilityId: this.id,
+      state: 'DRIVER_OFFLINE',
+      lastCheckedMs: Date.now(),
+      diagnosticDetails: 'Native phone driver loopback port (PH_DRIVER_PORT) is not set.',
+      remediationAction: 'restart_driver',
+    };
   }
 
   async execute(
@@ -223,14 +428,24 @@ export class PhoneControlCapability implements DeviceCapability {
       if (isNativeAvailable) {
         try {
           const statusData = await this.callNativeDriver('/status');
+          const operational = Boolean(statusData.connected);
+          const accessibilityEnabled = Boolean(statusData.accessibilityEnabled);
+          const state: PhoneControlState = operational && accessibilityEnabled
+            ? 'ACCESSIBILITY_READY'
+            : !accessibilityEnabled
+              ? 'ACCESSIBILITY_DISABLED'
+              : 'DRIVER_NOT_READY';
           return {
             success: true,
             data: {
-              operational: Boolean(statusData.connected),
-              accessibilityEnabled: Boolean(statusData.accessibilityEnabled),
+              state,
+              operational,
+              accessibilityEnabled,
+              connected: operational,
               foregroundPackage: statusData.foregroundPackage || 'unknown',
               mode: 'native_loopback',
               reason: statusData.reason,
+              timestampMs: Date.now(),
             },
           };
         } catch (err: unknown) {
@@ -238,10 +453,14 @@ export class PhoneControlCapability implements DeviceCapability {
           return {
             success: true,
             data: {
+              state: 'UNAVAILABLE' as PhoneControlState,
               operational: false,
               accessibilityEnabled: false,
+              connected: false,
+              foregroundPackage: 'unknown',
               mode: 'native_loopback',
               reason: `Native phone driver offline: ${msg}`,
+              timestampMs: Date.now(),
             },
           };
         }
@@ -285,15 +504,24 @@ export class PhoneControlCapability implements DeviceCapability {
               x: params.x,
               y: params.y,
               exact: params.exact,
+              gesture: params.gesture,
+              swipeVector: params.swipeVector,
             },
           });
           if (!data.ok) {
+            const isScreenLocked = data.code === 'ERR_SCREEN_LOCKED';
+            const errCategory: CapabilityErrorCategory = data.code === 'ERR_SECURITY_RESTRICTED'
+              ? 'permission_denied'
+              : isScreenLocked
+                ? 'unavailable'
+                : 'execution_failed';
             return {
               success: false,
               error: {
                 code: data.code || 'ERR_TAP_FAILED',
                 message: data.error || 'Tap action failed',
-                category: 'execution_failed',
+                category: errCategory,
+                details: { recoverable: isScreenLocked },
               },
             };
           }
@@ -307,12 +535,15 @@ export class PhoneControlCapability implements DeviceCapability {
             body: { text },
           });
           if (!data.ok) {
+            const isScreenLocked = data.code === 'ERR_SCREEN_LOCKED';
+            const errCategory: CapabilityErrorCategory = isScreenLocked ? 'unavailable' : 'execution_failed';
             return {
               success: false,
               error: {
                 code: data.code || 'ERR_TYPE_FAILED',
                 message: data.error || 'Text input failed',
-                category: 'execution_failed',
+                category: errCategory,
+                details: { recoverable: isScreenLocked },
               },
             };
           }
@@ -326,12 +557,15 @@ export class PhoneControlCapability implements DeviceCapability {
             body: { direction },
           });
           if (!data.ok) {
+            const isScreenLocked = data.code === 'ERR_SCREEN_LOCKED';
+            const errCategory: CapabilityErrorCategory = isScreenLocked ? 'unavailable' : 'execution_failed';
             return {
               success: false,
               error: {
                 code: data.code || 'ERR_SCROLL_FAILED',
                 message: data.error || 'Scroll action failed',
-                category: 'execution_failed',
+                category: errCategory,
+                details: { recoverable: isScreenLocked },
               },
             };
           }
@@ -359,16 +593,27 @@ export class PhoneControlCapability implements DeviceCapability {
 
         if (operation === 'open_app') {
           const packageName = String(params.packageName || '').trim();
+          const name = String(params.name || '').trim();
           const data = await this.callNativeDriver('/open_app', {
             method: 'POST',
-            body: { packageName },
+            body: { packageName, name },
           });
           if (!data.ok) {
             return {
               success: false,
               error: {
                 code: data.code || 'ERR_OPEN_APP_FAILED',
-                message: data.error || `Could not open application ${packageName}`,
+                message: data.error || `Could not open application ${packageName || name}`,
+                category: 'execution_failed',
+              },
+            };
+          }
+          if (data.settled === false && data.foregroundPackage && data.foregroundPackage !== 'unknown') {
+            return {
+              success: false,
+              error: {
+                code: 'ERR_APP_LAUNCH_NOT_VERIFIED',
+                message: data.error || `Application ${packageName || name} did not become foreground (current foreground package: ${data.foregroundPackage})`,
                 category: 'execution_failed',
               },
             };
@@ -377,8 +622,66 @@ export class PhoneControlCapability implements DeviceCapability {
             success: true,
             data: {
               launched: true,
-              packageName,
+              packageName: data.packageName || packageName,
+              settled: data.settled ?? true,
               foregroundPackage: data.foregroundPackage,
+              message: data.message,
+            },
+          };
+        }
+
+        if (operation === 'setup_permission') {
+          const type = String(params.type || 'accessibility');
+          const data = await this.callNativeDriver('/setup_permission', {
+            method: 'POST',
+            body: { type },
+          });
+          if (!data.ok) {
+            return {
+              success: false,
+              error: {
+                code: data.code || 'ERR_SETUP_PERMISSION_FAILED',
+                message: data.error || `Could not open permission setup for ${type}`,
+                category: 'execution_failed',
+              },
+            };
+          }
+          return { success: true, data };
+        }
+
+        if (operation === 'list_apps') {
+          const data = await this.callNativeDriver('/apps');
+          if (!data.ok) {
+            return {
+              success: false,
+              error: {
+                code: data.code || 'ERR_LIST_APPS_FAILED',
+                message: data.error || 'Failed to list applications',
+                category: 'execution_failed',
+              },
+            };
+          }
+          return { success: true, data };
+        }
+
+        if (operation === 'restore_host') {
+          const data = await this.callNativeDriver('/restore_host', { method: 'POST' });
+          if (!data.ok) {
+            return {
+              success: false,
+              error: {
+                code: data.code || 'ERR_RESTORE_FAILED',
+                message: data.error || 'Failed to restore companion host application to foreground',
+                category: 'execution_failed',
+              },
+            };
+          }
+          return {
+            success: true,
+            data: {
+              restored: data.restored ?? true,
+              foregroundPackage: data.foregroundPackage,
+              message: data.message,
             },
           };
         }
@@ -386,7 +689,7 @@ export class PhoneControlCapability implements DeviceCapability {
         if (operation === 'take_screenshot') {
           const data = await this.callNativeDriver('/screenshot', {
             method: 'POST',
-            body: { includeBase64: Boolean(params.includeBase64) },
+            body: { includeBase64: true },
           });
           if (!data.ok) {
             return {
@@ -398,7 +701,37 @@ export class PhoneControlCapability implements DeviceCapability {
               },
             };
           }
-          return { success: true, data };
+
+          let urlPath = '';
+          let savedFilename = '';
+          if (data.base64) {
+            try {
+              const buf = Buffer.from(data.base64, 'base64');
+              validateScreenFrameBytes(buf);
+              const saved = saveImage(buf, 'image/png');
+              savedFilename = basename(saved.path);
+              urlPath = `/api/attachments/${savedFilename}`;
+            } catch (saveErr) {
+              console.warn('[PhoneControlCapability] Failed to save screenshot attachment:', saveErr);
+            }
+          }
+
+          return {
+            success: true,
+            data: {
+              ...data,
+              ...(urlPath ? {
+                urlPath,
+                path: urlPath,
+                attachment: {
+                  kind: 'image' as const,
+                  path: urlPath,
+                  mime: 'image/png',
+                  name: savedFilename,
+                },
+              } : {}),
+            },
+          };
         }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
