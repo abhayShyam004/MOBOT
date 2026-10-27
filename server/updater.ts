@@ -183,8 +183,8 @@ export function parseReleaseManifest(release: GitHubRelease, options?: { preferr
   }
 
   let packageName = "com.openmausbot.companion";
-  const pkgMatch = bodyText.match(/package[:\s=]+([a-zA-Z0-9._]+)/i);
-  if (pkgMatch) {
+  const pkgMatch = bodyText.match(/(?:package|Package)[:\s=]+([a-zA-Z0-9_]+\.[a-zA-Z0-9_.]+)/i);
+  if (pkgMatch && pkgMatch[1].includes(".")) {
     packageName = pkgMatch[1].trim();
   }
 
