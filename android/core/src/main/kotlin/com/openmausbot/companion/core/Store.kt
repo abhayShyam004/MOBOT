@@ -26,6 +26,7 @@ data class CompanionState(
     val reasoning: Map<String, String> = emptyMap(),
     val activeLeafIds: Map<String, String?> = emptyMap(),
     val screens: Map<String, ScreenFrame> = emptyMap(),
+    val telemetry: Map<String, WatchWorkspaceTelemetryEvent> = emptyMap(),
     /**
      * Mid-turn sends the harness is holding until the current turn settles,
      * by thread. They are deliberately NOT in [messages]: appending one now
@@ -284,11 +285,17 @@ data class CompanionState(
         is Frame.Notify -> copy(notifications = (notifications + frame.notification).takeLast(100))
         is Frame.Runtime -> applyRuntime(frame.event)
         is Frame.Screen -> copy(screens = screens + (frame.botId to ScreenFrame(frame.png, frame.mime)))
+        is Frame.WorkspaceTelemetry -> copy(
+            telemetry = telemetry + (frame.event.botId to frame.event),
+            screens = if (!frame.event.frameBase64.isNullOrBlank()) {
+                screens + (frame.event.botId to ScreenFrame(frame.event.frameBase64, "image/png"))
+            } else screens,
+        )
 
         is Frame.Computer, Frame.Config, is Frame.Unknown -> this
     }
 
-    fun clearScreen(botId: String): CompanionState = copy(screens = screens - botId)
+    fun clearScreen(botId: String): CompanionState = copy(screens = screens - botId, telemetry = telemetry - botId)
 
     fun clearStream(threadId: String): CompanionState = copy(
         streaming = streaming - threadId,
@@ -480,6 +487,7 @@ data class CompanionState(
             reasoning = reasoning - threads.toSet(),
             pendingQueued = pendingQueued - threads.toSet(),
             screens = screens - botId,
+            telemetry = telemetry - botId,
         )
     }
 

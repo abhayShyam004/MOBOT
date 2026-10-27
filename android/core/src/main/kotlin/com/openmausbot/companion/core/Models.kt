@@ -1690,6 +1690,35 @@ data class RoutineRunAvailability(
 @Serializable
 data class APIErrorBody(val error: String)
 
+@Serializable
+data class ActiveFileOperation(
+    val path: String,
+    val operation: String = "read", // "read" | "write" | "patch"
+)
+
+@Serializable
+data class WatchWorkspaceTelemetryEvent(
+    val eventId: String,
+    val botId: String,
+    val surface: String = "idle", // "phone_screen" | "browser" | "terminal" | "file_editor" | "service_status" | "idle"
+    val timestampMs: Long = 0L,
+    val isLiveExecution: Boolean = false,
+    val frameBase64: String? = null,
+    val frameHash: String? = null,
+    val terminalChunk: String? = null,
+    val activeFileOperation: ActiveFileOperation? = null,
+    val statusCapsuleText: String = "",
+) {
+    val frameData: ByteArray?
+        get() = frameBase64?.let {
+            try {
+                Base64.getDecoder().decode(it)
+            } catch (_: IllegalArgumentException) {
+                null
+            }
+        }
+}
+
 data class ScreenFrame(val png: String, val mime: String) {
     val data: ByteArray?
         get() = try {

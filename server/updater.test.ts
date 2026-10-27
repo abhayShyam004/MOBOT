@@ -398,6 +398,8 @@ describe("UpdaterManager end-to-end lifecycle", () => {
     const mockHash = createHash("sha256").update(mockApk).digest("hex");
     await manager.checkForUpdates(false, {
       version: "1.1.0",
+      versionCode: 10100,
+      packageName: "com.openmausbot.companion",
       releaseTag: "v1.1.0",
       downloadUrl: "https://example.com/update.apk",
       fileName: "update.apk",

@@ -51,9 +51,10 @@ describe("deliverSseFrame", () => {
     expect(deliverSseFrame(client, "screen", "screen-1")).toBe("sent");
     expect(client.backpressured).toBe(true);
 
-    // Now backpressured: the next screen capture is replaceable, so it's
-    // dropped rather than queued behind the stalled socket.
+    // Now backpressured: the next screen capture or workspace telemetry is replaceable,
+    // so it's dropped rather than queued behind the stalled socket.
     expect(deliverSseFrame(client, "screen", "screen-2")).toBe("dropped");
+    expect(deliverSseFrame(client, "workspace_telemetry", "telemetry-2")).toBe("dropped");
 
     // A durable event is not droppable — it still goes out even while
     // backpressured.

@@ -162,4 +162,16 @@ class ScreenWatchTest {
 
         assertEquals(0, balance)
     }
+
+    @Test
+    fun `Phase 22 invariant - spinner is NEVER shown when the server process is idle`() {
+        // Authentic idle state: busy is false or null -> must not show spinner
+        assertFalse(ComputerPolicy.showsSpinner(busy = false, gaveUp = false))
+        assertFalse(ComputerPolicy.showsSpinner(busy = null, gaveUp = false))
+        assertFalse(ComputerPolicy.showsSpinner(busy = false, gaveUp = true))
+
+        // Only an actively busy execution before give-up shows a spinner
+        assertTrue(ComputerPolicy.showsSpinner(busy = true, gaveUp = false))
+        assertFalse(ComputerPolicy.showsSpinner(busy = true, gaveUp = true))
+    }
 }

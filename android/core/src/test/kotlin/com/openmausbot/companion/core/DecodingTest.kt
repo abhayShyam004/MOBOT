@@ -603,4 +603,34 @@ class DecodingTest {
             assertNull(message.threadRef, message.id)
         }
     }
+
+    @Test
+    fun decodesWorkspaceTelemetryFrameAndSurfaces() {
+        val json = """
+            {
+                "kind": "workspace_telemetry",
+                "seq": 42,
+                "eventId": "wste_12345",
+                "botId": "bot_test",
+                "surface": "browser",
+                "timestampMs": 1729000000000,
+                "isLiveExecution": true,
+                "frameBase64": "iVBORw0KGgoAAAANSUhEUg==",
+                "frameHash": "abcdef1234567890",
+                "statusCapsuleText": "Navigating to github.com"
+            }
+        """.trimIndent()
+        val frame = CompanionJson.decodeFromString<StreamFrame>(json)
+        assertEquals(42, frame.seq)
+        val telemetry = frame.frame as Frame.WorkspaceTelemetry
+        assertEquals("wste_12345", telemetry.event.eventId)
+        assertEquals("bot_test", telemetry.event.botId)
+        assertEquals("browser", telemetry.event.surface)
+        assertEquals(1729000000000L, telemetry.event.timestampMs)
+        assertTrue(telemetry.event.isLiveExecution)
+        assertEquals("iVBORw0KGgoAAAANSUhEUg==", telemetry.event.frameBase64)
+        assertEquals("abcdef1234567890", telemetry.event.frameHash)
+        assertEquals("Navigating to github.com", telemetry.event.statusCapsuleText)
+        assertNotNull(telemetry.event.frameData)
+    }
 }

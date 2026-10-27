@@ -46,7 +46,7 @@ export function deliverSseFrame(client: SseFanoutClient, kind: string, frame: st
     }
     return "disconnected";
   }
-  if (client.backpressured && kind === "screen") return "dropped";
+  if (client.backpressured && (kind === "screen" || kind === "workspace_telemetry")) return "dropped";
   try {
     if (!client.res.write(frame) && !client.backpressured) {
       // write() returns false as soon as buffered bytes pass the socket's

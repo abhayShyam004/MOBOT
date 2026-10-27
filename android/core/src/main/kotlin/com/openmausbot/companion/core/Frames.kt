@@ -56,6 +56,7 @@ sealed interface Frame {
     data class Notify(val notification: NotificationFrame) : Frame
     data class Screen(val botId: String, val png: String, val mime: String) : Frame
     data class Computer(val botId: String, val state: String) : Frame
+    data class WorkspaceTelemetry(val event: WatchWorkspaceTelemetryEvent) : Frame
     data object Config : Frame
     data class Runtime(val event: RuntimeEvent) : Frame
     data class Unknown(val kind: String) : Frame
@@ -128,6 +129,13 @@ object FrameSerializer : KSerializer<Frame> {
                 botId = objectValue.requiredString("botId"),
                 state = objectValue["state"]?.jsonPrimitive?.contentOrNull ?: "",
             )
+            "workspace_telemetry" -> {
+                val telemetryObject = objectValue["telemetry"]?.jsonObject ?: objectValue
+                Frame.WorkspaceTelemetry(input.json.decodeFromJsonElement(
+                    WatchWorkspaceTelemetryEvent.serializer(),
+                    telemetryObject,
+                ))
+            }
             "config" -> Frame.Config
             "runtime" -> Frame.Runtime(input.json.decodeFromJsonElement(
                 RuntimeEvent.serializer(),
@@ -256,6 +264,10 @@ private fun Frame.toJsonObject(output: JsonEncoder): JsonObject = buildJsonObjec
             put("kind", "computer")
             put("botId", botId)
             put("state", state)
+        }
+        is Frame.WorkspaceTelemetry -> {
+            put("kind", "workspace_telemetry")
+            put("telemetry", output.json.encodeToJsonElement(WatchWorkspaceTelemetryEvent.serializer(), event))
         }
         Frame.Config -> put("kind", "config")
         is Frame.Runtime -> {

@@ -1,6 +1,14 @@
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { createScreenFrameSource, type ScreenCapture } from "./screen-frame-source.ts";
+import {
+  computeFrameHash,
+  createScreenFrameSource,
+  FPS_10_GAP_MS,
+  FPS_HALF_GAP_MS,
+  type ScreenCapture,
+  type WatchWorkspaceTelemetryEvent,
+} from "./screen-frame-source.ts";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -110,5 +118,141 @@ describe("screen frame source", () => {
     expect(source.surface).toBe("browser");
     await source.capture(true);
     expect(source.last).toEqual(publicFrame("only browser"));
+  });
+
+  describe("Phase 22: Watch Workspace telemetry, hashing, deduplication & rate adaptation", () => {
+    it("computes standard SHA-256 frame hashes", () => {
+      const sample = "iVBORw0KGgoAAAANSUhEUgAA";
+      const expected = createHash("sha256").update(sample).digest("hex");
+      expect(computeFrameHash(sample)).toBe(expected);
+    });
+
+    it("deduplicates identical consecutive frames to save bandwidth & render overhead", async () => {
+      let time = 200_000;
+      vi.spyOn(Date, "now").mockImplementation(() => time);
+      const control = { held: false, revision: 0 };
+      const browser = vi.fn(async () => frame("identical_pixels"));
+      const onFrame = vi.fn();
+      const onTelemetry = vi.fn();
+
+      const source = createScreenFrameSource({
+        botId: "bot_dedupe_test",
+        captures: { browser },
+        control: () => ({ ...control }),
+        onFrame,
+        onTelemetry,
+        minGapMs: 100,
+        deduplicate: true,
+      });
+
+      // First capture: fires onFrame and onTelemetry with frameHash
+      await source.capture();
+      expect(browser).toHaveBeenCalledTimes(1);
+      expect(onFrame).toHaveBeenCalledTimes(1);
+      expect(source.lastHash).toBe(computeFrameHash("identical_pixels"));
+
+      // Advance time past minGapMs, but frame is identical
+      time += 200;
+      await source.capture();
+      expect(browser).toHaveBeenCalledTimes(2);
+      // onFrame was NOT called again because frame was deduplicated!
+      expect(onFrame).toHaveBeenCalledTimes(1);
+
+      // Now return changed frame
+      browser.mockResolvedValue(frame("different_pixels"));
+      time += 200;
+      await source.capture();
+      expect(browser).toHaveBeenCalledTimes(3);
+      expect(onFrame).toHaveBeenCalledTimes(2);
+      expect(source.lastHash).toBe(computeFrameHash("different_pixels"));
+    });
+
+    it("adapts frame rate dynamically: 10 FPS during active interaction, 0.5 FPS when static", async () => {
+      let time = 300_000;
+      vi.spyOn(Date, "now").mockImplementation(() => time);
+      const control = { held: false, revision: 0 };
+      let frameSeq = 0;
+      const browser = vi.fn(async () => frame(`frame_${++frameSeq}`));
+
+      const source = createScreenFrameSource({
+        botId: "bot_fps_test",
+        captures: { browser },
+        control: () => ({ ...control }),
+        minGapMs: 2000, // 0.5 FPS default
+      });
+
+      // Static mode: gap is 2000ms
+      expect(source.effectiveMinGapMs()).toBe(2000);
+      await source.capture();
+      expect(browser).toHaveBeenCalledTimes(1);
+
+      // Advance 100ms in static mode: throttled
+      time += 100;
+      await source.capture();
+      expect(browser).toHaveBeenCalledTimes(1);
+
+      // Transition to active UI interaction (e.g. navigation / interaction):
+      source.activeFps = true;
+      expect(source.effectiveMinGapMs()).toBe(FPS_10_GAP_MS); // 100ms (10 FPS)
+
+      // In active mode, 100ms gap allows capture
+      time += 100;
+      await source.capture();
+      expect(browser).toHaveBeenCalledTimes(2);
+
+      // Switch back to static
+      source.activeFps = false;
+      expect(source.effectiveMinGapMs()).toBe(FPS_HALF_GAP_MS); // 2000ms
+    });
+
+    it("emits authentic telemetry events for all Phase 22 surfaces", () => {
+      const telemetryEvents: WatchWorkspaceTelemetryEvent[] = [];
+      const source = createScreenFrameSource({
+        botId: "bot_surfaces",
+        captures: {},
+        control: () => ({ held: false, revision: 0 }),
+        onTelemetry: (evt) => telemetryEvents.push(evt),
+        minGapMs: 1000,
+      });
+
+      // 1. Idle state (standby)
+      const idleEvt = source.transitionToIdle("Standby - Ready for tasks");
+      expect(idleEvt.surface).toBe("idle");
+      expect(idleEvt.isLiveExecution).toBe(false);
+      expect(idleEvt.statusCapsuleText).toBe("Standby - Ready for tasks");
+      expect(idleEvt.botId).toBe("bot_surfaces");
+
+      // 2. Browser navigation
+      const browserEvt = source.transitionToBrowser("https://github.com/facebook/react", true);
+      expect(browserEvt.surface).toBe("browser");
+      expect(browserEvt.isLiveExecution).toBe(true);
+      expect(browserEvt.statusCapsuleText).toContain("github.com");
+
+      // 3. Terminal session
+      const terminalEvt = source.transitionToTerminal("npm run test", "$ test passed 12/12\n");
+      expect(terminalEvt.surface).toBe("terminal");
+      expect(terminalEvt.isLiveExecution).toBe(true);
+      expect(terminalEvt.terminalChunk).toBe("$ test passed 12/12\n");
+      expect(terminalEvt.statusCapsuleText).toBe("Running: npm run test");
+
+      // 4. File editor
+      const fileEvt = source.transitionToFileEditor("server/index.ts", "patch");
+      expect(fileEvt.surface).toBe("file_editor");
+      expect(fileEvt.isLiveExecution).toBe(true);
+      expect(fileEvt.activeFileOperation).toEqual({ path: "server/index.ts", operation: "patch" });
+      expect(fileEvt.statusCapsuleText).toBe("PATCH: server/index.ts");
+
+      // 5. Phone vision
+      const phoneEvt = source.transitionToPhone("Inspecting Settings App");
+      expect(phoneEvt.surface).toBe("phone_screen");
+      expect(phoneEvt.isLiveExecution).toBe(true);
+      expect(phoneEvt.statusCapsuleText).toBe("Inspecting Settings App");
+
+      // 6. Return to authentic idle (no spinning progress)
+      const returnIdle = source.transitionToIdle();
+      expect(returnIdle.surface).toBe("idle");
+      expect(returnIdle.isLiveExecution).toBe(false);
+      expect(returnIdle.statusCapsuleText).toBe("Ready");
+    });
   });
 });

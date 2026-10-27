@@ -483,7 +483,7 @@ import {
   browserSessionId,
   describeBrowserEngine,
 } from "./browser-engine.ts";
-import { createScreenFrameSource, type ScreenCapture } from "./screen-frame-source.ts";
+import { createScreenFrameSource, type ScreenCapture, type WatchWorkspaceTelemetryEvent } from "./screen-frame-source.ts";
 import { screenFrameHash, screenSurfaceForTool, screenTouchingTool, settledFrameIsNews, shouldSurfaceBrowserScreenInChat, validateScreenFrameBytes } from "./screen-frame-gate.ts";
 import { RoutineRequestService } from "./routine-requests.ts";
 import { buildBotOverview, type BotOverview, connectedAppsFacts } from "./bot-overview.ts";
@@ -3586,8 +3586,8 @@ const SSE_HEARTBEAT_MS =
 let lastSeq = 0;
 const replayBuffer: Array<{ seq: number; kind: string; frame: string | null; clientFrame: string | null }> = [];
 
-/** Screen frames are the only kind a client can decline. */
-const wants = (client: SseClient, kind: string) => kind !== "screen" || client.screens;
+/** Screen frames and workspace telemetry are the kinds a client can decline when screens are off. */
+const wants = (client: SseClient, kind: string) => (kind !== "screen" && kind !== "workspace_telemetry") || client.screens;
 
 /** `<streamId>:<seq>` — opaque to clients, and the only thing they need to
  * remember to resume. Returns null when it belongs to another run. */
@@ -3612,10 +3612,11 @@ function broadcast(payload: Record<string, unknown>) {
   const clientFrame = kind === "config"
     ? `id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify({ ...configForAccess(payload as ReturnType<typeof configStatus>, false), seq })}\n\n`
     : frame;
-  // Live desktop captures can each be hundreds of kilobytes and become stale
+  // Live desktop captures and workspace frames can each be hundreds of kilobytes and become stale
   // as soon as the next one arrives. Keep their sequence slots so resume-gap
   // detection stays honest, but never retain their base64 payloads.
-  replayBuffer.push({ seq, kind, frame: kind === "screen" ? null : frame, clientFrame: kind === "screen" ? null : clientFrame });
+  const dropPayload = kind === "screen" || (kind === "workspace_telemetry" && Boolean((payload as Record<string, unknown>).frameBase64));
+  replayBuffer.push({ seq, kind, frame: dropPayload ? null : frame, clientFrame: dropPayload ? null : clientFrame });
   if (replayBuffer.length > REPLAY_MAX) replayBuffer.shift();
   for (const client of Array.from(sseClients)) {
     if (!wants(client, kind)) continue;
@@ -5140,6 +5141,26 @@ bus.subscribe((event: RuntimeEvent) => {
         // appends a richer "Messaged @X" chip linking to the channel
         if (event.title?.endsWith("__ask_bot")) break;
         const name = event.title ?? "tool";
+
+        // Update Watch Workspace telemetry surface to reflect real execution
+        const poller = screenPollers.get(event.threadId);
+        if (poller) {
+          const rawInput = (event.input || {}) as Record<string, unknown>;
+          if (/browser|navigate|open_url/i.test(name)) {
+            const url = typeof rawInput.url === "string" ? rawInput.url : "web";
+            poller.transitionToBrowser(url, true);
+          } else if (/terminal|bash|shell|exec|run_command/i.test(name)) {
+            const cmd = typeof rawInput.command === "string" ? rawInput.command : (typeof rawInput.cmd === "string" ? rawInput.cmd : name);
+            poller.transitionToTerminal(cmd, "");
+          } else if (/file|write|read|patch|edit/i.test(name)) {
+            const path = typeof rawInput.path === "string" ? rawInput.path : (typeof rawInput.filePath === "string" ? rawInput.filePath : "file");
+            const op: "read" | "write" | "patch" = /read/i.test(name) ? "read" : (/patch/i.test(name) ? "patch" : "write");
+            poller.transitionToFileEditor(path, op);
+          } else if (/phone|tap|swipe|press|input_key/i.test(name)) {
+            poller.transitionToPhone("Controlling Android");
+          }
+        }
+
         // narration is folded in here, once, so call mode can read the
         // chip aloud without re-deriving it — and so the phrase a user
         // hears and the chip they see can never drift apart
@@ -5551,6 +5572,16 @@ bus.subscribe((event: RuntimeEvent) => {
           if (store.taskByThread(bot.id, event.threadId)?.activity !== "dead") {
             store.setTaskActivity(bot.id, event.threadId, "idle");
           }
+          const idleTelemetry: WatchWorkspaceTelemetryEvent = {
+            eventId: `wste_${Date.now()}_idle`,
+            botId: bot.id,
+            surface: "idle",
+            timestampMs: Date.now(),
+            isLiveExecution: false,
+            statusCapsuleText: "Ready",
+          };
+          latestWorkspaceTelemetry.set(bot.id, idleTelemetry);
+          broadcast({ kind: "workspace_telemetry", threadId: event.threadId, ...idleTelemetry });
           directTurnBots.delete(event.threadId);
           if (continueComputerSelection(event.threadId, generation, event.ok)) return;
           // Ordinary completion still drains from the existing bus subscribers.
@@ -6358,21 +6389,12 @@ async function startOrQueueOpenedThread(
 // panel); the final frame is folded into the transcript on turn end.
 type Frame = { png: string; mime: string };
 const latestScreens = new Map<string, Frame & { botId: string; threadId: string }>();
+const latestWorkspaceTelemetry = new Map<string, WatchWorkspaceTelemetryEvent>();
 const screenPollers = new Map<
   string,
-  {
-    botId: string;
+  ReturnType<typeof createScreenFrameSource> & {
     timer: ReturnType<typeof setInterval> | null;
-    capture: (fresh?: boolean) => Promise<void>;
-    /** Which surface the last screen-touching tool acted on. A bot with both
-     * a computer and a browser must be pictured on the one it just used. */
-    surface: "browser" | "computer";
-    last: Frame | null;
-    /** Did this turn actually reach for the screen? A bot that merely HAS
-     * a computer would otherwise end every reply — a one-word "yes"
-     * included — with the same picture of an idle desktop. The flag lives
-     * on the poller entry, which is created and dropped per turn, so it
-     * cannot leak into a later one. */
+    botId: string;
     touched: boolean;
   }
 >();
@@ -6413,9 +6435,11 @@ function startScreenPoller(
   // Assign rather than spread: the source's last-frame getter deliberately
   // hides a stale frame as soon as the selected surface changes.
   const entry = Object.assign(createScreenFrameSource({
+    botId,
     captures: {
       computer: guarded(captures.computer, computer?.resource),
       browser: guarded(captures.browser, browserSession ? `browser:${browserSession}` : undefined),
+      phone_screen: guarded(captures.computer, computer?.resource),
     },
     control: () => ({
       held: botComputerControlSnapshot(botId, teamComputerTurns.get(threadId)?.computerId).held,
@@ -6425,7 +6449,12 @@ function startScreenPoller(
       latestScreens.set(botId, { png: frame.png, mime: frame.mime, botId, threadId });
       broadcast({ kind: "screen", botId, threadId, ...frame });
     },
+    onTelemetry: (event) => {
+      latestWorkspaceTelemetry.set(botId, event);
+      broadcast({ kind: "workspace_telemetry", threadId, ...event });
+    },
     minGapMs: SCREEN_MIN_GAP_MS,
+    deduplicate: true,
   }), {
     timer: null as ReturnType<typeof setInterval> | null,
     botId,
@@ -6449,11 +6478,21 @@ function pokeScreenPoller(threadId: string, touches: boolean, surface?: "browser
   // refresh: under the Claude driver every tool of the computer server is
   // named mcp__computer__*, and matching that alone used to append an
   // untouched desktop to every curl-and-answer reply.
-  if (touches) entry.touched = true;
+  if (touches) {
+    entry.touched = true;
+    entry.activeFps = true;
+  }
   // Picture the surface the tool acted on. Only a touching tool moves this:
   // a status read on the computer must not redirect the picture away from a
   // page the browser is still showing.
-  if (touches && surface) entry.surface = surface;
+  if (touches && surface) {
+    entry.surface = surface;
+    if (surface === "browser") {
+      entry.transitionToBrowser("Active Web Session", true);
+    } else {
+      entry.transitionToPhone("Active Device Control");
+    }
+  }
   void entry.capture();
 }
 
@@ -6493,7 +6532,7 @@ async function finalScreenFrame(_botId: string, threadId: string): Promise<(Fram
   const entry = screenPollers.get(threadId);
   const owner = turnResourceOwners.get(threadId);
   if (!entry) return null;
-  const surface = entry.surface;
+  const surface: "browser" | "computer" = entry.surface === "browser" ? "browser" : "computer";
   if (entry.timer) clearInterval(entry.timer);
   screenPollers.delete(threadId);
   if (!entry.touched) return null;
@@ -14959,6 +14998,34 @@ const handleRequest = async (req: IncomingMessage, res: ServerResponse) => {
           if (!sentBots.has(botId)) {
             const seq = ++lastSeq;
             const payload = { kind: "screen", botId, threadId: screen.threadId, png: screen.png, mime: screen.mime, seq };
+            try {
+              res.write(`id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify(payload)}\n\n`);
+            } catch {}
+          }
+        }
+        // Emit latest or authentic initial Watch Workspace telemetry
+        const sentTelemetryBots = new Set<string>();
+        for (const [botId, tel] of latestWorkspaceTelemetry) {
+          sentTelemetryBots.add(botId);
+          const seq = ++lastSeq;
+          const payload = { kind: "workspace_telemetry", ...tel, seq };
+          try {
+            res.write(`id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify(payload)}\n\n`);
+          } catch {}
+        }
+        for (const [threadId, entry] of screenPollers) {
+          if (!sentTelemetryBots.has(entry.botId)) {
+            sentTelemetryBots.add(entry.botId);
+            const tel = entry.lastTelemetry ?? {
+              eventId: `wste_${Date.now()}_idle`,
+              botId: entry.botId,
+              surface: "idle" as const,
+              timestampMs: Date.now(),
+              isLiveExecution: false,
+              statusCapsuleText: "Ready",
+            };
+            const seq = ++lastSeq;
+            const payload = { kind: "workspace_telemetry", threadId, ...tel, seq };
             try {
               res.write(`id: ${STREAM_ID}:${seq}\ndata: ${JSON.stringify(payload)}\n\n`);
             } catch {}
