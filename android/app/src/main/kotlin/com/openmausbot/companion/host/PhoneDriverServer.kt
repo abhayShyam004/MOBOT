@@ -6,6 +6,10 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
+import android.graphics.Rect
 import android.location.Location
 import android.location.LocationManager
 import android.net.Uri
@@ -582,13 +586,31 @@ class PhoneDriverServer private constructor(
             )
         }
 
-        val bmp = capturedBitmap!!
-        if (isBitmapBlankOrBlack(bmp)) {
-            bmp.recycle()
+        val rawBmp = capturedBitmap!!
+        if (isBitmapBlankOrBlack(rawBmp)) {
+            rawBmp.recycle()
             return reply(
                 Response.Status.OK,
                 err("ERR_SCREEN_CAPTURE_BLANK: Screen capture produced an all-black or blank frame", "ERR_SCREEN_CAPTURE_BLANK")
             )
+        }
+
+        // Phase 23 Invariant: Scrub sensitive secure fields (passwords, PINs) before network transmission
+        val sensitiveBounds = CompanionAccessibilityService.getSensitiveFieldBounds()
+        val bmp = if (sensitiveBounds.isNotEmpty()) {
+            val mutableBmp = rawBmp.copy(Bitmap.Config.ARGB_8888, true)
+            val canvas = Canvas(mutableBmp)
+            val paint = Paint().apply {
+                color = Color.DKGRAY
+                style = Paint.Style.FILL
+            }
+            for (r in sensitiveBounds) {
+                canvas.drawRect(r, paint)
+            }
+            rawBmp.recycle()
+            mutableBmp
+        } else {
+            rawBmp
         }
         return try {
             val screenshotsDir = File(context.cacheDir, "screenshots").apply { mkdirs() }

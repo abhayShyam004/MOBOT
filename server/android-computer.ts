@@ -90,6 +90,186 @@ export interface AndroidUiSemanticNode {
   isEnabled: boolean;
 }
 
+// ── Official Roadmap Phase 23: Watch Computer — Phone Vision (mobot_54_phases_prompt.md:1353-1392) ──
+export interface PhoneVisionObservationPayload {
+  captureTimestampMs: number;
+  width: number;
+  height: number;
+  screenshotPngBase64: string;
+  focusedPackageName: string;
+  focusedActivityName: string;
+  highlightedElementBounds?: { left: number; top: number; right: number; bottom: number };
+  detectedTextNodes: Array<{ text: string; bounds: number[] }>;
+}
+
+export const ERR_SCREEN_CAPTURE_BLOCKED = "ERR_SCREEN_CAPTURE_BLOCKED";
+
+export interface ViewportTransform {
+  scale: number;
+  offsetX: number;
+  offsetY: number;
+  displayWidth: number;
+  displayHeight: number;
+}
+
+export function computeViewportFitTransform(
+  viewportWidth: number,
+  viewportHeight: number,
+  imageWidth: number,
+  imageHeight: number
+): ViewportTransform {
+  if (imageWidth <= 0 || imageHeight <= 0 || viewportWidth <= 0 || viewportHeight <= 0) {
+    return { scale: 1, offsetX: 0, offsetY: 0, displayWidth: Math.max(0, viewportWidth), displayHeight: Math.max(0, viewportHeight) };
+  }
+  const scale = Math.min(viewportWidth / imageWidth, viewportHeight / imageHeight);
+  const displayWidth = imageWidth * scale;
+  const displayHeight = imageHeight * scale;
+  const offsetX = (viewportWidth - displayWidth) / 2;
+  const offsetY = (viewportHeight - displayHeight) / 2;
+  return { scale, offsetX, offsetY, displayWidth, displayHeight };
+}
+
+export function transformNodeBoundsToViewport(
+  bounds: { left: number; top: number; right: number; bottom: number },
+  transform: ViewportTransform
+): { left: number; top: number; right: number; bottom: number; width: number; height: number } {
+  const left = transform.offsetX + bounds.left * transform.scale;
+  const top = transform.offsetY + bounds.top * transform.scale;
+  const width = Math.max(0, bounds.right - bounds.left) * transform.scale;
+  const height = Math.max(0, bounds.bottom - bounds.top) * transform.scale;
+  return {
+    left,
+    top,
+    right: left + width,
+    bottom: top + height,
+    width,
+    height,
+  };
+}
+
+export function isTouchCoordinateWithinBounds(
+  coord: { x: number; y: number },
+  bounds: { left: number; top: number; right: number; bottom: number }
+): boolean {
+  return (
+    coord.x >= bounds.left &&
+    coord.x <= bounds.right &&
+    coord.y >= bounds.top &&
+    coord.y <= bounds.bottom
+  );
+}
+
+const SENSITIVE_FIELD_REGEX = /(?:password|passcode|pin|secret|auth|cvv|token)/i;
+
+/**
+ * Scrubs sensitive secure fields (passwords, PINs, auth secrets) from detected text nodes
+ * conforming to Phase 23 invariant: All captured data is scrubbed before network transmission.
+ */
+export function scrubSensitiveFieldsFromTextNodes(
+  nodes: Array<{ text?: string; description?: string; contentDescription?: string; bounds?: number[] | { left: number; top: number; right: number; bottom: number }; isPassword?: boolean; id?: string; className?: string }>
+): Array<{ text: string; bounds: number[] }> {
+  return nodes
+    .filter((n) => n && (n.text || n.description || n.contentDescription || n.id || n.isPassword))
+    .map((n) => {
+      const isSensitive =
+        Boolean(n.isPassword) ||
+        (typeof n.id === "string" && SENSITIVE_FIELD_REGEX.test(n.id)) ||
+        (typeof n.className === "string" && /password/i.test(n.className));
+
+      const rawBounds = n.bounds;
+      let boundsArr: number[] = [0, 0, 0, 0];
+      if (Array.isArray(rawBounds) && rawBounds.length >= 4) {
+        boundsArr = [rawBounds[0], rawBounds[1], rawBounds[2], rawBounds[3]];
+      } else if (rawBounds && typeof rawBounds === "object" && "left" in rawBounds) {
+        const b = rawBounds as { left: number; top: number; right: number; bottom: number };
+        boundsArr = [b.left, b.top, b.right, b.bottom];
+      }
+
+      const nodeText =
+        (typeof n.text === "string" && n.text.trim()) ||
+        (typeof n.description === "string" && n.description.trim()) ||
+        (typeof n.contentDescription === "string" && n.contentDescription.trim()) ||
+        "";
+
+      return {
+        text: isSensitive ? "[REDACTED_PASSWORD]" : nodeText,
+        bounds: boundsArr,
+      };
+    })
+    .filter((n) => n.text.length > 0);
+}
+
+export interface PhoneVisionObservationResult {
+  ok: boolean;
+  code?: string;
+  error?: string;
+  isProtected?: boolean;
+  observation?: PhoneVisionObservationPayload;
+  fallbackSemanticNodes?: AndroidUiSemanticNode[];
+}
+
+/**
+ * Evaluates driver capture result and builds PhoneVisionObservationResult.
+ * Handles ERR_SCREEN_CAPTURE_BLOCKED / FLAG_SECURE gracefully with semantic accessibility fallback.
+ */
+export function handlePhoneVisionCaptureResult(driverResult: {
+  ok?: boolean;
+  code?: string;
+  error?: string;
+  base64?: string;
+  width?: number;
+  height?: number;
+  currentPackage?: string;
+  currentActivity?: string;
+  rawHierarchy?: any;
+  targetBounds?: { left: number; top: number; right: number; bottom: number };
+}): PhoneVisionObservationResult {
+  const isBlocked =
+    driverResult.code === ERR_SCREEN_CAPTURE_BLOCKED ||
+    (typeof driverResult.error === "string" &&
+      (driverResult.error.includes("FLAG_SECURE") || driverResult.error.includes("ERR_SCREEN_CAPTURE_BLOCKED")));
+
+  if (isBlocked) {
+    const fallbackNodes = parseAndroidUiHierarchy(driverResult.rawHierarchy);
+    return {
+      ok: false,
+      code: ERR_SCREEN_CAPTURE_BLOCKED,
+      error: "Screen visual inspection blocked by FLAG_SECURE security policy. Falling back to semantic accessibility tree inspection.",
+      isProtected: true,
+      fallbackSemanticNodes: fallbackNodes,
+    };
+  }
+
+  if (!driverResult.ok || !driverResult.base64) {
+    return {
+      ok: false,
+      code: driverResult.code || "ERR_SCREEN_CAPTURE_FAILED",
+      error: driverResult.error || "Failed to capture phone vision screen",
+      isProtected: false,
+    };
+  }
+
+  const rawNodes = Array.isArray(driverResult.rawHierarchy?.nodes) ? driverResult.rawHierarchy.nodes : [];
+  const detectedTextNodes = scrubSensitiveFieldsFromTextNodes(rawNodes);
+
+  const observation: PhoneVisionObservationPayload = {
+    captureTimestampMs: Date.now(),
+    width: driverResult.width || 720,
+    height: driverResult.height || 1600,
+    screenshotPngBase64: driverResult.base64,
+    focusedPackageName: driverResult.currentPackage || "unknown",
+    focusedActivityName: driverResult.currentActivity || "",
+    highlightedElementBounds: driverResult.targetBounds,
+    detectedTextNodes,
+  };
+
+  return {
+    ok: true,
+    isProtected: false,
+    observation,
+  };
+}
+
 export const RESTRICTED_SYSTEM_PACKAGES = [
   "com.android.permissioncontroller",
   "com.google.android.permissioncontroller",

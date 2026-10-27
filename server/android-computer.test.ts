@@ -773,6 +773,13 @@ import {
   serializeAndroidGesture,
   validateGestureActionSafety,
   type AndroidGestureAction,
+  type PhoneVisionObservationPayload,
+  computeViewportFitTransform,
+  transformNodeBoundsToViewport,
+  isTouchCoordinateWithinBounds,
+  scrubSensitiveFieldsFromTextNodes,
+  handlePhoneVisionCaptureResult,
+  ERR_SCREEN_CAPTURE_BLOCKED,
 } from "./android-computer.ts";
 
 describe("Official Roadmap Phase 35: Android-as-Computer Contract (mobot_54_phases_prompt.md:1897-1948)", () => {
@@ -855,5 +862,127 @@ describe("Official Roadmap Phase 35: Android-as-Computer Contract (mobot_54_phas
 
     const packageInstallerRes = validateGestureActionSafety(safeAction, "com.google.android.packageinstaller");
     expect(packageInstallerRes.safe).toBe(false);
+  });
+});
+
+describe("Official Roadmap Phase 23: Watch Computer — Phone Vision (mobot_54_phases_prompt.md:1353-1392)", () => {
+  it("conforms to formal PhoneVisionObservationPayload contract", () => {
+    const rawHierarchy = {
+      nodes: [
+        { text: "7", bounds: [36, 1146, 192, 1266], isClickable: true },
+        { text: "=", bounds: [528, 1422, 684, 1542], isClickable: true },
+      ],
+    };
+
+    const result = handlePhoneVisionCaptureResult({
+      ok: true,
+      base64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      width: 720,
+      height: 1600,
+      currentPackage: "com.sec.android.app.popupcalculator",
+      currentActivity: "com.sec.android.app.popupcalculator.Calculator",
+      rawHierarchy,
+      targetBounds: { left: 36, top: 1146, right: 192, bottom: 1266 },
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.isProtected).toBe(false);
+    expect(result.observation).toBeDefined();
+
+    const obs: PhoneVisionObservationPayload = result.observation!;
+    expect(obs.width).toBe(720);
+    expect(obs.height).toBe(1600);
+    expect(obs.focusedPackageName).toBe("com.sec.android.app.popupcalculator");
+    expect(obs.focusedActivityName).toBe("com.sec.android.app.popupcalculator.Calculator");
+    expect(obs.highlightedElementBounds).toEqual({ left: 36, top: 1146, right: 192, bottom: 1266 });
+    expect(obs.detectedTextNodes.length).toBe(2);
+    expect(obs.detectedTextNodes[0].text).toBe("7");
+    expect(obs.detectedTextNodes[0].bounds).toEqual([36, 1146, 192, 1266]);
+  });
+
+  it("enforces Phase 23 invariant: scrubs sensitive fields (passwords, PINs) before network transmission", () => {
+    const mixedNodes = [
+      { text: "Username", bounds: [50, 100, 300, 150] },
+      { text: "supersecret123", bounds: [50, 200, 300, 250], isPassword: true },
+      { text: "9876", bounds: [50, 300, 300, 350], id: "com.example:id/pin_code_entry" },
+      { text: "Submit", bounds: [100, 400, 250, 450], className: "android.widget.Button" },
+    ];
+
+    const scrubbed = scrubSensitiveFieldsFromTextNodes(mixedNodes);
+    expect(scrubbed.length).toBe(4);
+    expect(scrubbed[0].text).toBe("Username");
+    expect(scrubbed[1].text).toBe("[REDACTED_PASSWORD]");
+    expect(scrubbed[1].bounds).toEqual([50, 200, 300, 250]);
+    expect(scrubbed[2].text).toBe("[REDACTED_PASSWORD]");
+    expect(scrubbed[3].text).toBe("Submit");
+  });
+
+  it("verifies touch coordinates align precisely with target element bounds", () => {
+    const buttonBounds = { left: 100, top: 200, right: 300, bottom: 400 };
+
+    // Center point touch
+    expect(isTouchCoordinateWithinBounds({ x: 200, y: 300 }, buttonBounds)).toBe(true);
+    // Boundary touches
+    expect(isTouchCoordinateWithinBounds({ x: 100, y: 200 }, buttonBounds)).toBe(true);
+    expect(isTouchCoordinateWithinBounds({ x: 300, y: 400 }, buttonBounds)).toBe(true);
+    // Outside touches
+    expect(isTouchCoordinateWithinBounds({ x: 99, y: 300 }, buttonBounds)).toBe(false);
+    expect(isTouchCoordinateWithinBounds({ x: 301, y: 300 }, buttonBounds)).toBe(false);
+    expect(isTouchCoordinateWithinBounds({ x: 200, y: 199 }, buttonBounds)).toBe(false);
+    expect(isTouchCoordinateWithinBounds({ x: 200, y: 401 }, buttonBounds)).toBe(false);
+  });
+
+  it("computes accurate viewport fit transformations and coordinate scaling", () => {
+    // 720x1600 native screen fitted into 360x800 viewport
+    const t1 = computeViewportFitTransform(360, 800, 720, 1600);
+    expect(t1.scale).toBe(0.5);
+    expect(t1.offsetX).toBe(0);
+    expect(t1.offsetY).toBe(0);
+
+    const mapped1 = transformNodeBoundsToViewport({ left: 100, top: 200, right: 300, bottom: 400 }, t1);
+    expect(mapped1.left).toBe(50);
+    expect(mapped1.top).toBe(100);
+    expect(mapped1.width).toBe(100);
+    expect(mapped1.height).toBe(100);
+
+    // Letterboxed fitting: 720x1600 into 720x800 viewport (height constrained)
+    const t2 = computeViewportFitTransform(720, 800, 720, 1600);
+    expect(t2.scale).toBe(0.5);
+    expect(t2.displayWidth).toBe(360);
+    expect(t2.displayHeight).toBe(800);
+    expect(t2.offsetX).toBe((720 - 360) / 2); // 180px letterbox margin
+  });
+
+  it("handles ERR_SCREEN_CAPTURE_BLOCKED / FLAG_SECURE failure protocol with accessibility fallback", () => {
+    const rawHierarchy = {
+      currentPackage: "com.banking.secureapp",
+      nodeCount: 1,
+      nodes: [
+        {
+          id: "com.banking.secureapp:id/account_balance",
+          className: "android.widget.TextView",
+          text: "Account Overview",
+          bounds: [100, 200, 600, 300],
+          clickable: false,
+          isEnabled: true,
+          package: "com.banking.secureapp",
+        },
+      ],
+    };
+
+    const blockedResult = handlePhoneVisionCaptureResult({
+      ok: false,
+      code: ERR_SCREEN_CAPTURE_BLOCKED,
+      error: "Screenshot timed out or was blocked by FLAG_SECURE",
+      rawHierarchy,
+    });
+
+    expect(blockedResult.ok).toBe(false);
+    expect(blockedResult.isProtected).toBe(true);
+    expect(blockedResult.code).toBe(ERR_SCREEN_CAPTURE_BLOCKED);
+    expect(blockedResult.error).toContain("FLAG_SECURE");
+    expect(blockedResult.fallbackSemanticNodes).toBeDefined();
+    expect(blockedResult.fallbackSemanticNodes!.length).toBe(1);
+    expect(blockedResult.fallbackSemanticNodes![0].text).toBe("Account Overview");
   });
 });

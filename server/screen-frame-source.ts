@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { captureOutsideHumanControl, type PrivateScreenFrame } from "./private-screen-capture.ts";
+import type { PhoneVisionObservationPayload } from "./android-computer.ts";
 
 export type ActiveSurfaceType = "phone_screen" | "browser" | "terminal" | "file_editor" | "service_status" | "idle";
 export type ScreenCapture = () => Promise<{ png: string; format: string }>;
@@ -16,6 +17,7 @@ export interface WatchWorkspaceTelemetryEvent {
   terminalChunk?: string;
   activeFileOperation?: { path: string; operation: "read" | "write" | "patch" };
   statusCapsuleText: string;
+  phoneVision?: PhoneVisionObservationPayload;
 }
 
 export function computeFrameHash(pngBase64: string): string {
@@ -243,6 +245,39 @@ export function createScreenFrameSource(input: ScreenFrameSourceOptions) {
       source.surface = "phone_screen";
       currentStatusCapsule = status || "Controlling Android";
       activeFps = true;
+      return source.emitTelemetry({
+        surface: "phone_screen",
+        isLiveExecution: true,
+        statusCapsuleText: currentStatusCapsule,
+      });
+    },
+
+    transitionToPhoneVision(observation: PhoneVisionObservationPayload, status?: string): WatchWorkspaceTelemetryEvent {
+      isLiveExecution = true;
+      source.surface = "phone_screen";
+      currentStatusCapsule = status || `Controlling ${observation.focusedPackageName || "Android"}`;
+      activeFps = true;
+      last = {
+        png: observation.screenshotPngBase64,
+        mime: "image/png",
+      };
+      lastHash = computeFrameHash(observation.screenshotPngBase64);
+      lastSurface = "phone_screen";
+      return source.emitTelemetry({
+        surface: "phone_screen",
+        isLiveExecution: true,
+        frameBase64: observation.screenshotPngBase64,
+        frameHash: lastHash,
+        phoneVision: observation,
+        statusCapsuleText: currentStatusCapsule,
+      });
+    },
+
+    transitionToPhoneProtected(packageName: string, status?: string): WatchWorkspaceTelemetryEvent {
+      isLiveExecution = true;
+      source.surface = "phone_screen";
+      currentStatusCapsule = status || `Protected Screen: ${packageName}`;
+      activeFps = false;
       return source.emitTelemetry({
         surface: "phone_screen",
         isLiveExecution: true,

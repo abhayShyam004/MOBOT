@@ -10,12 +10,14 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -67,7 +69,13 @@ sealed class ComputerSurfaceState {
     object Idle : ComputerSurfaceState()
     data class BrowserLive(val currentUrl: String, val frame: Bitmap, val isNavigating: Boolean) : ComputerSurfaceState()
     data class TerminalLive(val activeCommand: String, val ptyBuffer: String) : ComputerSurfaceState()
-    data class PhoneVision(val screenBitmap: Bitmap, val targetNodeBounds: Rect?) : ComputerSurfaceState()
+    data class PhoneVision(
+        val screenBitmap: Bitmap?,
+        val targetNodeBounds: Rect?,
+        val isProtected: Boolean = false,
+        val focusedPackage: String = "",
+        val detectedTextNodes: List<com.openmausbot.companion.core.DetectedTextNode> = emptyList(),
+    ) : ComputerSurfaceState()
     data class FileStreaming(val filePath: String, val lineCount: Int) : ComputerSurfaceState()
 }
 
@@ -375,10 +383,27 @@ private fun deriveSurfaceState(
             )
         }
         "phone_screen" -> {
+            val pv = telemetry.phoneVision
+            val targetRect = pv?.highlightedElementBounds?.let {
+                Rect(it.left, it.top, it.right, it.bottom)
+            }
             if (decodedBitmap != null) {
                 ComputerSurfaceState.PhoneVision(
                     screenBitmap = decodedBitmap,
+                    targetNodeBounds = targetRect,
+                    isProtected = false,
+                    focusedPackage = pv?.focusedPackageName ?: "",
+                    detectedTextNodes = pv?.detectedTextNodes ?: emptyList(),
+                )
+            } else if (telemetry.isLiveExecution &&
+                (telemetry.statusCapsuleText.contains("Protected") || telemetry.statusCapsuleText.contains("FLAG_SECURE"))
+            ) {
+                ComputerSurfaceState.PhoneVision(
+                    screenBitmap = null,
                     targetNodeBounds = null,
+                    isProtected = true,
+                    focusedPackage = pv?.focusedPackageName ?: telemetry.statusCapsuleText.removePrefix("Protected Screen: "),
+                    detectedTextNodes = pv?.detectedTextNodes ?: emptyList(),
                 )
             } else {
                 ComputerSurfaceState.Idle
@@ -413,7 +438,11 @@ private fun resolveSurfaceBadge(
 ): String = when (surfaceState) {
     is ComputerSurfaceState.BrowserLive -> "Browser Execution"
     is ComputerSurfaceState.TerminalLive -> "Terminal PTY Session"
-    is ComputerSurfaceState.PhoneVision -> "Phone Vision (Android UI)"
+    is ComputerSurfaceState.PhoneVision -> {
+        if (surfaceState.isProtected) "Phone Vision (Protected Surface)"
+        else if (surfaceState.focusedPackage.isNotBlank()) "Phone Vision (${surfaceState.focusedPackage})"
+        else "Phone Vision (Android UI)"
+    }
     is ComputerSurfaceState.FileStreaming -> "File & Workspace Activity"
     is ComputerSurfaceState.Idle -> telemetry?.statusCapsuleText.takeIf { !it.isNullOrBlank() } ?: "Agent Workspace · Standby"
 }
@@ -576,18 +605,137 @@ private fun PhoneVisionSurfaceView(
     phoneState: ComputerSurfaceState.PhoneVision,
     modifier: Modifier = Modifier,
 ) {
-    Box(
+    if (phoneState.isProtected || phoneState.screenBitmap == null) {
+        Column(
+            modifier = modifier
+                .padding(top = 56.dp, start = 24.dp, end = 24.dp)
+                .fillMaxSize(),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = Color(0xFFFFB74D).copy(alpha = 0.15f),
+                modifier = Modifier.size(56.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "SECURE",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFFFFB74D),
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(16.dp))
+            Text(
+                text = "Screen Protected by Security Policy",
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = Color.White.copy(alpha = 0.9f),
+                textAlign = TextAlign.Center,
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "Visual screen capture is restricted by FLAG_SECURE (banking, credentials, or protected OS surface). MOBOT operates via semantic accessibility inspection.",
+                fontSize = 12.sp,
+                color = Color.White.copy(alpha = 0.6f),
+                textAlign = TextAlign.Center,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(horizontal = 16.dp),
+            )
+            if (phoneState.detectedTextNodes.isNotEmpty()) {
+                Spacer(modifier = Modifier.height(20.dp))
+                Text(
+                    text = "Semantic Elements (${phoneState.detectedTextNodes.size})",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Medium,
+                    color = Color(0xFF69F0AE),
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF1E222D),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(140.dp)
+                        .padding(horizontal = 8.dp),
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .padding(8.dp)
+                            .verticalScroll(rememberScrollState()),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        phoneState.detectedTextNodes.forEach { node ->
+                            Text(
+                                text = "• ${node.text}",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = Color.White.copy(alpha = 0.8f),
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        return
+    }
+
+    BoxWithConstraints(
         modifier = modifier
             .padding(top = 56.dp)
             .background(Color.Black),
         contentAlignment = Alignment.Center,
     ) {
+        val density = androidx.compose.ui.platform.LocalDensity.current
+        val boxWidthPx = with(density) { maxWidth.toPx() }
+        val boxHeightPx = with(density) { maxHeight.toPx() }
+        val bmpWidth = phoneState.screenBitmap.width.toFloat()
+        val bmpHeight = phoneState.screenBitmap.height.toFloat()
+
         Image(
             bitmap = phoneState.screenBitmap.asImageBitmap(),
             contentDescription = "Phone Screen Observation",
             contentScale = ContentScale.Fit,
             modifier = Modifier.fillMaxSize(),
         )
+
+        if (bmpWidth > 0f && bmpHeight > 0f && boxWidthPx > 0f && boxHeightPx > 0f) {
+            val scale = minOf(boxWidthPx / bmpWidth, boxHeightPx / bmpHeight)
+            val displayW = bmpWidth * scale
+            val displayH = bmpHeight * scale
+            val offsetX = (boxWidthPx - displayW) / 2f
+            val offsetY = (boxHeightPx - displayH) / 2f
+
+            val target = phoneState.targetNodeBounds
+            if (target != null && target.width() > 0 && target.height() > 0) {
+                val targetLeftPx = offsetX + target.left * scale
+                val targetTopPx = offsetY + target.top * scale
+                val targetWidthPx = target.width() * scale
+                val targetHeightPx = target.height() * scale
+
+                val leftDp = with(density) { targetLeftPx.toDp() }
+                val topDp = with(density) { targetTopPx.toDp() }
+                val widthDp = with(density) { targetWidthPx.toDp() }
+                val heightDp = with(density) { targetHeightPx.toDp() }
+
+                Box(
+                    modifier = Modifier
+                        .offset(x = leftDp, y = topDp)
+                        .size(widthDp, heightDp)
+                        .border(2.dp, Color(0xFF00E676), RoundedCornerShape(4.dp))
+                        .background(Color(0xFF00E676).copy(alpha = 0.18f)),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(8.dp)
+                            .background(Color(0xFF00E676), CircleShape),
+                    )
+                }
+            }
+        }
     }
 }
 

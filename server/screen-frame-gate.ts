@@ -104,6 +104,7 @@ export interface ResponseFormattingPlan {
 }
 
 export const ERR_CHAT_POLLUTION_BLOCKED = "ERR_CHAT_POLLUTION_BLOCKED";
+export const ERR_SCREEN_CAPTURE_BLOCKED = "ERR_SCREEN_CAPTURE_BLOCKED";
 
 export class ChatPollutionBlockedError extends Error {
   readonly code = ERR_CHAT_POLLUTION_BLOCKED;

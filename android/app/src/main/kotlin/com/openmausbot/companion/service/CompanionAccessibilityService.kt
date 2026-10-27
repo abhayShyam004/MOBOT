@@ -157,6 +157,49 @@ class CompanionAccessibilityService : AccessibilityService() {
             }
         }
 
+        /**
+         * Collect bounding boxes of all password/PIN/sensitive credential input fields
+         * on the active window for visual scrubbing before network transmission.
+         */
+        fun getSensitiveFieldBounds(): List<Rect> {
+            val service = instance ?: return emptyList()
+            val root = service.rootInActiveWindow ?: return emptyList()
+            val boundsList = mutableListOf<Rect>()
+            collectSensitiveBounds(root, boundsList)
+            return boundsList
+        }
+
+        private fun isNodeSensitive(node: AccessibilityNodeInfo): Boolean {
+            if (node.isPassword) return true
+            val id = node.viewIdResourceName?.lowercase() ?: ""
+            if (id.contains("password") || id.contains("pin_entry") || id.contains("passcode") || id.contains("secret")) return true
+            val cls = node.className?.toString()?.lowercase() ?: ""
+            if (cls.contains("password")) return true
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                val inputType = node.inputType
+                val isPasswordInput = (inputType and 0x80) != 0 || // TYPE_TEXT_VARIATION_PASSWORD
+                    (inputType and 0x90) != 0 || // TYPE_TEXT_VARIATION_VISIBLE_PASSWORD
+                    (inputType and 0xe0) != 0 || // TYPE_TEXT_VARIATION_WEB_PASSWORD
+                    (inputType and 0x12) != 0    // TYPE_NUMBER_VARIATION_PASSWORD
+                if (isPasswordInput) return true
+            }
+            return false
+        }
+
+        private fun collectSensitiveBounds(node: AccessibilityNodeInfo, list: MutableList<Rect>) {
+            if (isNodeSensitive(node)) {
+                val rect = Rect()
+                node.getBoundsInScreen(rect)
+                if (rect.width() > 0 && rect.height() > 0) {
+                    list.add(rect)
+                }
+            }
+            for (i in 0 until node.childCount) {
+                val child = node.getChild(i) ?: continue
+                collectSensitiveBounds(child, list)
+            }
+        }
+
         private fun traverse(
             node: AccessibilityNodeInfo,
             list: JSONArray,
@@ -177,7 +220,11 @@ class CompanionAccessibilityService : AccessibilityService() {
             val isFocusable = node.isFocusable
             val isFocused = node.isFocused
 
-            if (text.isNotBlank() || desc.isNotBlank() || id.isNotBlank() || isClickable || isEditable || isScrollable) {
+            val isSensitive = isNodeSensitive(node)
+            val safeText = if (isSensitive) "[PROTECTED]" else text
+            val safeDesc = if (isSensitive) "[PROTECTED]" else desc
+
+            if (safeText.isNotBlank() || safeDesc.isNotBlank() || id.isNotBlank() || isClickable || isEditable || isScrollable || isSensitive) {
                 val rect = Rect()
                 node.getBoundsInScreen(rect)
                 val boundsArray = JSONArray().apply {
@@ -196,8 +243,8 @@ class CompanionAccessibilityService : AccessibilityService() {
                 val nodeId = "node_${rect.left}_${rect.top}_${rect.right}_${rect.bottom}_$count"
                 val obj = JSONObject().apply {
                     put("nodeId", nodeId)
-                    put("text", text)
-                    put("description", desc)
+                    put("text", safeText)
+                    put("description", safeDesc)
                     put("id", id)
                     put("className", className)
                     put("bounds", boundsArray)
@@ -210,6 +257,7 @@ class CompanionAccessibilityService : AccessibilityService() {
                     put("editable", isEditable)
                     put("isEditable", isEditable)
                     put("isEnabled", isEnabled)
+                    put("isPassword", isSensitive)
                     put("package", node.packageName?.toString() ?: "")
                     put("packageName", node.packageName?.toString() ?: "")
                 }

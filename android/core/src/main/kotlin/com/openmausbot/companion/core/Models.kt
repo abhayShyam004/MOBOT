@@ -1697,6 +1697,32 @@ data class ActiveFileOperation(
 )
 
 @Serializable
+data class ElementBounds(
+    val left: Int = 0,
+    val top: Int = 0,
+    val right: Int = 0,
+    val bottom: Int = 0,
+)
+
+@Serializable
+data class DetectedTextNode(
+    val text: String = "",
+    val bounds: List<Int> = emptyList(),
+)
+
+@Serializable
+data class PhoneVisionObservation(
+    val captureTimestampMs: Long = 0L,
+    val width: Int = 0,
+    val height: Int = 0,
+    val screenshotPngBase64: String = "",
+    val focusedPackageName: String = "",
+    val focusedActivityName: String = "",
+    val highlightedElementBounds: ElementBounds? = null,
+    val detectedTextNodes: List<DetectedTextNode> = emptyList(),
+)
+
+@Serializable
 data class WatchWorkspaceTelemetryEvent(
     val eventId: String,
     val botId: String,
@@ -1708,13 +1734,17 @@ data class WatchWorkspaceTelemetryEvent(
     val terminalChunk: String? = null,
     val activeFileOperation: ActiveFileOperation? = null,
     val statusCapsuleText: String = "",
+    val phoneVision: PhoneVisionObservation? = null,
 ) {
     val frameData: ByteArray?
-        get() = frameBase64?.let {
-            try {
-                Base64.getDecoder().decode(it)
-            } catch (_: IllegalArgumentException) {
-                null
+        get() {
+            val raw = frameBase64 ?: phoneVision?.screenshotPngBase64?.takeIf { it.isNotBlank() }
+            return raw?.let {
+                try {
+                    Base64.getDecoder().decode(it)
+                } catch (_: IllegalArgumentException) {
+                    null
+                }
             }
         }
 }
