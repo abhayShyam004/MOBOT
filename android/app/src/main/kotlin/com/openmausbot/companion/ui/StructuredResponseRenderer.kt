@@ -109,6 +109,7 @@ import com.openmausbot.companion.core.PlayerStatsData
 import com.openmausbot.companion.core.StandingsTableData
 import com.openmausbot.companion.core.MedalTallyData
 import com.openmausbot.companion.core.GenericDataCardData
+import com.openmausbot.companion.core.TaskExecutionData
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -156,11 +157,12 @@ fun StructuredResponseView(
                         "card" -> SemanticCardRenderer(component)
                         "product" -> ProductCardRenderer(component, onEvent)
                         "result" -> ResearchResultCardRenderer(component, onEvent)
-                        "match_scorecard" -> MatchScorecardRenderer(component, onEvent)
+                        "match_scorecard", "tennis_match" -> MatchScorecardRenderer(component, onEvent)
                         "player_stats" -> PlayerStatsRenderer(component, onEvent)
                         "standings_table" -> StandingsTableRenderer(component, onEvent)
                         "medal_tally" -> MedalTallyRenderer(component, onEvent)
                         "data_card" -> GenericDataCardRenderer(component, onEvent)
+                        "task_execution", "phone_task" -> TaskExecutionRenderer(component, onEvent)
                         "sources" -> SourcesRenderer(component)
                         "code" -> CodeRenderer(component)
                         "diagram" -> DiagramRenderer(component)
@@ -188,7 +190,7 @@ private fun ComponentContainer(
     content: @Composable () -> Unit,
 ) {
     var remixOpen by remember { mutableStateOf(false) }
-    val isSelfContainedCard = component.type in listOf("result", "product", "match_scorecard", "player_stats", "standings_table", "medal_tally", "data_card")
+    val isSelfContainedCard = component.type in listOf("result", "product", "match_scorecard", "player_stats", "standings_table", "medal_tally", "data_card", "task_execution", "phone_task", "tennis_match")
     val title = component.title
     val subtitle = component.subtitle
     val showHeader = !isSelfContainedCard && (!title.isNullOrBlank() || !subtitle.isNullOrBlank() || onEvent != null)
@@ -3331,7 +3333,224 @@ private fun TextRenderer(component: StructuredComponent) {
     }
 }
 
-// ── Match Scorecard Renderer (Cricket / Football / Generic) ──
+// ── Sports & Rich Data Card Utilities ──
+
+private fun isoToFlag(code: String): String {
+    if (code.length != 2) return ""
+    val c1 = code[0].uppercaseChar()
+    val c2 = code[1].uppercaseChar()
+    if (c1 !in 'A'..'Z' || c2 !in 'A'..'Z') return ""
+    val codePoints = intArrayOf(0x1F1E6 + (c1 - 'A'), 0x1F1E6 + (c2 - 'A'))
+    return String(codePoints, 0, 2)
+}
+
+@Composable
+private fun CountryFlagOrBadge(
+    name: String,
+    flag: String? = null,
+    shortName: String? = null,
+    color: String? = null,
+    modifier: Modifier = Modifier,
+) {
+    val countryFlag = remember(name, flag, shortName) {
+        if (!flag.isNullOrBlank()) return@remember flag
+        val key = name.lowercase().trim()
+        val short = shortName?.lowercase()?.trim() ?: ""
+        val iso = when {
+            key.contains("india") || short == "ind" -> "IN"
+            key.contains("south africa") || short in listOf("sa", "rsa") -> "ZA"
+            key.contains("australia") || short == "aus" -> "AU"
+            key.contains("new zealand") || short == "nz" -> "NZ"
+            key.contains("england") || key.contains("great britain") || key.contains("united kingdom") || short in listOf("eng", "gbr", "uk") -> "GB"
+            key.contains("pakistan") || short == "pak" -> "PK"
+            key.contains("sri lanka") || short == "sl" -> "LK"
+            key.contains("bangladesh") || short == "ban" -> "BD"
+            key.contains("afghanistan") || short == "afg" -> "AF"
+            key.contains("spain") || short == "esp" -> "ES"
+            key.contains("serbia") || short == "srb" -> "RS"
+            key.contains("united states") || key.contains("usa") || short == "usa" -> "US"
+            key.contains("china") || short == "chn" -> "CN"
+            key.contains("japan") || short == "jpn" -> "JP"
+            key.contains("france") || short == "fra" -> "FR"
+            key.contains("germany") || short == "ger" -> "DE"
+            key.contains("italy") || short == "ita" -> "IT"
+            key.contains("brazil") || short == "bra" -> "BR"
+            key.contains("argentina") || short == "arg" -> "AR"
+            key.contains("netherlands") || short == "ned" -> "NL"
+            key.contains("canada") || short == "can" -> "CA"
+            else -> null
+        }
+        iso?.let { isoToFlag(it) }
+    }
+
+    if (countryFlag != null) {
+        Text(
+            text = countryFlag,
+            fontSize = 17.sp,
+            modifier = modifier,
+        )
+    } else {
+        val initials = remember(name, shortName) {
+            shortName ?: name.split(" ").filter { it.isNotBlank() }.map { it.first() }.take(2).joinToString("").uppercase()
+        }
+        val teamColor = remember(color) {
+            if (!color.isNullOrBlank()) {
+                try { Color(android.graphics.Color.parseColor(color)) } catch (_: Exception) { Color(0xFF3B82F6) }
+            } else {
+                Color(0xFF3B82F6)
+            }
+        }
+        Box(
+            modifier = modifier
+                .size(22.dp)
+                .clip(CircleShape)
+                .background(teamColor.copy(alpha = 0.2f))
+                .border(1.dp, teamColor.copy(alpha = 0.6f), CircleShape),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                text = initials.take(3),
+                fontSize = 9.sp,
+                fontWeight = FontWeight.Bold,
+                color = teamColor,
+            )
+        }
+    }
+}
+
+@Composable
+private fun StatusPillBadge(
+    status: String,
+    statusLabel: String? = null,
+    sport: String = "generic",
+) {
+    val normalizedStatus = status.lowercase()
+    val displayLabel = statusLabel ?: when (normalizedStatus) {
+        "live", "in_progress" -> "LIVE"
+        "upcoming", "scheduled" -> "SCHEDULED"
+        "delayed" -> "DELAYED"
+        "abandoned" -> "ABANDONED"
+        else -> if (sport == "football") "FULL-TIME" else "FINAL"
+    }
+
+    val (bg, textCol) = when {
+        displayLabel == "LIVE" || normalizedStatus in listOf("live", "in_progress") ->
+            Color(0xFF16A34A) to Color.White
+        displayLabel in listOf("FINAL", "FULL-TIME", "FT", "COMPLETED") || normalizedStatus in listOf("finished", "completed") ->
+            Color(0xFFDC2626) to Color.White
+        displayLabel in listOf("SCHEDULED", "UPCOMING") || normalizedStatus in listOf("scheduled", "upcoming") ->
+            Color(0xFF2563EB) to Color.White
+        displayLabel == "DELAYED" || normalizedStatus == "delayed" ->
+            Color(0xFFD97706) to Color.White
+        displayLabel == "ABANDONED" || normalizedStatus == "abandoned" ->
+            Color(0xFF4B5563) to Color.White
+        else ->
+            AppTheme.colors.surfaceRaised to AppTheme.colors.textSecondary
+    }
+
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(6.dp))
+            .background(bg)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = displayLabel,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.Bold,
+            color = textCol,
+            letterSpacing = 0.5.sp,
+        )
+    }
+}
+
+@Composable
+private fun SourceAttributionFooter(
+    sourceName: String?,
+    sourceUrl: String?,
+    actionLabel: String? = null,
+    actionUrl: String? = null,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+    componentId: String = "",
+) {
+    val uriHandler = LocalUriHandler.current
+    val targetUrl = actionUrl ?: sourceUrl
+    if (targetUrl.isNullOrBlank()) return
+
+    HorizontalDivider(color = AppTheme.colors.hairline.copy(alpha = 0.6f), modifier = Modifier.padding(top = 4.dp))
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                uriHandler.openUri(targetUrl)
+                onEvent?.invoke(componentId, "open_link", mapOf("url" to targetUrl))
+            }
+            .padding(vertical = 4.dp),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val label = sourceName?.let { "Source: $it" } ?: (actionLabel ?: "Official Source")
+        Text(
+            text = "$label ->",
+            fontSize = 11.sp,
+            fontWeight = FontWeight.Medium,
+            color = AppTheme.colors.accent,
+            textDecoration = TextDecoration.None,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+    }
+}
+
+@Composable
+private fun ComparisonStatBar(
+    label: String,
+    homeValue: String,
+    awayValue: String,
+) {
+    val homeNum = homeValue.replace("%", "").trim().toDoubleOrNull() ?: 50.0
+    val awayNum = awayValue.replace("%", "").trim().toDoubleOrNull() ?: 50.0
+    val total = (homeNum + awayNum).coerceAtLeast(1.0)
+    val homeWeight = (homeNum / total).coerceIn(0.1, 0.9).toFloat()
+    val awayWeight = 1f - homeWeight
+
+    Column(verticalArrangement = Arrangement.spacedBy(3.dp), modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(homeValue, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary)
+            Text(label.uppercase(), fontSize = 10.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textTertiary)
+            Text(awayValue, fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary)
+        }
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(AppTheme.colors.surfaceSunken),
+        ) {
+            Box(
+                modifier = Modifier
+                    .weight(homeWeight)
+                    .height(4.dp)
+                    .background(Color(0xFF3B82F6)),
+            )
+            Spacer(Modifier.width(2.dp))
+            Box(
+                modifier = Modifier
+                    .weight(awayWeight)
+                    .height(4.dp)
+                    .background(Color(0xFFEF4444)),
+            )
+        }
+    }
+}
+
+// ── Match Scorecard Dispatcher ──
 @Composable
 private fun MatchScorecardRenderer(
     component: StructuredComponent,
@@ -3350,14 +3569,30 @@ private fun MatchScorecardRenderer(
         return
     }
 
-    val uriHandler = LocalUriHandler.current
+    when (scorecard.sport.lowercase()) {
+        "cricket" -> CricketScorecardView(component, scorecard, onEvent)
+        "football" -> FootballScorecardView(component, scorecard, onEvent)
+        "tennis" -> TennisScorecardView(component, scorecard, onEvent)
+        else -> GenericScorecardView(component, scorecard, onEvent)
+    }
+}
+
+// ── 1. Cricket Scorecard View ──
+@Composable
+private fun CricketScorecardView(
+    component: StructuredComponent,
+    scorecard: MatchScorecardData,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)?,
+) {
+    var selectedTab by remember { mutableIntStateOf(0) } // 0: Summary, 1: Scorecard, 2: Key Players
     var selectedInningsIndex by remember { mutableIntStateOf(0) }
+    val uriHandler = LocalUriHandler.current
 
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        // 1. Header: Competition, Date & Status Pill
+        // 1. Header: Competition, Format, Venue, Status Pill
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -3373,8 +3608,8 @@ private fun MatchScorecardRenderer(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
-                if (!scorecard.date.isNullOrBlank() || !scorecard.venue.isNullOrBlank()) {
-                    val venueDate = listOfNotNull(scorecard.date, scorecard.venue).joinToString(" - ")
+                val venueDate = listOfNotNull(scorecard.venue, scorecard.date).joinToString(" • ")
+                if (venueDate.isNotBlank()) {
                     Text(
                         text = venueDate,
                         fontSize = 11.sp,
@@ -3384,39 +3619,9 @@ private fun MatchScorecardRenderer(
                     )
                 }
             }
-
-            val statusBg = when (scorecard.status.lowercase()) {
-                "live" -> Color(0xFFDC2626)
-                "upcoming" -> Color(0xFF2563EB)
-                else -> AppTheme.colors.surfaceRaised
-            }
-            val statusColor = when (scorecard.status.lowercase()) {
-                "live", "upcoming" -> Color.White
-                else -> AppTheme.colors.textSecondary
-            }
-            val statusLabel = when (scorecard.status.lowercase()) {
-                "live" -> "LIVE"
-                "upcoming" -> "UPCOMING"
-                else -> if (scorecard.sport == "football") "FT" else "FINAL"
-            }
-
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(statusBg)
-                    .padding(horizontal = 8.dp, vertical = 3.dp),
-            ) {
-                Text(
-                    text = statusLabel,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = statusColor,
-                    letterSpacing = 0.5.sp,
-                )
-            }
+            StatusPillBadge(scorecard.status, scorecard.statusLabel, "cricket")
         }
 
-        // Fixture title if distinct
         if (scorecard.fixtureTitle.isNotBlank() && scorecard.fixtureTitle != scorecard.competition) {
             Text(
                 text = scorecard.fixtureTitle,
@@ -3426,7 +3631,7 @@ private fun MatchScorecardRenderer(
             )
         }
 
-        // 2. Teams & Scoreboard Card Box
+        // 2. Teams & Scoreboard Container
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -3446,15 +3651,12 @@ private fun MatchScorecardRenderer(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.weight(1f, fill = false),
                         ) {
-                            if (team.color != null) {
-                                val colorVal = try { Color(android.graphics.Color.parseColor(team.color)) } catch (_: Exception) { AppTheme.colors.accent }
-                                Box(
-                                    modifier = Modifier
-                                        .size(10.dp)
-                                        .clip(CircleShape)
-                                        .background(colorVal),
-                                )
-                            }
+                            CountryFlagOrBadge(
+                                name = team.name,
+                                flag = team.flag,
+                                shortName = team.shortName,
+                                color = team.color,
+                            )
                             Text(
                                 text = team.name,
                                 fontSize = 15.sp,
@@ -3465,8 +3667,13 @@ private fun MatchScorecardRenderer(
                             )
                         }
 
+                        val scoreText = if (!team.overs.isNullOrBlank() && !team.score.contains("(")) {
+                            "${team.score} (${team.overs})"
+                        } else {
+                            team.score
+                        }
                         Text(
-                            text = team.score,
+                            text = scoreText,
                             fontSize = 16.sp,
                             fontWeight = FontWeight.Bold,
                             color = if (team.isWinner) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
@@ -3476,137 +3683,452 @@ private fun MatchScorecardRenderer(
             }
         }
 
-        // Status Detail outcome banner
-        val statusDetail = scorecard.statusDetail
-        if (!statusDetail.isNullOrBlank()) {
+        // 3. Outcome Banner
+        val outcomeText = scorecard.outcomeHeadline ?: scorecard.statusDetail
+        if (!outcomeText.isNullOrBlank()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF064E3B).copy(alpha = 0.35f))
+                    .border(1.dp, Color(0xFF10B981).copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
-                Text(
-                    text = statusDetail,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = AppTheme.colors.accent,
-                )
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = outcomeText,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF34D399),
+                    )
+                    val outcomeDetail = scorecard.outcomeDetail ?: scorecard.playerOfMatch?.let { "Player of the match: $it" }
+                    if (!outcomeDetail.isNullOrBlank()) {
+                        Text(
+                            text = outcomeDetail,
+                            fontSize = 11.sp,
+                            color = Color(0xFFA7F3D0),
+                        )
+                    }
+                }
             }
         }
 
-        // 3. Sport Breakdown (Cricket vs Football vs Generic)
-        if (scorecard.sport == "cricket" && scorecard.innings.isNotEmpty()) {
-            // Innings Tabs if > 1
-            if (scorecard.innings.size > 1) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+        // 4. Interactive Tabs: [ Summary | Scorecard | Key Players ]
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            val tabs = listOf("Summary", "Scorecard", "Key Players")
+            tabs.forEachIndexed { idx, tabTitle ->
+                val isSelected = selectedTab == idx
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (isSelected) AppTheme.colors.accent else AppTheme.colors.surfaceRaised)
+                        .clickable { selectedTab = idx }
+                        .padding(vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
                 ) {
-                    scorecard.innings.forEachIndexed { idx, inn ->
-                        val isSelected = idx == selectedInningsIndex
-                        Box(
+                    Text(
+                        text = tabTitle,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (isSelected) AppTheme.colors.onAccent else AppTheme.colors.textSecondary,
+                    )
+                }
+            }
+        }
+
+        // Tab Content
+        when (selectedTab) {
+            0 -> {
+                // Summary: Key Performers callouts
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val pom = scorecard.playerOfMatch ?: scorecard.innings.firstOrNull()?.topBatters?.firstOrNull()?.let {
+                        "${it.name} (${it.runs} off ${it.balls}${it.fours?.let { f -> ", ${f}x4" } ?: ""}${it.sixes?.let { s -> ", ${s}x6" } ?: ""})"
+                    }
+                    if (!pom.isNullOrBlank()) {
+                        Row(
                             modifier = Modifier
-                                .weight(1f)
+                                .fillMaxWidth()
                                 .clip(RoundedCornerShape(6.dp))
-                                .background(if (isSelected) AppTheme.colors.accent else AppTheme.colors.surfaceRaised)
-                                .clickable { selectedInningsIndex = idx }
-                                .padding(vertical = 6.dp),
-                            contentAlignment = Alignment.Center,
+                                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
                         ) {
-                            Text(
-                                text = inn.teamName,
-                                fontSize = 12.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) AppTheme.colors.onAccent else AppTheme.colors.textSecondary,
-                                maxLines = 1,
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(CircleShape)
+                                    .background(Color(0xFFF59E0B).copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("M", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFF59E0B))
+                            }
+                            Column {
+                                Text("PLAYER OF THE MATCH", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
+                                Text(pom, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                            }
+                        }
+                    }
+
+                    val topBowler = scorecard.topBowler ?: scorecard.innings.firstOrNull()?.topBowlers?.firstOrNull()?.let {
+                        "${it.name} (${it.wickets}/${it.runs} in ${it.overs} ov)"
+                    }
+                    if (!topBowler.isNullOrBlank()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(20.dp)
+                                    .clip(CircleShape)
+                                    .background(AppTheme.colors.accent.copy(alpha = 0.2f)),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text("B", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.accent)
+                            }
+                            Column {
+                                Text("TOP BOWLER", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
+                                Text(topBowler, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                            }
                         }
                     }
                 }
             }
-
-            val currentInnings = scorecard.innings.getOrNull(selectedInningsIndex) ?: scorecard.innings[0]
-
-            // Batting Summary
-            if (currentInnings.topBatters.isNotEmpty()) {
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text("BATTER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.weight(1f))
-                        Text("R", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
-                        Text("B", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
-                        Text("4s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
-                        Text("6s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
-                        Text("SR", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
-                    }
-
-                    currentInnings.topBatters.forEach { b ->
+            1 -> {
+                // Scorecard: Innings Breakdown Table
+                if (scorecard.innings.isNotEmpty()) {
+                    if (scorecard.innings.size > 1) {
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(b.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, maxLines = 1)
-                                val dismissal = b.dismissal
-                                if (!dismissal.isNullOrBlank()) {
-                                    Text(dismissal, fontSize = 10.sp, color = AppTheme.colors.textTertiary, maxLines = 1)
+                            scorecard.innings.forEachIndexed { idx, inn ->
+                                val isSelected = idx == selectedInningsIndex
+                                Box(
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(if (isSelected) AppTheme.colors.accent.copy(alpha = 0.25f) else AppTheme.colors.surfaceSunken)
+                                        .clickable { selectedInningsIndex = idx }
+                                        .padding(vertical = 4.dp),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text(
+                                        text = inn.teamName,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) AppTheme.colors.accent else AppTheme.colors.textSecondary,
+                                    )
                                 }
                             }
-                            Text("${b.runs}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
-                            Text("${b.balls}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
-                            Text(b.fours?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
-                            Text(b.sixes?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
-                            Text(b.strikeRate ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
+                        }
+                    }
+
+                    val currentInnings = scorecard.innings.getOrNull(selectedInningsIndex) ?: scorecard.innings[0]
+
+                    if (currentInnings.topBatters.isNotEmpty()) {
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("BATTER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.weight(1f))
+                                Text("R", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                                Text("B", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                                Text("4s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                                Text("6s", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                                Text("SR", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
+                            }
+
+                            currentInnings.topBatters.forEach { b ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(b.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, maxLines = 1)
+                                        val dismissal = b.dismissal
+                                        if (!dismissal.isNullOrBlank()) {
+                                            Text(dismissal, fontSize = 10.sp, color = AppTheme.colors.textTertiary, maxLines = 1)
+                                        }
+                                    }
+                                    Text("${b.runs}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                    Text("${b.balls}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                    Text(b.fours?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                    Text(b.sixes?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                    Text(b.strikeRate ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                }
+                            }
+                        }
+                    }
+
+                    if (currentInnings.topBowlers.isNotEmpty()) {
+                        HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(vertical = 2.dp))
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                            ) {
+                                Text("BOWLER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.weight(1f))
+                                Text("O", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                                Text("M", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                                Text("R", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
+                                Text("W", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
+                                Text("ECON", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
+                            }
+
+                            currentInnings.topBowlers.forEach { bw ->
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(bw.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, modifier = Modifier.weight(1f), maxLines = 1)
+                                    Text(bw.overs, fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                    Text(bw.maidens?.toString() ?: "0", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                    Text("${bw.runs}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                    Text("${bw.wickets}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.accent, modifier = Modifier.width(24.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                    Text(bw.economy ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                }
+                            }
                         }
                     }
                 }
             }
-
-            // Bowling Summary
-            if (currentInnings.topBowlers.isNotEmpty()) {
-                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(vertical = 2.dp))
-                Column(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                    ) {
-                        Text("BOWLER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.weight(1f))
-                        Text("O", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
-                        Text("M", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
-                        Text("R", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
-                        Text("W", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
-                        Text("ECON", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
-                    }
-
-                    currentInnings.topBowlers.forEach { bw ->
+            2 -> {
+                // Key Players
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    scorecard.innings.flatMap { it.topBatters }.take(4).forEach { b ->
                         Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 2.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
+                                .padding(horizontal = 10.dp, vertical = 6.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
-                            Text(bw.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, modifier = Modifier.weight(1f), maxLines = 1)
-                            Text(bw.overs, fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
-                            Text(bw.maidens?.toString() ?: "0", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
-                            Text("${bw.runs}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(28.dp), textAlign = TextAlign.End)
-                            Text("${bw.wickets}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.accent, modifier = Modifier.width(24.dp), textAlign = TextAlign.End)
-                            Text(bw.economy ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(42.dp), textAlign = TextAlign.End)
+                            Text(b.name, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                            Text("${b.runs} (${b.balls})", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.accent)
                         }
                     }
                 }
             }
-        } else if (scorecard.sport == "football") {
-            // Events timeline
-            if (scorecard.events.isNotEmpty()) {
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("MATCH EVENTS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
+        }
+
+        // Action Button
+        val actionLabel = scorecard.actionLabel
+        val actionUrl = scorecard.actionUrl ?: scorecard.sourceUrl
+        if (!actionLabel.isNullOrBlank() && !actionUrl.isNullOrBlank()) {
+            OutlinedButton(
+                onClick = { uriHandler.openUri(actionUrl) },
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(actionLabel, fontSize = 12.sp)
+            }
+        }
+
+        // Source Footer
+        SourceAttributionFooter(
+            sourceName = scorecard.sourceName,
+            sourceUrl = scorecard.sourceUrl,
+            actionLabel = scorecard.actionLabel,
+            actionUrl = scorecard.actionUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
+    }
+}
+
+// ── 2. Football Scorecard View ──
+@Composable
+private fun FootballScorecardView(
+    component: StructuredComponent,
+    scorecard: MatchScorecardData,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)?,
+) {
+    var selectedTab by remember { mutableIntStateOf(0) } // 0: Summary, 1: Stats, 2: Events
+    val uriHandler = LocalUriHandler.current
+
+    val team1 = scorecard.teams.getOrNull(0)
+    val team2 = scorecard.teams.getOrNull(1)
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // 1. Header: Competition, Matchweek, Venue & Status Pill
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f, fill = false)) {
+                Text(
+                    text = scorecard.competition.uppercase(),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textTertiary,
+                    letterSpacing = 0.5.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                val venueDate = listOfNotNull(scorecard.venue, scorecard.date).joinToString(" • ")
+                if (venueDate.isNotBlank()) {
+                    Text(
+                        text = venueDate,
+                        fontSize = 11.sp,
+                        color = AppTheme.colors.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            StatusPillBadge(scorecard.status, scorecard.statusLabel, "football")
+        }
+
+        // 2. Scoreboard Box (Home vs Away)
+        if (team1 != null && team2 != null) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(AppTheme.colors.surfaceRaised)
+                    .padding(14.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // Home Team
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.Start,
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            CountryFlagOrBadge(team1.name, team1.flag, team1.shortName, team1.color)
+                            Text(team1.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, maxLines = 1)
+                        }
+                        val scorers = team1.scorers ?: scorecard.events.filter { it.teamName == team1.name && it.type == "goal" }.joinToString(", ") { "${it.playerName} ${it.minute}" }
+                        if (scorers.isNotBlank()) {
+                            Text(scorers, fontSize = 10.sp, color = AppTheme.colors.textTertiary, maxLines = 2)
+                        }
+                    }
+
+                    // Score
+                    Text(
+                        text = "${team1.score} - ${team2.score}",
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AppTheme.colors.textPrimary,
+                        modifier = Modifier.padding(horizontal = 12.dp),
+                    )
+
+                    // Away Team
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(team2.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, maxLines = 1)
+                            CountryFlagOrBadge(team2.name, team2.flag, team2.shortName, team2.color)
+                        }
+                        val scorers = team2.scorers ?: scorecard.events.filter { it.teamName == team2.name && it.type == "goal" }.joinToString(", ") { "${it.playerName} ${it.minute}" }
+                        if (scorers.isNotBlank()) {
+                            Text(scorers, fontSize = 10.sp, color = AppTheme.colors.textTertiary, maxLines = 2, textAlign = TextAlign.End)
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Tabs: [ Summary | Stats | Events ]
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            val tabs = listOf("Summary", "Stats", "Events")
+            tabs.forEachIndexed { idx, tabTitle ->
+                val isSelected = selectedTab == idx
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(if (isSelected) AppTheme.colors.accent else AppTheme.colors.surfaceRaised)
+                        .clickable { selectedTab = idx }
+                        .padding(vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = tabTitle,
+                        fontSize = 11.sp,
+                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                        color = if (isSelected) AppTheme.colors.onAccent else AppTheme.colors.textSecondary,
+                    )
+                }
+            }
+        }
+
+        // Tab Content
+        when (selectedTab) {
+            0 -> {
+                // Summary: events timeline + top stats
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    if (scorecard.events.isNotEmpty()) {
+                        scorecard.events.take(4).forEach { ev ->
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                Text(ev.minute, fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.accent, modifier = Modifier.width(32.dp))
+                                Text(ev.playerName, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary)
+                                if (!ev.assistPlayerName.isNullOrBlank()) {
+                                    Text("(${ev.assistPlayerName})", fontSize = 10.sp, color = AppTheme.colors.textTertiary)
+                                }
+                                Spacer(Modifier.weight(1f))
+                                Text(ev.teamName, fontSize = 10.sp, color = AppTheme.colors.textTertiary)
+                            }
+                        }
+                    }
+                    if (scorecard.stats.isNotEmpty()) {
+                        scorecard.stats.take(2).forEach { st ->
+                            ComparisonStatBar(st.label, st.homeValue, st.awayValue)
+                        }
+                    }
+                }
+            }
+            1 -> {
+                // Stats: Full comparison bars
+                if (scorecard.stats.isNotEmpty()) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        scorecard.stats.forEach { st ->
+                            ComparisonStatBar(st.label, st.homeValue, st.awayValue)
+                        }
+                    }
+                }
+            }
+            2 -> {
+                // Events: Full events list
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     scorecard.events.forEach { ev ->
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -3624,55 +4146,267 @@ private fun MatchScorecardRenderer(
                     }
                 }
             }
+        }
 
-            // Stats comparison
-            if (scorecard.stats.isNotEmpty()) {
-                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(vertical = 2.dp))
-                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("MATCH STATS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
-                    scorecard.stats.forEach { st ->
+        // Action Button
+        val actionLabel = scorecard.actionLabel
+        val actionUrl = scorecard.actionUrl ?: scorecard.sourceUrl
+        if (!actionLabel.isNullOrBlank() && !actionUrl.isNullOrBlank()) {
+            OutlinedButton(
+                onClick = { uriHandler.openUri(actionUrl) },
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(actionLabel, fontSize = 12.sp)
+            }
+        }
+
+        // Source Footer
+        SourceAttributionFooter(
+            sourceName = scorecard.sourceName,
+            sourceUrl = scorecard.sourceUrl,
+            actionLabel = scorecard.actionLabel,
+            actionUrl = scorecard.actionUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
+    }
+}
+
+// ── 3. Tennis Scorecard View ──
+@Composable
+private fun TennisScorecardView(
+    component: StructuredComponent,
+    scorecard: MatchScorecardData,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)?,
+) {
+    val uriHandler = LocalUriHandler.current
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f, fill = false)) {
+                Text(
+                    text = scorecard.competition.uppercase(),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textTertiary,
+                    letterSpacing = 0.5.sp,
+                )
+                val venueDate = listOfNotNull(scorecard.venue, scorecard.date).joinToString(" • ")
+                if (venueDate.isNotBlank()) {
+                    Text(venueDate, fontSize = 11.sp, color = AppTheme.colors.textSecondary)
+                }
+            }
+            StatusPillBadge(scorecard.status, scorecard.statusLabel, "tennis")
+        }
+
+        if (scorecard.fixtureTitle.isNotBlank() && scorecard.fixtureTitle != scorecard.competition) {
+            Text(scorecard.fixtureTitle, fontSize = 13.sp, fontWeight = FontWeight.Medium, color = AppTheme.colors.textPrimary)
+        }
+
+        // Players & Sets Table Box
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(AppTheme.colors.surfaceRaised)
+                .padding(12.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                scorecard.teams.forEach { p ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
                         Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier.weight(1f, fill = false),
                         ) {
-                            Text(st.homeValue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(40.dp))
-                            Text(st.label, fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.weight(1f), textAlign = TextAlign.Center)
-                            Text(st.awayValue, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(40.dp), textAlign = TextAlign.End)
+                            CountryFlagOrBadge(p.name, p.flag, p.shortName, p.color)
+                            val seedText = if (!p.seed.isNullOrBlank()) " [${p.seed}]" else ""
+                            Text(
+                                text = "${p.name}$seedText",
+                                fontSize = 14.sp,
+                                fontWeight = if (p.isWinner) FontWeight.Bold else FontWeight.SemiBold,
+                                color = if (p.isWinner) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
+                            )
+                        }
+
+                        // Set Scores
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (p.sets.isNotEmpty()) {
+                                p.sets.forEach { s ->
+                                    Text(
+                                        text = s,
+                                        fontSize = 14.sp,
+                                        fontWeight = if (p.isWinner) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (p.isWinner) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
+                                    )
+                                }
+                            } else {
+                                Text(
+                                    text = p.score,
+                                    fontSize = 14.sp,
+                                    fontWeight = if (p.isWinner) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (p.isWinner) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
+                                )
+                            }
                         }
                     }
                 }
             }
         }
 
-        // 4. Provenance
-        val sourceUrl = scorecard.sourceUrl
-        if (!sourceUrl.isNullOrBlank()) {
-            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
-            Row(
+        // Outcome Banner
+        val outcomeText = scorecard.outcomeHeadline ?: scorecard.statusDetail
+        if (!outcomeText.isNullOrBlank()) {
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable {
-                        uriHandler.openUri(sourceUrl)
-                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(Color(0xFF064E3B).copy(alpha = 0.35f))
+                    .border(1.dp, Color(0xFF10B981).copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 Text(
-                    text = "Source: ${scorecard.sourceName ?: "Official Fixture"}",
-                    fontSize = 11.sp,
-                    color = AppTheme.colors.accent,
-                    textDecoration = TextDecoration.Underline,
-                )
-                Text(
-                    text = "Verified",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = Color(0xFF10B981),
+                    text = outcomeText,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color(0xFF34D399),
                 )
             }
         }
+
+        // Stats if present
+        if (scorecard.stats.isNotEmpty()) {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                scorecard.stats.forEach { st ->
+                    ComparisonStatBar(st.label, st.homeValue, st.awayValue)
+                }
+            }
+        }
+
+        // Action Button
+        val actionLabel = scorecard.actionLabel
+        val actionUrl = scorecard.actionUrl ?: scorecard.sourceUrl
+        if (!actionLabel.isNullOrBlank() && !actionUrl.isNullOrBlank()) {
+            OutlinedButton(
+                onClick = { uriHandler.openUri(actionUrl) },
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(actionLabel, fontSize = 12.sp)
+            }
+        }
+
+        // Source Footer
+        SourceAttributionFooter(
+            sourceName = scorecard.sourceName,
+            sourceUrl = scorecard.sourceUrl,
+            actionLabel = scorecard.actionLabel,
+            actionUrl = scorecard.actionUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
+    }
+}
+
+// ── 4. Generic Scorecard View ──
+@Composable
+private fun GenericScorecardView(
+    component: StructuredComponent,
+    scorecard: MatchScorecardData,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)?,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(modifier = Modifier.weight(1f, fill = false)) {
+                Text(
+                    text = scorecard.competition.uppercase(),
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.textTertiary,
+                )
+                val venueDate = listOfNotNull(scorecard.venue, scorecard.date).joinToString(" • ")
+                if (venueDate.isNotBlank()) {
+                    Text(venueDate, fontSize = 11.sp, color = AppTheme.colors.textSecondary)
+                }
+            }
+            StatusPillBadge(scorecard.status, scorecard.statusLabel, scorecard.sport)
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .background(AppTheme.colors.surfaceRaised)
+                .padding(12.dp),
+        ) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                scorecard.teams.forEach { team ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            CountryFlagOrBadge(team.name, team.flag, team.shortName, team.color)
+                            Text(
+                                text = team.name,
+                                fontSize = 14.sp,
+                                fontWeight = if (team.isWinner) FontWeight.Bold else FontWeight.SemiBold,
+                                color = if (team.isWinner) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
+                            )
+                        }
+                        Text(
+                            text = team.score,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (team.isWinner) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
+                        )
+                    }
+                }
+            }
+        }
+
+        val outcomeText = scorecard.outcomeHeadline ?: scorecard.statusDetail
+        if (!outcomeText.isNullOrBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+            ) {
+                Text(outcomeText, fontSize = 12.sp, fontWeight = FontWeight.Medium, color = AppTheme.colors.accent)
+            }
+        }
+
+        SourceAttributionFooter(
+            sourceName = scorecard.sourceName,
+            sourceUrl = scorecard.sourceUrl,
+            actionLabel = scorecard.actionLabel,
+            actionUrl = scorecard.actionUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
     }
 }
 
@@ -3708,7 +4442,7 @@ private fun PlayerStatsRenderer(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = listOfNotNull(player.competition, player.fixtureDate).joinToString(" - ").uppercase(),
+                text = listOfNotNull(player.competition, player.fixtureDate).joinToString(" • ").uppercase(),
                 fontSize = 10.sp,
                 fontWeight = FontWeight.Bold,
                 color = AppTheme.colors.textTertiary,
@@ -3734,76 +4468,105 @@ private fun PlayerStatsRenderer(
             }
         }
 
-        // 2. Player Name & Team Subtitle
-        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(
-                text = player.playerName,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = AppTheme.colors.textPrimary,
-            )
-            val subText = listOfNotNull(
-                player.teamName.ifBlank { null },
-                player.opponentName?.let { "vs $it" },
-                player.fixtureTitle?.ifBlank { null },
-            ).joinToString(" - ")
-            if (subText.isNotBlank()) {
+        // 2. Player Profile Row (Avatar + Name + Team)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            // Circular Avatar / Portrait Badge
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .background(AppTheme.colors.accent.copy(alpha = 0.2f))
+                    .border(1.dp, AppTheme.colors.accent.copy(alpha = 0.5f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                val initials = player.playerName.split(" ").filter { it.isNotBlank() }.map { it.first() }.take(2).joinToString("").uppercase()
                 Text(
-                    text = subText,
-                    fontSize = 12.sp,
-                    color = AppTheme.colors.textSecondary,
+                    text = initials,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = AppTheme.colors.accent,
                 )
             }
-        }
 
-        // 3. Headline Metric Callout
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
-                .background(AppTheme.colors.surfaceRaised)
-                .padding(12.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
-                    text = player.headlineStat,
-                    fontSize = 24.sp,
+                    text = player.playerName,
+                    fontSize = 18.sp,
                     fontWeight = FontWeight.Bold,
                     color = AppTheme.colors.textPrimary,
-                    letterSpacing = (-0.5).sp,
                 )
-                val headlineLabel = player.headlineLabel
-                if (!headlineLabel.isNullOrBlank()) {
+                val subText = listOfNotNull(
+                    player.teamName.ifBlank { null },
+                    player.opponentName?.let { "vs $it" },
+                    player.fixtureTitle?.ifBlank { null },
+                ).joinToString(" • ")
+                if (subText.isNotBlank()) {
                     Text(
-                        text = headlineLabel,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = AppTheme.colors.accent,
+                        text = subText,
+                        fontSize = 12.sp,
+                        color = AppTheme.colors.textSecondary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
             }
         }
 
-        // 4. Statistics Grid
+        // 3. Headline Metric Callout (if present)
+        if (player.headlineStat.isNotBlank()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(AppTheme.colors.surfaceRaised)
+                    .padding(12.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(2.dp),
+                ) {
+                    Text(
+                        text = player.headlineStat,
+                        fontSize = 24.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AppTheme.colors.textPrimary,
+                        letterSpacing = (-0.5).sp,
+                    )
+                    val headlineLabel = player.headlineLabel
+                    if (!headlineLabel.isNullOrBlank()) {
+                        Text(
+                            text = headlineLabel,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = AppTheme.colors.accent,
+                        )
+                    }
+                }
+            }
+        }
+
+        // 4. Statistics Grid (Runs, Balls, 4s, 6s, SR)
         if (player.stats.isNotEmpty()) {
             @OptIn(ExperimentalLayoutApi::class)
             FlowRow(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 player.stats.forEach { s ->
                     Box(
                         modifier = Modifier
                             .weight(1f)
-                            .widthIn(min = 70.dp)
+                            .widthIn(min = 60.dp)
                             .clip(RoundedCornerShape(6.dp))
-                            .background(if (s.highlight) AppTheme.colors.surfaceRaised else AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
-                            .padding(8.dp),
+                            .background(if (s.highlight) AppTheme.colors.accent.copy(alpha = 0.15f) else AppTheme.colors.surfaceRaised)
+                            .border(1.dp, if (s.highlight) AppTheme.colors.accent.copy(alpha = 0.4f) else Color.Transparent, RoundedCornerShape(6.dp))
+                            .padding(horizontal = 6.dp, vertical = 8.dp),
                         contentAlignment = Alignment.Center,
                     ) {
                         Column(
@@ -3812,7 +4575,7 @@ private fun PlayerStatsRenderer(
                         ) {
                             Text(
                                 text = s.value,
-                                fontSize = 14.sp,
+                                fontSize = 15.sp,
                                 fontWeight = if (s.highlight) FontWeight.Bold else FontWeight.SemiBold,
                                 color = if (s.highlight) AppTheme.colors.accent else AppTheme.colors.textPrimary,
                             )
@@ -3828,34 +4591,51 @@ private fun PlayerStatsRenderer(
             }
         }
 
-        // 5. Provenance
-        val sourceUrl = player.sourceUrl
-        if (!sourceUrl.isNullOrBlank()) {
-            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        uriHandler.openUri(sourceUrl)
-                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+        // 5. Action Button
+        val actionLabel = player.actionLabel ?: "Full Scorecard"
+        val actionUrl = player.actionUrl ?: player.sourceUrl
+        if (!actionUrl.isNullOrBlank()) {
+            OutlinedButton(
+                onClick = { uriHandler.openUri(actionUrl) },
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(
-                    text = "Source: ${player.sourceName ?: "Official Fixture Record"}",
-                    fontSize = 11.sp,
-                    color = AppTheme.colors.accent,
-                    textDecoration = TextDecoration.Underline,
-                )
-                Text(
-                    text = "Verified",
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Medium,
-                    color = Color(0xFF10B981),
-                )
+                Text(actionLabel, fontSize = 12.sp)
             }
         }
+
+        // 6. Key Highlights Section
+        if (player.highlights.isNotEmpty()) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.5f))
+                    .padding(10.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text("KEY HIGHLIGHTS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
+                player.highlights.forEach { hl ->
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("•", fontSize = 12.sp, color = AppTheme.colors.accent)
+                        Text(hl, fontSize = 12.sp, color = AppTheme.colors.textSecondary)
+                    }
+                }
+            }
+        }
+
+        // 7. Source Footer
+        SourceAttributionFooter(
+            sourceName = player.sourceName,
+            sourceUrl = player.sourceUrl,
+            actionLabel = player.actionLabel,
+            actionUrl = player.actionUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
     }
 }
 
@@ -3929,16 +4709,16 @@ private fun StandingsTableRenderer(
                 table.competition.contains("IPL", ignoreCase = true) ||
                 table.competition.contains("Cricket", ignoreCase = true)
         }
-        val diffHeader = if (isNrr) "NRR" else "DIFF"
+        val diffHeader = if (isNrr) "NRR" else "GD"
         val maxTeamNameLength = remember(table.rows) { table.rows.maxOfOrNull { it.teamName.length } ?: 12 }
 
-        val rankColWidth = 28.dp
+        val rankColWidth = 26.dp
         val pColWidth = if (hasPlayed) 22.dp else 0.dp
         val wColWidth = if (hasWon) 22.dp else 0.dp
         val dColWidth = if (hasDraws) 22.dp else 0.dp
         val lColWidth = if (hasLost) 22.dp else 0.dp
         val diffColWidth = if (hasDiff) 46.dp else 0.dp
-        val ptsColWidth = if (hasPoints) 36.dp else 0.dp
+        val ptsColWidth = if (hasPoints) 34.dp else 0.dp
         val nonTeamWidth = rankColWidth + pColWidth + wColWidth + dColWidth + lColWidth + diffColWidth + ptsColWidth
 
         BoxWithConstraints(
@@ -3989,10 +4769,10 @@ private fun StandingsTableRenderer(
                     // Table Rows
                     table.rows.forEach { r ->
                         val zoneColor = when (r.qualificationZone) {
-                            "champions_league" -> Color(0xFF58A6FF)
-                            "europa_league" -> Color(0xFFF0883E)
-                            "relegation" -> Color(0xFFF85149)
-                            else -> null
+                            "champions_league" -> Color(0xFF10B981) // Green accent bar
+                            "europa_league" -> Color(0xFF3B82F6) // Blue accent bar
+                            "relegation" -> Color(0xFFEF4444) // Red accent bar
+                            else -> if (r.rank <= 4) Color(0xFF10B981) else null
                         }
 
                         Row(
@@ -4009,7 +4789,7 @@ private fun StandingsTableRenderer(
                                             .clip(RoundedCornerShape(1.dp))
                                             .background(zoneColor),
                                     )
-                                    Spacer(Modifier.width(4.dp))
+                                    Spacer(Modifier.width(3.dp))
                                 }
                                 Text(
                                     text = "${r.rank}",
@@ -4019,38 +4799,61 @@ private fun StandingsTableRenderer(
                                 )
                             }
 
-                            Text(
-                                text = r.teamName,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = AppTheme.colors.textPrimary,
+                            Row(
                                 modifier = Modifier.width(teamColWidth),
-                                maxLines = 2,
-                                softWrap = true,
-                                lineHeight = 16.sp,
-                            )
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                CountryFlagOrBadge(
+                                    name = r.teamName,
+                                    flag = r.flag,
+                                    shortName = r.teamShort,
+                                )
+                                Text(
+                                    text = r.teamName,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = AppTheme.colors.textPrimary,
+                                    maxLines = 2,
+                                    softWrap = true,
+                                    lineHeight = 16.sp,
+                                )
+                            }
 
                             if (hasPlayed) {
-                                Text("${r.played}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(pColWidth), textAlign = TextAlign.End)
+                                Text("${r.played}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(pColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                             }
                             if (hasWon) {
-                                Text("${r.won}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(wColWidth), textAlign = TextAlign.End)
+                                Text("${r.won}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(wColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                             }
                             if (hasDraws) {
-                                Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(dColWidth), textAlign = TextAlign.End)
+                                Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(dColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                             }
                             if (hasLost) {
-                                Text("${r.lost}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(lColWidth), textAlign = TextAlign.End)
+                                Text("${r.lost}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(lColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                             }
                             if (hasDiff) {
-                                Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(diffColWidth), textAlign = TextAlign.End)
+                                Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(diffColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                             }
                             if (hasPoints) {
-                                Text("${r.points}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(ptsColWidth), textAlign = TextAlign.End)
+                                Text("${r.points}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(ptsColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                             }
                         }
                     }
                 }
+            }
+        }
+
+        // Action Button: View Full Table
+        val actionLabel = table.actionLabel ?: "View Full Table"
+        val actionUrl = table.actionUrl ?: table.sourceUrl
+        if (!actionUrl.isNullOrBlank()) {
+            OutlinedButton(
+                onClick = { uriHandler.openUri(actionUrl) },
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(actionLabel, fontSize = 12.sp)
             }
         }
 
@@ -4061,7 +4864,7 @@ private fun StandingsTableRenderer(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 table.qualificationLegend.forEach { leg ->
-                    val colorVal = try { Color(android.graphics.Color.parseColor(leg.color)) } catch (_: Exception) { Color(0xFF58A6FF) }
+                    val colorVal = try { Color(android.graphics.Color.parseColor(leg.color)) } catch (_: Exception) { Color(0xFF10B981) }
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp),
@@ -4073,29 +4876,15 @@ private fun StandingsTableRenderer(
             }
         }
 
-        // 4. Provenance
-        val sourceUrl = table.sourceUrl
-        if (!sourceUrl.isNullOrBlank()) {
-            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        uriHandler.openUri(sourceUrl)
-                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Source: ${table.sourceName ?: "Official Standings"}",
-                    fontSize = 11.sp,
-                    color = AppTheme.colors.accent,
-                    textDecoration = TextDecoration.Underline,
-                )
-                Text("Verified", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF10B981))
-            }
-        }
+        // 4. Source Footer
+        SourceAttributionFooter(
+            sourceName = table.sourceName,
+            sourceUrl = table.sourceUrl,
+            actionLabel = table.actionLabel,
+            actionUrl = table.actionUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
     }
 }
 
@@ -4144,27 +4933,24 @@ private fun MedalTallyRenderer(
                     color = AppTheme.colors.textSecondary,
                 )
             }
-            val freshness = tally.freshness
-            if (!freshness.isNullOrBlank()) {
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(AppTheme.colors.surfaceRaised)
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                ) {
-                    Text(freshness, fontSize = 10.sp, fontWeight = FontWeight.Medium, color = AppTheme.colors.textTertiary)
-                }
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(AppTheme.colors.surfaceRaised)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            ) {
+                Text("MEDALS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
             }
         }
 
         // 2. Responsive Table Container (uses available width before horizontal scroll)
         val scrollState = rememberScrollState()
         val maxNationLength = remember(tally.rows) { tally.rows.maxOfOrNull { it.nation.length } ?: 10 }
-        val rankColWidth = 36.dp
-        val gColWidth = 32.dp
-        val sColWidth = 32.dp
-        val bColWidth = 32.dp
-        val tColWidth = 36.dp
+        val rankColWidth = 26.dp
+        val gColWidth = 36.dp
+        val sColWidth = 36.dp
+        val bColWidth = 36.dp
+        val tColWidth = 44.dp
         val nonNationWidth = rankColWidth + gColWidth + sColWidth + bColWidth + tColWidth
 
         BoxWithConstraints(
@@ -4188,12 +4974,24 @@ private fun MedalTallyRenderer(
                         modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("RANK", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(rankColWidth))
-                        Text("NATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(nationColWidth))
-                        Text("GOLD", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD700), modifier = Modifier.width(gColWidth), textAlign = TextAlign.End)
-                        Text("SILVER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC0C0C0), modifier = Modifier.width(sColWidth), textAlign = TextAlign.End)
-                        Text("BRONZE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFCD7F32), modifier = Modifier.width(bColWidth), textAlign = TextAlign.End)
-                        Text("TOTAL", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(tColWidth), textAlign = TextAlign.End)
+                        Text("POS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(rankColWidth), maxLines = 1, softWrap = false)
+                        Text("NATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(nationColWidth), maxLines = 1, softWrap = false)
+                        Box(modifier = Modifier.width(gColWidth), contentAlignment = Alignment.CenterEnd) {
+                            Box(modifier = Modifier.size(14.dp).clip(CircleShape).background(Color(0xFFF59E0B)), contentAlignment = Alignment.Center) {
+                                Text("G", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                            }
+                        }
+                        Box(modifier = Modifier.width(sColWidth), contentAlignment = Alignment.CenterEnd) {
+                            Box(modifier = Modifier.size(14.dp).clip(CircleShape).background(Color(0xFF9CA3AF)), contentAlignment = Alignment.Center) {
+                                Text("S", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                            }
+                        }
+                        Box(modifier = Modifier.width(bColWidth), contentAlignment = Alignment.CenterEnd) {
+                            Box(modifier = Modifier.size(14.dp).clip(CircleShape).background(Color(0xFFB45309)), contentAlignment = Alignment.Center) {
+                                Text("B", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                            }
+                        }
+                        Text("TOT", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(tColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                     }
 
                     HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
@@ -4201,9 +4999,9 @@ private fun MedalTallyRenderer(
                     // Rows
                     tally.rows.forEach { r ->
                         val rankColor = when (r.rank) {
-                            1 -> Color(0xFFFFD700)
-                            2 -> Color(0xFFC0C0C0)
-                            3 -> Color(0xFFCD7F32)
+                            1 -> Color(0xFFF59E0B)
+                            2 -> Color(0xFF9CA3AF)
+                            3 -> Color(0xFFB45309)
                             else -> AppTheme.colors.textSecondary
                         }
 
@@ -4219,52 +5017,269 @@ private fun MedalTallyRenderer(
                                 fontWeight = if (r.rank <= 3) FontWeight.Bold else FontWeight.SemiBold,
                                 color = rankColor,
                                 modifier = Modifier.width(rankColWidth),
+                                maxLines = 1,
+                                softWrap = false,
                             )
 
-                            Text(
-                                text = if (!r.nocCode.isNullOrBlank()) "${r.nation} (${r.nocCode})" else r.nation,
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = AppTheme.colors.textPrimary,
+                            Row(
                                 modifier = Modifier.width(nationColWidth),
-                                maxLines = 2,
-                                softWrap = true,
-                                lineHeight = 16.sp,
-                            )
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            ) {
+                                CountryFlagOrBadge(name = r.nation, flag = r.flag, shortName = r.nocCode)
+                                Text(
+                                    text = if (!r.nocCode.isNullOrBlank()) "${r.nation} (${r.nocCode})" else r.nation,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = AppTheme.colors.textPrimary,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    softWrap = false,
+                                )
+                            }
 
-                            Text("${r.gold}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFD700), modifier = Modifier.width(gColWidth), textAlign = TextAlign.End)
-                            Text("${r.silver}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFC0C0C0), modifier = Modifier.width(sColWidth), textAlign = TextAlign.End)
-                            Text("${r.bronze}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFCD7F32), modifier = Modifier.width(bColWidth), textAlign = TextAlign.End)
-                            Text("${r.total}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(tColWidth), textAlign = TextAlign.End)
+                            Text("${r.gold}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFF59E0B), modifier = Modifier.width(gColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                            Text("${r.silver}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF9CA3AF), modifier = Modifier.width(sColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                            Text("${r.bronze}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFB45309), modifier = Modifier.width(bColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                            Text("${r.total}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(tColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
                         }
                     }
                 }
             }
         }
 
-        // 3. Provenance
-        val sourceUrl = tally.sourceUrl
-        if (!sourceUrl.isNullOrBlank()) {
-            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        uriHandler.openUri(sourceUrl)
-                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
+        // Action Button: View Full Table
+        val actionLabel = tally.actionLabel ?: "View Full Medal Table"
+        val actionUrl = tally.actionUrl ?: tally.sourceUrl
+        if (!actionUrl.isNullOrBlank()) {
+            OutlinedButton(
+                onClick = { uriHandler.openUri(actionUrl) },
+                shape = RoundedCornerShape(8.dp),
+                modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(
-                    text = "Source: ${tally.sourceName ?: "Medal Standings"}",
-                    fontSize = 11.sp,
-                    color = AppTheme.colors.accent,
-                    textDecoration = TextDecoration.Underline,
-                )
-                Text("Verified", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF10B981))
+                Text(actionLabel, fontSize = 12.sp)
             }
         }
+
+        // Source Footer
+        SourceAttributionFooter(
+            sourceName = tally.sourceName,
+            sourceUrl = tally.sourceUrl,
+            actionLabel = tally.actionLabel,
+            actionUrl = tally.actionUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
+    }
+}
+
+// ── Phone / Device Execution Task Card Renderer ──
+@Composable
+private fun TaskExecutionRenderer(
+    component: StructuredComponent,
+    onEvent: ((componentId: String, action: String, payload: Map<String, String>) -> Unit)? = null,
+) {
+    val task = remember(component.data) {
+        try {
+            component.data?.let { jsonParser.decodeFromJsonElement<TaskExecutionData>(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    if (task == null) {
+        FallbackRenderer(component)
+        return
+    }
+
+    val uriHandler = LocalUriHandler.current
+    var previewBitmap by remember(task.screenshotUrl, task.screenshotPath) { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(task.screenshotUrl, task.screenshotPath) {
+        val path = task.screenshotPath
+        val url = task.screenshotUrl
+        withContext(Dispatchers.IO) {
+            try {
+                if (!path.isNullOrBlank()) {
+                    val file = java.io.File(path)
+                    if (file.exists() && file.canRead()) {
+                        previewBitmap = BitmapFactory.decodeFile(file.absolutePath)?.asImageBitmap()
+                    }
+                } else if (!url.isNullOrBlank() && (url.startsWith("http://") || url.startsWith("https://"))) {
+                    val conn = (java.net.URI(url).toURL().openConnection() as java.net.HttpURLConnection).apply {
+                        connectTimeout = 4000
+                        readTimeout = 4000
+                    }
+                    if (conn.responseCode in 200..299) {
+                        conn.inputStream.use { stream ->
+                            val bytes = stream.readBytes()
+                            if (bytes.isNotEmpty()) {
+                                previewBitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+                            }
+                        }
+                    }
+                }
+            } catch (_: Exception) {
+                // Graceful fallback
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        // 1. Header with Phone Icon, Title, Device Name & Status Pill
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                modifier = Modifier.weight(1f, fill = false),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .background(AppTheme.colors.accent.copy(alpha = 0.2f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("DEV", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.accent)
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text(
+                        text = task.title.ifBlank { "Device Task" },
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AppTheme.colors.textPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = listOfNotNull(task.deviceName, task.statusLabel ?: "Completed").joinToString(" • "),
+                        fontSize = 11.sp,
+                        color = AppTheme.colors.textSecondary,
+                    )
+                }
+            }
+
+            // Completed / Running Pill
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(if (task.status == "completed") Color(0xFF10B981) else Color(0xFF3B82F6))
+                    .padding(horizontal = 8.dp, vertical = 3.dp),
+            ) {
+                Text(
+                    text = if (task.status == "completed") "Completed" else "In Progress",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White,
+                )
+            }
+        }
+
+        // 2. Body Split: Left (Stages) vs Right (Screenshot Thumbnail)
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.Top,
+        ) {
+            // Left: Lifecycle stages
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                task.stages.forEach { stage ->
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(16.dp)
+                                .clip(CircleShape)
+                                .background(if (stage.completed) Color(0xFF10B981) else AppTheme.colors.surfaceSunken),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            if (stage.completed) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(10.dp),
+                                )
+                            }
+                        }
+                        Column(modifier = Modifier.weight(1f, fill = false)) {
+                            Text(stage.name, fontSize = 11.sp, fontWeight = FontWeight.Medium, color = AppTheme.colors.textPrimary, maxLines = 1)
+                            val stageTs = stage.timestamp
+                            if (!stageTs.isNullOrBlank()) {
+                                Text(stageTs, fontSize = 9.sp, color = AppTheme.colors.textTertiary)
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Right: Screenshot Thumbnail Preview
+            Box(
+                modifier = Modifier
+                    .width(84.dp)
+                    .height(130.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(AppTheme.colors.surfaceRaised)
+                    .border(1.dp, AppTheme.colors.hairline, RoundedCornerShape(8.dp)),
+                contentAlignment = Alignment.Center,
+            ) {
+                val bmp = previewBitmap
+                if (bmp != null) {
+                    Image(
+                        bitmap = bmp,
+                        contentDescription = "Screen capture preview",
+                        modifier = Modifier.fillMaxWidth(),
+                        contentScale = ContentScale.Crop,
+                    )
+                } else {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text("PREVIEW", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary)
+                    }
+                }
+
+                // Expand icon overlay at bottom-right
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomEnd)
+                        .padding(4.dp)
+                        .size(18.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(Color.Black.copy(alpha = 0.6f))
+                        .clickable {
+                            val target = task.screenshotUrl ?: task.screenshotPath
+                            if (!target.isNullOrBlank()) {
+                                uriHandler.openUri(target)
+                            }
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text("EXP", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            }
+        }
+
+        // Source Footer
+        SourceAttributionFooter(
+            sourceName = task.sourceName,
+            sourceUrl = task.sourceUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
     }
 }
 
@@ -4286,8 +5301,6 @@ private fun GenericDataCardRenderer(
         FallbackRenderer(component)
         return
     }
-
-    val uriHandler = LocalUriHandler.current
 
     Column(
         modifier = Modifier.fillMaxWidth(),
@@ -4365,11 +5378,17 @@ private fun GenericDataCardRenderer(
                                 color = AppTheme.colors.textTertiary,
                             )
                             Row(verticalAlignment = Alignment.Bottom) {
+                                val valueFontSize = when {
+                                    m.value.length > 14 -> 12.sp
+                                    m.value.length > 7 -> 14.sp
+                                    else -> 18.sp
+                                }
                                 Text(
                                     text = m.value,
-                                    fontSize = 18.sp,
+                                    fontSize = valueFontSize,
                                     fontWeight = FontWeight.Bold,
                                     color = AppTheme.colors.textPrimary,
+                                    lineHeight = (valueFontSize.value + 3).sp,
                                 )
                                 val unit = m.unit
                                 if (!unit.isNullOrBlank()) {
@@ -4445,29 +5464,13 @@ private fun GenericDataCardRenderer(
             }
         }
 
-        // 5. Provenance
-        val sourceUrl = card.sourceUrl
-        if (!sourceUrl.isNullOrBlank()) {
-            HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.padding(top = 2.dp))
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clickable {
-                        uriHandler.openUri(sourceUrl)
-                        onEvent?.invoke(component.id, "open_link", mapOf("url" to sourceUrl))
-                    },
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = "Source: ${card.sourceName ?: "Data Source"}",
-                    fontSize = 11.sp,
-                    color = AppTheme.colors.accent,
-                    textDecoration = TextDecoration.Underline,
-                )
-                Text("Verified", fontSize = 10.sp, fontWeight = FontWeight.Medium, color = Color(0xFF10B981))
-            }
-        }
+        // 5. Source Footer
+        SourceAttributionFooter(
+            sourceName = card.sourceName,
+            sourceUrl = card.sourceUrl,
+            onEvent = onEvent,
+            componentId = component.id,
+        )
     }
 }
 

@@ -739,7 +739,27 @@ function synthesizeMarkdownSportsAndTables(
     }
   }
 
-  // Check 3: Markdown Match Scorecard (Cricket / Football)
+function inferMatchStatus(text: string, sport: string): { status: string; statusLabel: string } {
+  const lower = text.toLowerCase();
+  if (lower.includes("live") || lower.includes("in progress") || lower.includes("stumps") || lower.includes("innings break")) {
+    return { status: "live", statusLabel: "LIVE" };
+  }
+  if (lower.includes("delayed") || lower.includes("rain") || lower.includes("bad light")) {
+    return { status: "delayed", statusLabel: "DELAYED" };
+  }
+  if (lower.includes("abandoned") || lower.includes("no result") || lower.includes("cancelled")) {
+    return { status: "abandoned", statusLabel: "ABANDONED" };
+  }
+  if (lower.includes("scheduled") || lower.includes("upcoming") || lower.includes("starts at")) {
+    return { status: "scheduled", statusLabel: "SCHEDULED" };
+  }
+  if (lower.includes("won by") || lower.includes("beat") || lower.includes("defeated") || lower.includes("full time") || lower.includes("final") || lower.includes("(ft)")) {
+    return { status: "completed", statusLabel: sport === "football" ? "FULL-TIME" : "FINAL" };
+  }
+  return { status: "unknown", statusLabel: "STATUS" };
+}
+
+  // Check 3: Markdown Match Scorecard (Cricket / Football / Tennis)
   const cricketMatchRegex = /(?:###|##)?\s*([^\n]+?(?:World Cup|Premier League|IPL|T20|ODI|Test|Championship)[^\n]*)\s*\n+\*\*([^*]+?\s+(?:vs|v)\s+[^*]+?)\*\*[\s\S]*?-\s+([^:\n]+):\s*([0-9/]+(?:\s*\([0-9.]+(?:\s*ov)?\))?)\s*\n+-\s+([^:\n]+):\s*([0-9/]+(?:\s*\([0-9.]+(?:\s*ov)?\))?)/i;
   const cricketMatch = text.match(cricketMatchRegex);
   if (cricketMatch) {
@@ -766,11 +786,13 @@ function synthesizeMarkdownSportsAndTables(
       }
     }
 
+    const statusInfo = inferMatchStatus(text, "cricket");
     const scorecardData: MatchScorecardComponentData = {
       sport: "cricket",
       competition,
       fixtureTitle,
-      status: "finished",
+      status: statusInfo.status,
+      statusLabel: statusInfo.statusLabel,
       statusDetail,
       teams: [
         { name: team1Name, score: team1Score },
@@ -816,12 +838,14 @@ function synthesizeMarkdownSportsAndTables(
       }
     }
 
+    const statusInfo = inferMatchStatus(text, "football");
     const scorecardData: MatchScorecardComponentData = {
       sport: "football",
       competition,
       fixtureTitle,
-      status: "finished",
-      statusDetail: `${team1Name} ${team1Score} - ${team2Score} ${team2Name} (FT)`,
+      status: statusInfo.status,
+      statusLabel: statusInfo.statusLabel,
+      statusDetail: `${team1Name} ${team1Score} - ${team2Score} ${team2Name} (${statusInfo.statusLabel})`,
       teams: [
         { name: team1Name, score: team1Score, isWinner: parseInt(team1Score, 10) > parseInt(team2Score, 10) },
         { name: team2Name, score: team2Score, isWinner: parseInt(team2Score, 10) > parseInt(team1Score, 10) },
@@ -840,6 +864,61 @@ function synthesizeMarkdownSportsAndTables(
       data: scorecardData,
     });
     matchedRaws.push(footballMatch[0]);
+  }
+
+  // Tennis Match Check: e.g. **Wimbledon 2024 - Men's Singles Final** ... **Carlos Alcaraz vs Novak Djokovic**
+  const tennisMatchRegex = /(?:###|##)?\s*([^\n]+?(?:Wimbledon|US Open|French Open|Roland Garros|Australian Open|ATP|WTA)[^\n]*)\s*\n+\*\*([^*]+?)\s+(?:def\.|defeated|d\.|vs)\s+([^*]+?)\*\*(?:\s*\n+([^\n]+?(?:\d+[-–]\d+)[^\n]*))?/i;
+  const tennisMatch = text.match(tennisMatchRegex);
+  if (tennisMatch) {
+    const competition = tennisMatch[1]!.trim();
+    const player1Name = tennisMatch[2]!.trim();
+    const player2Name = tennisMatch[3]!.trim();
+    const scoreLine = tennisMatch[4]?.trim() || "";
+    const fixtureTitle = `${player1Name} vs ${player2Name}`;
+
+    let sourceUrl: string | undefined;
+    let sourceName: string | undefined;
+    const urlMatch = text.match(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/) || text.match(/(https?:\/\/[^\s)]+)/);
+    if (urlMatch) {
+      if (urlMatch[2]) {
+        sourceName = urlMatch[1];
+        sourceUrl = urlMatch[2];
+      } else {
+        sourceUrl = urlMatch[1];
+        try { sourceName = new URL(sourceUrl).hostname.replace(/^www\./, ""); } catch {}
+      }
+    }
+
+    const statusInfo = inferMatchStatus(text, "tennis");
+    const sets = scoreLine ? scoreLine.split(/[\s,]+/).filter((s) => /^\d+[-–]\d+/.test(s)) : [];
+
+    const scorecardData: MatchScorecardComponentData = {
+      sport: "tennis",
+      competition,
+      fixtureTitle,
+      status: statusInfo.status,
+      statusLabel: statusInfo.statusLabel,
+      statusDetail: scoreLine || `${player1Name} won`,
+      outcomeHeadline: `${player1Name} won`,
+      outcomeDetail: scoreLine ? `Score: ${scoreLine}` : undefined,
+      teams: [
+        { name: player1Name, score: sets.map((s) => s.split(/[-–]/)[0]).join(" ") || "1", isWinner: true },
+        { name: player2Name, score: sets.map((s) => s.split(/[-–]/)[1]).join(" ") || "0", isWinner: false },
+      ],
+      sourceUrl,
+      sourceName,
+    };
+
+    if (threadId) {
+      recordScorecardContext(threadId, scorecardData);
+    }
+
+    components.push({
+      id: `scorecard-${components.length + 1}`,
+      type: "match_scorecard",
+      data: scorecardData,
+    });
+    matchedRaws.push(tennisMatch[0]);
   }
 
   if (components.length === 0) return null;

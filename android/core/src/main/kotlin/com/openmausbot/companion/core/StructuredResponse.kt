@@ -604,6 +604,10 @@ data class MatchTeam(
     val isWinner: Boolean = false,
     val logoUrl: String? = null,
     val color: String? = null,
+    val flag: String? = null,
+    val scorers: String? = null,
+    val sets: List<String> = emptyList(),
+    val seed: String? = null,
 )
 
 @Serializable
@@ -662,13 +666,20 @@ data class MatchScorecardData(
     val competition: String = "",
     val fixtureTitle: String = "",
     val status: String = "finished",
+    val statusLabel: String? = null,
     val statusDetail: String? = null,
+    val outcomeHeadline: String? = null,
+    val outcomeDetail: String? = null,
+    val playerOfMatch: String? = null,
+    val topBowler: String? = null,
     val date: String? = null,
     val venue: String? = null,
     val teams: List<MatchTeam> = emptyList(),
     val innings: List<CricketInnings> = emptyList(),
     val events: List<FootballMatchEvent> = emptyList(),
     val stats: List<FootballMatchStat> = emptyList(),
+    val actionLabel: String? = null,
+    val actionUrl: String? = null,
     val sourceUrl: String? = null,
     val sourceName: String? = null,
     val retrievalTimestamp: Long? = null,
@@ -696,6 +707,10 @@ data class PlayerStatsData(
     val headlineStat: String = "",
     val headlineLabel: String? = null,
     val stats: List<PlayerStatItem> = emptyList(),
+    val highlights: List<String> = emptyList(),
+    val avatarUrl: String? = null,
+    val actionLabel: String? = null,
+    val actionUrl: String? = null,
     val sourceUrl: String? = null,
     val sourceName: String? = null,
     val retrievalTimestamp: Long? = null,
@@ -708,6 +723,7 @@ data class StandingRow(
     val teamName: String = "",
     val teamShort: String? = null,
     val logoUrl: String? = null,
+    val flag: String? = null,
     val played: Int = 0,
     val won: Int = 0,
     val drawn: Int? = null,
@@ -733,6 +749,8 @@ data class StandingsTableData(
     val columns: List<String> = emptyList(),
     val rows: List<StandingRow> = emptyList(),
     val qualificationLegend: List<QualificationZoneLegend> = emptyList(),
+    val actionLabel: String? = null,
+    val actionUrl: String? = null,
     val sourceUrl: String? = null,
     val sourceName: String? = null,
     val retrievalTimestamp: Long? = null,
@@ -745,6 +763,7 @@ data class MedalRow(
     val nation: String = "",
     val nocCode: String? = null,
     val flagUrl: String? = null,
+    val flag: String? = null,
     val gold: Int = 0,
     val silver: Int = 0,
     val bronze: Int = 0,
@@ -759,6 +778,8 @@ data class MedalTallyData(
     val rankingMethodLabel: String? = null,
     val freshness: String? = null,
     val rows: List<MedalRow> = emptyList(),
+    val actionLabel: String? = null,
+    val actionUrl: String? = null,
     val sourceUrl: String? = null,
     val sourceName: String? = null,
     val retrievalTimestamp: Long? = null,
@@ -799,4 +820,26 @@ data class GenericDataCardData(
     val sourceUrl: String? = null,
     val sourceName: String? = null,
     val retrievalTimestamp: Long? = null,
+)
+
+// ── 31. Phone / Device Execution Task Card ──
+@Serializable
+data class TaskExecutionStage(
+    val name: String,
+    val timestamp: String? = null,
+    val completed: Boolean = true,
+)
+
+@Serializable
+data class TaskExecutionData(
+    val title: String = "",
+    val deviceName: String? = "Samsung Galaxy A07",
+    val status: String = "completed",
+    val statusLabel: String? = "Completed",
+    val stages: List<TaskExecutionStage> = emptyList(),
+    val screenshotUrl: String? = null,
+    val screenshotPath: String? = null,
+    val durationSeconds: Double? = null,
+    val sourceUrl: String? = null,
+    val sourceName: String? = null,
 )

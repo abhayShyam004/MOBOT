@@ -41,7 +41,10 @@ export type StructuredComponentType =
   | "player_stats"
   | "standings_table"
   | "medal_tally"
-  | "data_card";
+  | "data_card"
+  | "task_execution"
+  | "phone_task"
+  | "tennis_match";
 
 export interface ComponentAction {
   id: string;
@@ -523,6 +526,10 @@ export interface MatchTeam {
   isWinner?: boolean;
   logoUrl?: string;
   color?: string;
+  flag?: string;
+  scorers?: string;
+  sets?: string[];
+  seed?: string;
 }
 
 export interface CricketBatterSummary {
@@ -571,17 +578,24 @@ export interface FootballMatchStat {
 }
 
 export interface MatchScorecardComponentData {
-  sport: "cricket" | "football" | "generic";
+  sport: "cricket" | "football" | "tennis" | "generic" | string;
   competition: string;
   fixtureTitle: string;
-  status: "live" | "finished" | "upcoming";
+  status: "live" | "finished" | "upcoming" | "scheduled" | "completed" | "delayed" | "abandoned" | "unknown" | string;
+  statusLabel?: string;
   statusDetail?: string;
+  outcomeHeadline?: string;
+  outcomeDetail?: string;
+  playerOfMatch?: string;
+  topBowler?: string;
   date?: string;
   venue?: string;
   teams: [MatchTeam, MatchTeam] | MatchTeam[];
   innings?: CricketInnings[];
   events?: FootballMatchEvent[];
   stats?: FootballMatchStat[];
+  actionLabel?: string;
+  actionUrl?: string;
   sourceUrl?: string;
   sourceName?: string;
   retrievalTimestamp?: number;
@@ -597,7 +611,7 @@ export interface PlayerStatItem {
 
 export interface PlayerStatsComponentData {
   playerName: string;
-  sport: "cricket" | "football" | "generic";
+  sport: "cricket" | "football" | "generic" | string;
   teamName: string;
   opponentName?: string;
   competition?: string;
@@ -607,6 +621,10 @@ export interface PlayerStatsComponentData {
   headlineStat: string;
   headlineLabel?: string;
   stats: PlayerStatItem[];
+  highlights?: string[];
+  avatarUrl?: string;
+  actionLabel?: string;
+  actionUrl?: string;
   sourceUrl?: string;
   sourceName?: string;
   retrievalTimestamp?: number;
@@ -618,6 +636,7 @@ export interface StandingRow {
   teamName: string;
   teamShort?: string;
   logoUrl?: string;
+  flag?: string;
   played: number;
   won: number;
   drawn?: number;
@@ -641,6 +660,8 @@ export interface StandingsTableComponentData {
   columns?: string[];
   rows: StandingRow[];
   qualificationLegend?: QualificationZoneLegend[];
+  actionLabel?: string;
+  actionUrl?: string;
   sourceUrl?: string;
   sourceName?: string;
   retrievalTimestamp?: number;
@@ -652,6 +673,7 @@ export interface MedalRow {
   nation: string;
   nocCode?: string;
   flagUrl?: string;
+  flag?: string;
   gold: number;
   silver: number;
   bronze: number;
@@ -665,9 +687,31 @@ export interface MedalTallyComponentData {
   rankingMethodLabel?: string;
   freshness?: string;
   rows: MedalRow[];
+  actionLabel?: string;
+  actionUrl?: string;
   sourceUrl?: string;
   sourceName?: string;
   retrievalTimestamp?: number;
+}
+
+// ── Phone / Device Execution Task Card ──
+export interface TaskExecutionStage {
+  name: string;
+  timestamp?: string;
+  completed?: boolean;
+}
+
+export interface TaskExecutionComponentData {
+  title: string;
+  deviceName?: string;
+  status?: string;
+  statusLabel?: string;
+  stages: TaskExecutionStage[];
+  screenshotUrl?: string;
+  screenshotPath?: string;
+  durationSeconds?: number;
+  sourceUrl?: string;
+  sourceName?: string;
 }
 
 // ── Generic Extensible Data Card ──
@@ -1600,34 +1644,46 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
         break;
       }
 
-      case "match_scorecard": {
+      case "match_scorecard":
+      case "tennis_match": {
         const card = rawCompData as MatchScorecardComponentData | undefined;
         if (!card || !card.fixtureTitle || !Array.isArray(card.teams) || card.teams.length < 2) {
           errors.push(`Component '${compId}' (match_scorecard) missing valid fixtureTitle or at least 2 teams.`);
           break;
         }
-        const validSports = ["cricket", "football", "generic"];
-        const sport = validSports.includes(card.sport) ? card.sport : "generic";
-        const validStatuses = ["live", "finished", "upcoming"];
-        const status = validStatuses.includes(card.status) ? card.status : "finished";
+        const sportRaw = sanitizeString(card.sport)?.toLowerCase() || (comp.type === "tennis_match" ? "tennis" : "generic");
+        const sport = sportRaw || "generic";
+        const statusRaw = sanitizeString(card.status)?.toLowerCase() || "finished";
+        const validStatuses = ["live", "finished", "upcoming", "scheduled", "completed", "delayed", "abandoned", "unknown"];
+        const status = validStatuses.includes(statusRaw) ? statusRaw : "finished";
 
+        sanitizedComp.type = "match_scorecard";
         sanitizedComp.data = {
           sport,
           competition: sanitizeString(card.competition) || "Sports Fixture",
           fixtureTitle: sanitizeString(card.fixtureTitle) || "Match",
           status,
+          statusLabel: sanitizeString(card.statusLabel),
           statusDetail: sanitizeString(card.statusDetail),
+          outcomeHeadline: sanitizeString(card.outcomeHeadline),
+          outcomeDetail: sanitizeString(card.outcomeDetail),
+          playerOfMatch: sanitizeString(card.playerOfMatch),
+          topBowler: sanitizeString(card.topBowler),
           date: sanitizeString(card.date),
           venue: sanitizeString(card.venue),
           teams: card.teams.slice(0, 4).map((t) => ({
             name: sanitizeString(t.name) || "Team",
             shortName: sanitizeString(t.shortName),
             score: sanitizeString(t.score) || "0",
-            overs: typeof t.overs === "number" || typeof t.overs === "string" ? t.overs : undefined,
+            overs: typeof t.overs === "number" || typeof t.overs === "string" ? String(t.overs) : undefined,
             wickets: typeof t.wickets === "number" ? t.wickets : undefined,
             isWinner: Boolean(t.isWinner),
             logoUrl: sanitizeUrl(t.logoUrl),
             color: sanitizeColor(t.color),
+            flag: sanitizeString(t.flag),
+            scorers: sanitizeString(t.scorers),
+            sets: Array.isArray(t.sets) ? t.sets.map((s) => sanitizeString(String(s)) || "") : undefined,
+            seed: sanitizeString(t.seed),
           })),
           innings: Array.isArray(card.innings)
             ? card.innings.slice(0, 4).map((inn) => ({
@@ -1677,6 +1733,8 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
                 awayValue: sanitizeString(String(st.awayValue ?? "")) || "0",
               }))
             : undefined,
+          actionLabel: sanitizeString(card.actionLabel),
+          actionUrl: sanitizeUrl(card.actionUrl),
           sourceUrl: sanitizeUrl(card.sourceUrl),
           sourceName: sanitizeString(card.sourceName),
           retrievalTimestamp: typeof card.retrievalTimestamp === "number" ? card.retrievalTimestamp : undefined,
@@ -1693,7 +1751,7 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
         }
         sanitizedComp.data = {
           playerName: sanitizeString(p.playerName) || "Player",
-          sport: ["cricket", "football", "generic"].includes(p.sport) ? p.sport : "generic",
+          sport: sanitizeString(p.sport)?.toLowerCase() || "generic",
           teamName: sanitizeString(p.teamName) || "",
           opponentName: sanitizeString(p.opponentName),
           competition: sanitizeString(p.competition),
@@ -1708,6 +1766,12 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
             highlight: Boolean(s.highlight),
             subtext: sanitizeString(s.subtext),
           })),
+          highlights: Array.isArray(p.highlights)
+            ? p.highlights.slice(0, 10).map((h) => sanitizeString(h) || "").filter(Boolean)
+            : undefined,
+          avatarUrl: sanitizeUrl(p.avatarUrl),
+          actionLabel: sanitizeString(p.actionLabel),
+          actionUrl: sanitizeUrl(p.actionUrl),
           sourceUrl: sanitizeUrl(p.sourceUrl),
           sourceName: sanitizeString(p.sourceName),
           retrievalTimestamp: typeof p.retrievalTimestamp === "number" ? p.retrievalTimestamp : undefined,
@@ -1734,6 +1798,7 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
             teamName: sanitizeString(r.teamName) || "Team",
             teamShort: sanitizeString(r.teamShort),
             logoUrl: sanitizeUrl(r.logoUrl),
+            flag: sanitizeString(r.flag),
             played: typeof r.played === "number" ? r.played : 0,
             won: typeof r.won === "number" ? r.won : 0,
             drawn: typeof r.drawn === "number" ? r.drawn : undefined,
@@ -1750,6 +1815,8 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
                 color: sanitizeColor(l.color) || "#58A6FF",
               }))
             : undefined,
+          actionLabel: sanitizeString(stand.actionLabel),
+          actionUrl: sanitizeUrl(stand.actionUrl),
           sourceUrl: sanitizeUrl(stand.sourceUrl),
           sourceName: sanitizeString(stand.sourceName),
           retrievalTimestamp: typeof stand.retrievalTimestamp === "number" ? stand.retrievalTimestamp : undefined,
@@ -1777,14 +1844,48 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
             nation: sanitizeString(r.nation) || "Nation",
             nocCode: sanitizeString(r.nocCode),
             flagUrl: sanitizeUrl(r.flagUrl),
+            flag: sanitizeString(r.flag),
             gold: typeof r.gold === "number" ? Math.max(0, r.gold) : 0,
             silver: typeof r.silver === "number" ? Math.max(0, r.silver) : 0,
             bronze: typeof r.bronze === "number" ? Math.max(0, r.bronze) : 0,
             total: typeof r.total === "number" ? Math.max(0, r.total) : (typeof r.gold === "number" ? r.gold : 0) + (typeof r.silver === "number" ? r.silver : 0) + (typeof r.bronze === "number" ? r.bronze : 0),
           })),
+          actionLabel: sanitizeString(medal.actionLabel),
+          actionUrl: sanitizeUrl(medal.actionUrl),
           sourceUrl: sanitizeUrl(medal.sourceUrl),
           sourceName: sanitizeString(medal.sourceName),
           retrievalTimestamp: typeof medal.retrievalTimestamp === "number" ? medal.retrievalTimestamp : undefined,
+        };
+        sanitizedComponents.push(sanitizedComp);
+        break;
+      }
+
+      case "task_execution":
+      case "phone_task": {
+        const task = rawCompData as TaskExecutionComponentData | undefined;
+        const taskTitle = sanitizeString(task?.title || comp.title);
+        if (!taskTitle) {
+          errors.push(`Component '${compId}' (task_execution) missing title.`);
+          break;
+        }
+        sanitizedComp.type = "task_execution";
+        sanitizedComp.data = {
+          title: taskTitle,
+          deviceName: sanitizeString(task?.deviceName) || "Samsung Galaxy A07",
+          status: sanitizeString(task?.status) || "completed",
+          statusLabel: sanitizeString(task?.statusLabel) || "Completed",
+          stages: Array.isArray(task?.stages)
+            ? task.stages.slice(0, 10).map((s) => ({
+                name: sanitizeString(s.name) || "Step",
+                timestamp: sanitizeString(s.timestamp),
+                completed: s.completed !== false,
+              }))
+            : [],
+          screenshotUrl: sanitizeUrl(task?.screenshotUrl),
+          screenshotPath: sanitizeString(task?.screenshotPath),
+          durationSeconds: typeof task?.durationSeconds === "number" ? task.durationSeconds : undefined,
+          sourceUrl: sanitizeUrl(task?.sourceUrl),
+          sourceName: sanitizeString(task?.sourceName),
         };
         sanitizedComponents.push(sanitizedComp);
         break;
@@ -2095,6 +2196,17 @@ export function structuredResponseToFallbackText(resp: StructuredResponseData): 
         }
         if (data.sourceUrl) {
           parts.push(`Source: [${data.sourceName || "Data Source"}](${data.sourceUrl})`);
+        }
+        break;
+      }
+
+      case "task_execution":
+      case "phone_task": {
+        const data = comp.data as TaskExecutionComponentData;
+        parts.push(`**${data.title || "Device Task"}** — ${data.statusLabel || "Completed"}`);
+        if (data.deviceName) parts.push(`Device: ${data.deviceName}`);
+        if (data.stages && data.stages.length) {
+          parts.push(data.stages.map((s) => `✓ ${s.name}${s.timestamp ? ` (${s.timestamp})` : ""}`).join("\n"));
         }
         break;
       }

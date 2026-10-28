@@ -737,4 +737,157 @@ Punjab Kings finished first on net run rate, ahead of RCB.`;
     const medalComp = res.structured!.components.find((c) => c.type === "medal_tally");
     expect(medalComp).toBeDefined();
   });
+
+  it("Scenario 21: Tennis match scorecard with sets, seed, and statusLabel", () => {
+    const raw = `
+\`\`\`structured
+{
+  "version": 1,
+  "components": [
+    {
+      "id": "tennis-wimbledon-final",
+      "type": "match_scorecard",
+      "data": {
+        "sport": "tennis",
+        "competition": "Wimbledon 2024",
+        "fixtureTitle": "Men's Singles Final",
+        "status": "completed",
+        "statusLabel": "FINAL",
+        "statusDetail": "Carlos Alcaraz won in straight sets",
+        "outcomeHeadline": "Carlos Alcaraz won in straight sets (6-2, 6-2, 7-6)",
+        "venue": "Centre Court, London",
+        "teams": [
+          { "name": "Carlos Alcaraz", "shortName": "ESP", "seed": "3", "score": "6 6 7(7)", "isWinner": true, "sets": ["6", "6", "7(7)"] },
+          { "name": "Novak Djokovic", "shortName": "SRB", "seed": "2", "score": "2 2 6(4)", "isWinner": false, "sets": ["2", "2", "6(4)"] }
+        ],
+        "sourceUrl": "https://www.wimbledon.com/en_GB/scores/results/day14.html",
+        "sourceName": "Wimbledon Official"
+      }
+    }
+  ]
+}
+\`\`\`
+`;
+    const res = extractStructuredContent(raw);
+    expect(res.structured).toBeDefined();
+    const comp = res.structured?.components[0];
+    expect(comp?.type).toBe("match_scorecard");
+    expect(comp?.data.sport).toBe("tennis");
+    expect(comp?.data.teams[0].sets).toEqual(["6", "6", "7(7)"]);
+    expect(comp?.data.teams[0].seed).toBe("3");
+    expect(comp?.data.statusLabel).toBe("FINAL");
+  });
+
+  it("Scenario 22: Phone Task Execution card with lifecycle stages and screenshot preview", () => {
+    const raw = `
+\`\`\`structured
+{
+  "version": 1,
+  "components": [
+    {
+      "id": "task-cricinfo-capture",
+      "type": "task_execution",
+      "data": {
+        "title": "Capture Cricket Match on ESPN Cricinfo",
+        "deviceName": "Samsung Galaxy A07",
+        "status": "completed",
+        "statusLabel": "Completed",
+        "stages": [
+          { "name": "Launch ESPN Cricinfo", "timestamp": "10:14:02", "completed": true },
+          { "name": "Navigate to India vs SA match", "timestamp": "10:14:05", "completed": true },
+          { "name": "Capture screen", "timestamp": "10:14:08", "completed": true },
+          { "name": "Deliver image to chat", "timestamp": "10:14:09", "completed": true }
+        ],
+        "screenshotUrl": "https://example.com/cricinfo_screen.png",
+        "durationSeconds": 7.4
+      }
+    }
+  ]
+}
+\`\`\`
+`;
+    const res = extractStructuredContent(raw);
+    expect(res.structured).toBeDefined();
+    const comp = res.structured?.components[0];
+    expect(comp?.type).toBe("task_execution");
+    expect(comp?.data.title).toBe("Capture Cricket Match on ESPN Cricinfo");
+    expect(comp?.data.stages.length).toBe(4);
+    expect(comp?.data.stages[0].name).toBe("Launch ESPN Cricinfo");
+    expect(comp?.data.status).toBe("completed");
+  });
+
+  it("Scenario 23: Sourced match status inference without defaulting to FINAL", () => {
+    const liveText = `### ICC Men's T20 World Cup
+**India vs Pakistan**
+- India: 140/3 (15.2 ov)
+- Pakistan: 0/0
+Match in progress (Live on Star Sports)
+Source: [ESPNcricinfo](https://www.espncricinfo.com)`;
+
+    const liveRes = extractStructuredContent(liveText);
+    expect(liveRes.structured).toBeDefined();
+    const liveComp = liveRes.structured?.components.find((c) => c.type === "match_scorecard");
+    expect(liveComp).toBeDefined();
+    expect(liveComp?.data.status).toBe("live");
+    expect(liveComp?.data.statusLabel).toBe("LIVE");
+
+    const delayedText = `### Premier League
+**Arsenal 0 - 0 Chelsea**
+Match delayed due to severe rain
+Source: [Premier League](https://www.premierleague.com)`;
+
+    const delayedRes = extractStructuredContent(delayedText);
+    expect(delayedRes.structured).toBeDefined();
+    const delayedComp = delayedRes.structured?.components.find((c) => c.type === "match_scorecard");
+    expect(delayedComp).toBeDefined();
+    expect(delayedComp?.data.status).toBe("delayed");
+    expect(delayedComp?.data.statusLabel).toBe("DELAYED");
+  });
+
+  it("Scenario 24: Player stats card with highlights bullets and avatarUrl", () => {
+    const raw = `
+\`\`\`structured
+{
+  "version": 1,
+  "components": [
+    {
+      "id": "player-virat-kohli",
+      "type": "player_stats",
+      "data": {
+        "playerName": "Virat Kohli",
+        "sport": "cricket",
+        "teamName": "Royal Challengers Bengaluru",
+        "competition": "IPL 2024",
+        "role": "Top-order Batter",
+        "headlineStat": "741",
+        "headlineLabel": "Season Total Runs",
+        "stats": [
+          { "label": "Runs", "value": "741", "highlight": true },
+          { "label": "Inns", "value": "15" },
+          { "label": "Avg", "value": "61.75" },
+          { "label": "SR", "value": "154.69" },
+          { "label": "100s/50s", "value": "1/5" }
+        ],
+        "highlights": [
+          "Orange Cap winner for the 2024 season",
+          "Highest individual score: 113* vs RR",
+          "8 sixes in a single innings against PBKS"
+        ],
+        "actionLabel": "Full Scorecard",
+        "sourceUrl": "https://www.iplt20.com/stats/2024",
+        "sourceName": "IPL T20 Official"
+      }
+    }
+  ]
+}
+\`\`\`
+`;
+    const res = extractStructuredContent(raw);
+    expect(res.structured).toBeDefined();
+    const comp = res.structured?.components[0];
+    expect(comp?.type).toBe("player_stats");
+    expect(comp?.data.highlights.length).toBe(3);
+    expect(comp?.data.highlights[0]).toContain("Orange Cap");
+    expect(comp?.data.actionLabel).toBe("Full Scorecard");
+  });
 });
