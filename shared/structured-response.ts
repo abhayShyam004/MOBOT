@@ -983,20 +983,22 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
 
     const compId = typeof comp.id === "string" && comp.id.trim() ? comp.id.trim() : `comp-${i + 1}`;
     const compType = typeof comp.type === "string" ? comp.type : "";
+    // Normalize data: LLMs frequently emit component properties flat on comp instead of nesting under data
+    const rawCompData = (comp.data && typeof comp.data === "object") ? comp.data : comp;
 
     const sanitizedComp: StructuredComponent = {
       id: compId,
       type: compType as StructuredComponentType,
-      title: sanitizeString(comp.title),
-      subtitle: sanitizeString(comp.subtitle),
-      description: sanitizeString(comp.description),
-      data: comp.data,
+      title: sanitizeString(comp.title || (rawCompData !== comp ? (rawCompData as Record<string, unknown>).title : undefined)),
+      subtitle: sanitizeString(comp.subtitle || (rawCompData !== comp ? (rawCompData as Record<string, unknown>).subtitle : undefined)),
+      description: sanitizeString(comp.description || (rawCompData !== comp ? (rawCompData as Record<string, unknown>).description : undefined)),
+      data: rawCompData,
       actions: sanitizeActions(comp.actions),
     };
 
     switch (compType) {
       case "table": {
-        const table = comp.data as TableComponentData | undefined;
+        const table = rawCompData as TableComponentData | undefined;
         if (!table || !Array.isArray(table.columns) || !Array.isArray(table.rows)) {
           errors.push(`Component '${compId}' (table) missing valid columns or rows.`);
           break;
@@ -1599,7 +1601,7 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
       }
 
       case "match_scorecard": {
-        const card = comp.data as MatchScorecardComponentData | undefined;
+        const card = rawCompData as MatchScorecardComponentData | undefined;
         if (!card || !card.fixtureTitle || !Array.isArray(card.teams) || card.teams.length < 2) {
           errors.push(`Component '${compId}' (match_scorecard) missing valid fixtureTitle or at least 2 teams.`);
           break;
@@ -1684,7 +1686,7 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
       }
 
       case "player_stats": {
-        const p = comp.data as PlayerStatsComponentData | undefined;
+        const p = rawCompData as PlayerStatsComponentData | undefined;
         if (!p || !p.playerName || !p.headlineStat || !Array.isArray(p.stats)) {
           errors.push(`Component '${compId}' (player_stats) missing playerName, headlineStat, or stats array.`);
           break;
@@ -1715,7 +1717,7 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
       }
 
       case "standings_table": {
-        const stand = comp.data as StandingsTableComponentData | undefined;
+        const stand = rawCompData as StandingsTableComponentData | undefined;
         if (!stand || !stand.competition || !Array.isArray(stand.rows)) {
           errors.push(`Component '${compId}' (standings_table) missing competition or rows array.`);
           break;
@@ -1757,7 +1759,7 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
       }
 
       case "medal_tally": {
-        const medal = comp.data as MedalTallyComponentData | undefined;
+        const medal = rawCompData as MedalTallyComponentData | undefined;
         if (!medal || !medal.competition || !Array.isArray(medal.rows)) {
           errors.push(`Component '${compId}' (medal_tally) missing competition or rows array.`);
           break;
@@ -1789,7 +1791,7 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
       }
 
       case "data_card": {
-        const dc = comp.data as DataCardComponentData | undefined;
+        const dc = rawCompData as DataCardComponentData | undefined;
         const dcTitle = sanitizeString(dc?.title || comp.title);
         if (!dcTitle) {
           errors.push(`Component '${compId}' (data_card) missing title.`);

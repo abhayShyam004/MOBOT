@@ -121,7 +121,7 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     if (canonical.structured && !(out as any).structured) {
       (out as any).structured = canonical.structured;
     }
-    if ((out as any).structured && !out.text && (out as any).kind === "text") {
+    if ((out as any).structured && (out as any).kind === "text") {
       (out as any).kind = "structured";
     }
   }
@@ -1246,7 +1246,7 @@ export class Store {
     const path = this.activePath(threadId);
     for (let i = path.length - 1; i >= 0; i -= 1) {
       const message = path[i];
-      if (message.role === "bot" && message.kind === "text" && message.turnId === turnId) {
+      if (message.role === "bot" && (message.kind === "text" || message.kind === "structured") && message.turnId === turnId) {
         if (message.turnTerminal) return message;
         return this.patchMessage(threadId, message.id, { turnTerminal: true });
       }

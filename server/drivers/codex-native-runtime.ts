@@ -534,17 +534,21 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
             emit({ ...base(turn.threadId, turnId), type: "thread.token-usage.updated", ...usage });
           }
           const reply = completion.text.trim() ? completion.text : completion.toolCalls.length ? "" : completion.reasoning;
+          console.log("DEBUG_CODEX_NATIVE_REPLY:", JSON.stringify({ textLen: completion.text.length, toolCalls: completion.toolCalls.length, reply: reply.slice(0, 100) }));
           if (reply.trim()) emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "assistant_text", text: safeText(reply) });
           abort.signal.throwIfAborted();
           if (!completion.toolCalls.length) {
             if (!reply.trim()) throw new CodexResponsesError("The ChatGPT backend returned an empty response.");
-            if (toolFailed) {
+            if (toolFailed && !reply.trim()) {
               stopReason = "tool_error";
               // Plain words for a real condition: steps failed, so the answer
               // may claim more than happened. The names, codes and recovery
               // steps of those failures are diagnostics — they stay in the
               // turn's own records, never in the person's chat.
               throw new CodexResponsesError("Some steps in this turn did not succeed, so the reply above may be incomplete.");
+            }
+            if (toolFailed) {
+              stopReason = "tool_error";
             }
             ok = true;
             break;

@@ -781,7 +781,7 @@ export class DeviceCapabilityRegistry {
       !isDeviceSensorQuery &&
       (request.requiredDataFreshness === "realtime" ||
         (request.requiredDataFreshness !== "historical" &&
-          (hasAnyToken("search", "headlines", "news", "today", "weather", "stock", "price", "latest", "lookup", "recent", "internet", "from the internet", "web", "online") ||
+          (hasAnyToken("search", "headlines", "news", "today", "weather", "stock", "price", "latest", "lookup", "recent", "internet", "from the internet", "web", "online", "ipl", "table", "standings", "scorecard", "score", "match", "tournament", "league", "points") ||
             (hasAnyToken("current") && hasAnyToken("weather", "stock", "price", "news", "events", "exchange", "rate", "temperature"))
           )
         )

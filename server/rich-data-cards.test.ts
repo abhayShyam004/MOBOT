@@ -578,4 +578,163 @@ Source: https://www.premierleague.com/match/12345
     expect(data.teams[1]!.score).toBe("1");
     expect(data.teams[1]!.isWinner).toBe(false);
   });
+
+  it("Scenario 16: User exact IPL 2025 table with Pos, Team, Points and surrounding prose", () => {
+    const userOutput = `Assuming “last year” means **IPL 2025**, the final league-stage table was:
+
+| Pos. | Team | Points |
+|---:|---|---:|
+| 1 | Punjab Kings | 19 |
+| 2 | Royal Challengers Bengaluru | 19 |
+| 3 | Gujarat Titans | 18 |
+| 4 | Mumbai Indians | 16 |
+| 5 | Delhi Capitals | 15 |
+| 6 | Sunrisers Hyderabad | 12 |
+| 7 | Lucknow Super Giants | 12 |
+| 8 | Kolkata Knight Riders | 12 |
+| 9 | Rajasthan Royals | 8 |
+| 10 | Chennai Super Kings | 8 |
+
+Punjab Kings finished first on net run rate, ahead of RCB.`;
+
+    const res = extractStructuredContent(userOutput);
+    expect(res.cleanText).toBe("");
+    expect(res.structured).toBeDefined();
+    expect(res.structured!.components.length).toBe(2);
+
+    // Prose preserved as text component
+    const textComp = res.structured!.components[0]!;
+    expect(textComp.type).toBe("text");
+    expect(textComp.data.text).toContain("Assuming “last year” means **IPL 2025**");
+    expect(textComp.data.text).toContain("Punjab Kings finished first on net run rate");
+
+    // Standings table component
+    const standingsComp = res.structured!.components[1]!;
+    expect(standingsComp.type).toBe("standings_table");
+    const data = standingsComp.data as StandingsTableComponentData;
+    expect(data.competition).toBe("IPL 2025 Points Table");
+    expect(data.season).toBe("2025");
+    expect(data.rows.length).toBe(10);
+    expect(data.rows[0]!.teamName).toBe("Punjab Kings");
+    expect(data.rows[0]!.points).toBe(19);
+    expect(data.rows[0]!.qualificationZone).toBe("champions_league");
+    // Royal Challengers Bengaluru long name preserved
+    expect(data.rows[1]!.teamName).toBe("Royal Challengers Bengaluru");
+    expect(data.rows[1]!.rank).toBe(2);
+    expect(data.rows[1]!.points).toBe(19);
+    expect(data.rows[1]!.qualificationZone).toBe("champions_league");
+    expect(data.sourceUrl).toBe("https://www.iplt20.com/points-table/men/2025");
+  });
+
+  it("Scenario 17: Table with only Pos and Team in standings context synthesizes to standings_table", () => {
+    const raw = `Here are the top teams in the tournament standings:
+
+| Pos | Team |
+| 1 | Mumbai Indians |
+| 2 | Chennai Super Kings |
+| 3 | Kolkata Knight Riders |
+| 4 | Royal Challengers Bengaluru |
+`;
+
+    const res = extractStructuredContent(raw);
+    expect(res.structured).toBeDefined();
+    const tableComp = res.structured!.components.find((c) => c.type === "standings_table");
+    expect(tableComp).toBeDefined();
+    const data = tableComp!.data as StandingsTableComponentData;
+    expect(data.rows.length).toBe(4);
+    expect(data.rows[3]!.teamName).toBe("Royal Challengers Bengaluru");
+    expect(data.rows[3]!.rank).toBe(4);
+  });
+
+  it("Scenario 18: Flat structured component (without 'data' wrapper) normalizes and validates cleanly", () => {
+    const raw = `Assuming “last year” means **IPL 2025**, here is the final league-stage table.
+
+\`\`\`structured
+{
+ "version": 1,
+ "components": [
+ {
+ "type": "standings_table",
+ "competition": "Indian Premier League",
+ "season": "2025",
+ "columns": ["Rank", "Team", "Played", "Won", "Lost", "Points"],
+ "rows": [
+ {"rank": 1, "teamName": "Punjab Kings", "played": 14, "won": 9, "lost": 4, "points": 19},
+ {"rank": 2, "teamName": "Royal Challengers Bengaluru", "played": 14, "won": 9, "lost": 4, "points": 19}
+ ],
+ "sourceName": "IPL Official",
+ "sourceUrl": "https://www.iplt20.com"
+ }
+ ]
+}
+\`\`\`
+`;
+
+    const res = extractStructuredContent(raw);
+    expect(res.structured).toBeDefined();
+    expect(res.structured!.components.length).toBe(2); // text + standings_table
+    const tableComp = res.structured!.components.find((c) => c.type === "standings_table");
+    expect(tableComp).toBeDefined();
+    const data = tableComp!.data as StandingsTableComponentData;
+    expect(data.competition).toBe("Indian Premier League");
+    expect(data.season).toBe("2025");
+    expect(data.rows.length).toBe(2);
+    expect(data.rows[1]!.teamName).toBe("Royal Challengers Bengaluru");
+  });
+
+  it("Scenario 19: Unfenced raw structured JSON emitted directly by model extracts cleanly", () => {
+    const raw = `{
+  "version": 1,
+  "components": [
+    {
+      "type": "standings_table",
+      "data": {
+        "competition": "Premier League 2024/25",
+        "season": "2024/25",
+        "rows": [
+          { "rank": 1, "teamName": "Arsenal", "points": 89 },
+          { "rank": 2, "teamName": "Manchester City", "points": 88 }
+        ]
+      }
+    }
+  ]
+}`;
+
+    const res = extractStructuredContent(raw);
+    expect(res.structured).toBeDefined();
+    const tableComp = res.structured!.components.find((c) => c.type === "standings_table");
+    expect(tableComp).toBeDefined();
+    const data = tableComp!.data as StandingsTableComponentData;
+    expect(data.competition).toBe("Premier League 2024/25");
+    expect(data.rows.length).toBe(2);
+  });
+
+  it("Scenario 20: ```json fenced structured response extracts into structured data", () => {
+    const raw = `Here is the medal tally:
+
+\`\`\`json
+{
+  "version": 1,
+  "components": [
+    {
+      "type": "medal_tally",
+      "data": {
+        "competition": "Paris 2024 Olympic Games",
+        "rankingMethod": "gold_first",
+        "rows": [
+          { "rank": 1, "nation": "United States", "gold": 40, "silver": 44, "bronze": 42, "total": 126 },
+          { "rank": 2, "nation": "China", "gold": 40, "silver": 27, "bronze": 24, "total": 91 }
+        ]
+      }
+    }
+  ]
+}
+\`\`\`
+`;
+
+    const res = extractStructuredContent(raw);
+    expect(res.structured).toBeDefined();
+    const medalComp = res.structured!.components.find((c) => c.type === "medal_tally");
+    expect(medalComp).toBeDefined();
+  });
 });

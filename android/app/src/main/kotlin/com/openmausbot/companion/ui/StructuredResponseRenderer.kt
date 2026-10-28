@@ -7,6 +7,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -3898,7 +3899,7 @@ private fun StandingsTableRenderer(
                 )
                 if (!table.season.isNullOrBlank() || !table.group.isNullOrBlank()) {
                     Text(
-                        text = listOfNotNull(table.season, table.group).joinToString(" - "),
+                        text = listOfNotNull(table.season, table.group).joinToString(" • "),
                         fontSize = 11.sp,
                         color = AppTheme.colors.textSecondary,
                     )
@@ -3914,9 +3915,15 @@ private fun StandingsTableRenderer(
             }
         }
 
-        // 2. Horizontally scrollable table container
+        // 2. Responsive Table Container (uses available width before horizontal scroll)
         val scrollState = rememberScrollState()
+        val hasPlayed = remember(table.rows) { table.rows.any { it.played > 0 } }
+        val hasWon = remember(table.rows) { table.rows.any { it.won > 0 } }
         val hasDraws = remember(table.rows) { table.rows.any { it.drawn != null } }
+        val hasLost = remember(table.rows) { table.rows.any { it.lost > 0 } }
+        val hasDiff = remember(table.rows) { table.rows.any { !it.diff.isNullOrBlank() && it.diff != "-" } }
+        val hasPoints = remember(table.rows) { table.rows.any { it.points > 0 } || !hasPlayed }
+
         val isNrr = remember(table.rows, table.competition) {
             table.rows.any { it.diff?.contains(".") == true } ||
                 table.competition.contains("IPL", ignoreCase = true) ||
@@ -3924,87 +3931,124 @@ private fun StandingsTableRenderer(
         }
         val diffHeader = if (isNrr) "NRR" else "DIFF"
         val maxTeamNameLength = remember(table.rows) { table.rows.maxOfOrNull { it.teamName.length } ?: 12 }
-        val teamColWidth = maxOf(210.dp, (maxTeamNameLength * 8.5).dp)
-        val totalTableWidth = 36.dp + teamColWidth + 26.dp + 26.dp + (if (hasDraws) 26.dp else 0.dp) + 26.dp + 48.dp + 34.dp + 16.dp
 
-        Box(
+        val rankColWidth = 28.dp
+        val pColWidth = if (hasPlayed) 22.dp else 0.dp
+        val wColWidth = if (hasWon) 22.dp else 0.dp
+        val dColWidth = if (hasDraws) 22.dp else 0.dp
+        val lColWidth = if (hasLost) 22.dp else 0.dp
+        val diffColWidth = if (hasDiff) 46.dp else 0.dp
+        val ptsColWidth = if (hasPoints) 36.dp else 0.dp
+        val nonTeamWidth = rankColWidth + pColWidth + wColWidth + dColWidth + lColWidth + diffColWidth + ptsColWidth
+
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.4f))
-                .horizontalScroll(scrollState),
+                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.4f)),
         ) {
-            Column(modifier = Modifier.padding(8.dp)) {
-                // Table Header Row
-                Row(
-                    modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("POS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(36.dp))
-                    Text("TEAM", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(teamColWidth))
-                    Text("P", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                    Text("W", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                    if (hasDraws) {
-                        Text("D", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                    }
-                    Text("L", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                    Text(diffHeader, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(48.dp), textAlign = TextAlign.End)
-                    Text("PTS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
-                }
+            val contentMaxWidth = maxWidth - 16.dp // inner padding (8.dp on each side)
+            val naturalTeamWidth = contentMaxWidth - nonTeamWidth
+            val needsHorizontalScroll = naturalTeamWidth < 120.dp
+            val teamColWidth = if (needsHorizontalScroll) maxOf(140.dp, (maxTeamNameLength * 8).dp) else naturalTeamWidth
+            val totalTableWidth = if (needsHorizontalScroll) (nonTeamWidth + teamColWidth) else contentMaxWidth
 
-                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
+            val scrollModifier = if (needsHorizontalScroll) Modifier.horizontalScroll(scrollState) else Modifier
 
-                // Table Rows
-                table.rows.forEach { r ->
-                    val zoneColor = when (r.qualificationZone) {
-                        "champions_league" -> Color(0xFF58A6FF)
-                        "europa_league" -> Color(0xFFF0883E)
-                        "relegation" -> Color(0xFFF85149)
-                        else -> null
-                    }
-
+            Box(modifier = Modifier.fillMaxWidth().then(scrollModifier)) {
+                Column(modifier = Modifier.width(totalTableWidth).padding(8.dp)) {
+                    // Table Header Row
                     Row(
-                        modifier = Modifier
-                            .width(totalTableWidth)
-                            .padding(vertical = 4.dp),
+                        modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Row(modifier = Modifier.width(36.dp), verticalAlignment = Alignment.CenterVertically) {
-                            if (zoneColor != null) {
-                                Box(
-                                    modifier = Modifier
-                                        .size(width = 3.dp, height = 14.dp)
-                                        .clip(RoundedCornerShape(1.dp))
-                                        .background(zoneColor),
+                        Text("POS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(rankColWidth), maxLines = 1, softWrap = false)
+                        Text("TEAM", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(teamColWidth), maxLines = 1, softWrap = false)
+                        if (hasPlayed) {
+                            Text("P", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(pColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                        }
+                        if (hasWon) {
+                            Text("W", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(wColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                        }
+                        if (hasDraws) {
+                            Text("D", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(dColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                        }
+                        if (hasLost) {
+                            Text("L", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(lColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                        }
+                        if (hasDiff) {
+                            Text(diffHeader, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(diffColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                        }
+                        if (hasPoints) {
+                            Text("PTS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(ptsColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                        }
+                    }
+
+                    HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
+
+                    // Table Rows
+                    table.rows.forEach { r ->
+                        val zoneColor = when (r.qualificationZone) {
+                            "champions_league" -> Color(0xFF58A6FF)
+                            "europa_league" -> Color(0xFFF0883E)
+                            "relegation" -> Color(0xFFF85149)
+                            else -> null
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .width(totalTableWidth)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Row(modifier = Modifier.width(rankColWidth), verticalAlignment = Alignment.CenterVertically) {
+                                if (zoneColor != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(width = 3.dp, height = 14.dp)
+                                            .clip(RoundedCornerShape(1.dp))
+                                            .background(zoneColor),
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                }
+                                Text(
+                                    text = "${r.rank}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = AppTheme.colors.textSecondary,
                                 )
-                                Spacer(Modifier.width(4.dp))
                             }
+
                             Text(
-                                text = "${r.rank}",
+                                text = r.teamName,
                                 fontSize = 12.sp,
                                 fontWeight = FontWeight.SemiBold,
-                                color = AppTheme.colors.textSecondary,
+                                color = AppTheme.colors.textPrimary,
+                                modifier = Modifier.width(teamColWidth),
+                                maxLines = 2,
+                                softWrap = true,
+                                lineHeight = 16.sp,
                             )
-                        }
 
-                        Text(
-                            text = r.teamName,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = AppTheme.colors.textPrimary,
-                            modifier = Modifier.width(teamColWidth),
-                            maxLines = 1,
-                            softWrap = false,
-                        )
-
-                        Text("${r.played}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                        Text("${r.won}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                        if (hasDraws) {
-                            Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                            if (hasPlayed) {
+                                Text("${r.played}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(pColWidth), textAlign = TextAlign.End)
+                            }
+                            if (hasWon) {
+                                Text("${r.won}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(wColWidth), textAlign = TextAlign.End)
+                            }
+                            if (hasDraws) {
+                                Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(dColWidth), textAlign = TextAlign.End)
+                            }
+                            if (hasLost) {
+                                Text("${r.lost}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(lColWidth), textAlign = TextAlign.End)
+                            }
+                            if (hasDiff) {
+                                Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(diffColWidth), textAlign = TextAlign.End)
+                            }
+                            if (hasPoints) {
+                                Text("${r.points}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(ptsColWidth), textAlign = TextAlign.End)
+                            }
                         }
-                        Text("${r.lost}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                        Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(48.dp), textAlign = TextAlign.End)
-                        Text("${r.points}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
                     }
                 }
             }
@@ -4113,72 +4157,86 @@ private fun MedalTallyRenderer(
             }
         }
 
-        // 2. Horizontally scrollable table
+        // 2. Responsive Table Container (uses available width before horizontal scroll)
         val scrollState = rememberScrollState()
         val maxNationLength = remember(tally.rows) { tally.rows.maxOfOrNull { it.nation.length } ?: 10 }
-        val nationColWidth = maxOf(190.dp, (maxNationLength * 8.5).dp)
-        val totalTableWidth = 42.dp + nationColWidth + 36.dp + 36.dp + 38.dp + 38.dp + 16.dp
+        val rankColWidth = 36.dp
+        val gColWidth = 32.dp
+        val sColWidth = 32.dp
+        val bColWidth = 32.dp
+        val tColWidth = 36.dp
+        val nonNationWidth = rankColWidth + gColWidth + sColWidth + bColWidth + tColWidth
 
-        Box(
+        BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp))
-                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.4f))
-                .horizontalScroll(scrollState),
+                .background(AppTheme.colors.surfaceRaised.copy(alpha = 0.4f)),
         ) {
-            Column(modifier = Modifier.padding(8.dp)) {
-                // Header
-                Row(
-                    modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("RANK", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp))
-                    Text("NATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(nationColWidth))
-                    Text("GOLD", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD700), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
-                    Text("SILVER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC0C0C0), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
-                    Text("BRONZE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFCD7F32), modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
-                    Text("TOTAL", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
-                }
+            val contentMaxWidth = maxWidth - 16.dp // inner padding (8.dp each side)
+            val naturalNationWidth = contentMaxWidth - nonNationWidth
+            val needsHorizontalScroll = naturalNationWidth < 100.dp
+            val nationColWidth = if (needsHorizontalScroll) maxOf(120.dp, (maxNationLength * 8).dp) else naturalNationWidth
+            val totalTableWidth = if (needsHorizontalScroll) (nonNationWidth + nationColWidth) else contentMaxWidth
 
-                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
+            val scrollModifier = if (needsHorizontalScroll) Modifier.horizontalScroll(scrollState) else Modifier
 
-                // Rows
-                tally.rows.forEach { r ->
-                    val rankColor = when (r.rank) {
-                        1 -> Color(0xFFFFD700)
-                        2 -> Color(0xFFC0C0C0)
-                        3 -> Color(0xFFCD7F32)
-                        else -> AppTheme.colors.textSecondary
-                    }
-
+            Box(modifier = Modifier.fillMaxWidth().then(scrollModifier)) {
+                Column(modifier = Modifier.width(totalTableWidth).padding(8.dp)) {
+                    // Header
                     Row(
-                        modifier = Modifier
-                            .width(totalTableWidth)
-                            .padding(vertical = 4.dp),
+                        modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text(
-                            text = "${r.rank}",
-                            fontSize = 12.sp,
-                            fontWeight = if (r.rank <= 3) FontWeight.Bold else FontWeight.SemiBold,
-                            color = rankColor,
-                            modifier = Modifier.width(42.dp),
-                        )
+                        Text("RANK", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(rankColWidth))
+                        Text("NATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(nationColWidth))
+                        Text("GOLD", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD700), modifier = Modifier.width(gColWidth), textAlign = TextAlign.End)
+                        Text("SILVER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC0C0C0), modifier = Modifier.width(sColWidth), textAlign = TextAlign.End)
+                        Text("BRONZE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFCD7F32), modifier = Modifier.width(bColWidth), textAlign = TextAlign.End)
+                        Text("TOTAL", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(tColWidth), textAlign = TextAlign.End)
+                    }
 
-                        Text(
-                            text = if (!r.nocCode.isNullOrBlank()) "${r.nation} (${r.nocCode})" else r.nation,
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = AppTheme.colors.textPrimary,
-                            modifier = Modifier.width(nationColWidth),
-                            maxLines = 1,
-                            softWrap = false,
-                        )
+                    HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
 
-                        Text("${r.gold}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFD700), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
-                        Text("${r.silver}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFC0C0C0), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
-                        Text("${r.bronze}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFCD7F32), modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
-                        Text("${r.total}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
+                    // Rows
+                    tally.rows.forEach { r ->
+                        val rankColor = when (r.rank) {
+                            1 -> Color(0xFFFFD700)
+                            2 -> Color(0xFFC0C0C0)
+                            3 -> Color(0xFFCD7F32)
+                            else -> AppTheme.colors.textSecondary
+                        }
+
+                        Row(
+                            modifier = Modifier
+                                .width(totalTableWidth)
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "${r.rank}",
+                                fontSize = 12.sp,
+                                fontWeight = if (r.rank <= 3) FontWeight.Bold else FontWeight.SemiBold,
+                                color = rankColor,
+                                modifier = Modifier.width(rankColWidth),
+                            )
+
+                            Text(
+                                text = if (!r.nocCode.isNullOrBlank()) "${r.nation} (${r.nocCode})" else r.nation,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = AppTheme.colors.textPrimary,
+                                modifier = Modifier.width(nationColWidth),
+                                maxLines = 2,
+                                softWrap = true,
+                                lineHeight = 16.sp,
+                            )
+
+                            Text("${r.gold}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFD700), modifier = Modifier.width(gColWidth), textAlign = TextAlign.End)
+                            Text("${r.silver}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFC0C0C0), modifier = Modifier.width(sColWidth), textAlign = TextAlign.End)
+                            Text("${r.bronze}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFCD7F32), modifier = Modifier.width(bColWidth), textAlign = TextAlign.End)
+                            Text("${r.total}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(tColWidth), textAlign = TextAlign.End)
+                        }
                     }
                 }
             }

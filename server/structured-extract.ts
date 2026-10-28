@@ -23,7 +23,25 @@ export interface ExtractOptions {
   threadId?: string;
 }
 
-const STRUCTURED_BLOCK_REGEX = /```(?:structured|json:structured)\s*[\r\n]+([\s\S]*?)[\r\n]+```/g;
+const STRUCTURED_BLOCK_REGEX = /```(?:structured|json:structured|json)\s*[\r\n]+([\s\S]*?)[\r\n]+```/g;
+
+function findRawStructuredJson(text: string): { jsonStr: string; start: number; end: number } | null {
+  const marker = /\{\s*"version"\s*:\s*1\s*,/;
+  const match = text.match(marker);
+  if (!match || match.index === undefined) return null;
+  const start = match.index;
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === "{") depth++;
+    else if (text[i] === "}") {
+      depth--;
+      if (depth === 0) {
+        return { jsonStr: text.slice(start, i + 1), start, end: i + 1 };
+      }
+    }
+  }
+  return null;
+}
 
 /**
  * Extracts structured response data blocks (fenced as ```structured or ```json:structured)
@@ -116,6 +134,53 @@ export function extractStructuredContent(rawText: string, options?: ExtractOptio
           components: orderedComponents,
         },
       };
+    }
+  }
+
+  // 1b. Check for raw (unfenced) structured JSON blocks emitted directly by models
+  const rawJsonMatch = findRawStructuredJson(rawText);
+  if (rawJsonMatch) {
+    try {
+      const parsed = JSON.parse(rawJsonMatch.jsonStr);
+      const validation = validateStructuredResponse(parsed);
+      if (validation.valid && validation.sanitized && validation.sanitized.components.length > 0) {
+        const textBefore = rawText.slice(0, rawJsonMatch.start).trim();
+        const textAfter = rawText.slice(rawJsonMatch.end).trim();
+        const orderedComponents: StructuredComponent[] = [];
+        if (textBefore) {
+          orderedComponents.push({
+            id: `text-1`,
+            type: "text",
+            data: { text: textBefore, format: "markdown" },
+          });
+        }
+        orderedComponents.push(...validation.sanitized.components);
+        if (textAfter) {
+          orderedComponents.push({
+            id: `text-${orderedComponents.length + 1}`,
+            type: "text",
+            data: { text: textAfter, format: "markdown" },
+          });
+        }
+        if (options?.threadId) {
+          for (const comp of orderedComponents) {
+            if (comp.type === "match_scorecard") {
+              recordScorecardContext(options.threadId, comp.data);
+            } else if (comp.type === "player_stats") {
+              recordPlayerStatsContext(options.threadId, comp.data);
+            }
+          }
+        }
+        return {
+          cleanText: "",
+          structured: {
+            version: 1,
+            components: orderedComponents,
+          },
+        };
+      }
+    } catch {
+      // Ignore if JSON.parse fails and fall through
     }
   }
 
@@ -444,7 +509,16 @@ function synthesizeMarkdownSportsAndTables(
       h === "w" || h === "won" || h === "l" || h === "lost" || h.includes("nrr") || h.includes("diff") || h === "gd"
     );
 
-    const isStandings = (hasTeam && hasPts) || (hasTeam && hasRecord && (hasRankOrPos || table.rows.length >= 3));
+    const hasGold = lowerHeaders.some((h) => h === "gold" || h === "g" || h.includes("gold"));
+    const hasSilver = lowerHeaders.some((h) => h === "silver" || h === "s" || h.includes("silver"));
+    const hasBronze = lowerHeaders.some((h) => h === "bronze" || h === "b" || h.includes("bronze"));
+    const isMedalTally = hasGold && hasSilver && hasBronze;
+
+    const isStandings =
+      !isMedalTally &&
+      ((hasTeam && hasPts) ||
+        (hasTeam && hasRecord && (hasRankOrPos || table.rows.length >= 3)) ||
+        (hasTeam && hasRankOrPos && (/table|standings|points|league|ipl|championship|tournament/i.test(text) || Boolean(precedingHeading && /table|standings|points|league|ipl/i.test(precedingHeading)))));
 
     if (isStandings) {
       const posIdx = lowerHeaders.findIndex((h) =>
@@ -528,8 +602,11 @@ function synthesizeMarkdownSportsAndTables(
         else compTitle = "League Standings";
       }
 
-      const seasonMatch = text.match(/\b(202\d(?:\/\d{2,4})?)\b/);
-      const season = seasonMatch ? seasonMatch[1] : undefined;
+      let seasonMatch = text.match(/\b(202\d(?:\/\d{2,4})?)\b/);
+      let season = seasonMatch ? seasonMatch[1] : undefined;
+      if (!season && /last\s+year/i.test(text)) {
+        season = (new Date().getFullYear() - 1).toString();
+      }
 
       const qualificationLegend = isCricketOrIPL
         ? [{ zone: "champions_league", label: "Playoffs (Top 4)", color: "#58A6FF" }]
@@ -555,7 +632,8 @@ function synthesizeMarkdownSportsAndTables(
           }
         }
       } else if (isCricketOrIPL) {
-        sourceUrl = "https://www.iplt20.com/points-table/men/2024";
+        const iplSeason = season || "2024";
+        sourceUrl = `https://www.iplt20.com/points-table/men/${iplSeason}`;
         sourceName = "IPL Official (iplt20.com)";
       }
 
@@ -579,11 +657,7 @@ function synthesizeMarkdownSportsAndTables(
     }
 
     // Check 2: Medal Tally
-    const hasGold = lowerHeaders.some((h) => h === "gold" || h === "g" || h.includes("gold"));
-    const hasSilver = lowerHeaders.some((h) => h === "silver" || h === "s" || h.includes("silver"));
-    const hasBronze = lowerHeaders.some((h) => h === "bronze" || h === "b" || h.includes("bronze"));
-
-    if (hasGold && hasSilver && hasBronze) {
+    if (isMedalTally) {
       const posIdx = lowerHeaders.findIndex((h) =>
         h === "pos" || h === "position" || h === "rank" || h === "#" || h === "no" || h === "no." ||
         h.includes("pos") || h.includes("rank")

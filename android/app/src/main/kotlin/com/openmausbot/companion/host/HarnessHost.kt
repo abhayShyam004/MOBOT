@@ -971,6 +971,7 @@ class HarnessHost(
                         logI("runtime produced first output — the server bundle is executing")
                     }
                     appendOutput(line.take(MAX_LINE_CHARS))
+                    Log.i("HarnessHostOutput", line.take(2000))
                 }
             }
             logI("runtime output stream closed")

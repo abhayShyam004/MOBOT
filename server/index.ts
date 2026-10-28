@@ -4841,7 +4841,11 @@ bus.subscribe((event: RuntimeEvent) => {
       turnId: event.turnId,
       taskTitle: task?.title,
     });
-    event = { ...event, text: canonical.text };
+    event = {
+      ...event,
+      text: canonical.text,
+      ...(canonical.structured ? { structured: canonical.structured } : {}),
+    };
   }
   // The durable message patch below is the public frame. Sending raw base64
   // through runtime SSE would multiply large bytes across every app window.
@@ -4866,7 +4870,7 @@ bus.subscribe((event: RuntimeEvent) => {
         text: canonical.text,
         ...(canonical.structured ? { structured: canonical.structured } : {}),
       };
-      if (canonical.structured && !canonical.text && sanitized.kind === "text") {
+      if (canonical.structured && sanitized.kind === "text") {
         sanitized.kind = "structured";
       }
     }
@@ -4917,6 +4921,7 @@ bus.subscribe((event: RuntimeEvent) => {
       break;
     case "item.completed":
       if (event.itemType === "assistant_text") {
+        console.log("DEBUG_ASSISTANT_TEXT_RAW:", JSON.stringify(event.text));
         const text = cleanUserFacingText(event.text);
         // A provider's own client reporting an API error as a reply is a
         // failure notice, not the model's words: it becomes the same card a
@@ -4937,26 +4942,31 @@ bus.subscribe((event: RuntimeEvent) => {
           failureReportedTurns.set(event.threadId, event.turnId ?? null);
           break;
         }
+        const existingStructured = event.structured;
         const lastUserPrompt = [...store.messagesFor(event.threadId)].reverse().find((msg) => msg.role === "user" && msg.kind === "text")?.text;
         const task = store.taskByThread(ownerBot?.id ?? "", event.threadId);
-        const canonical = canonicalizeAssistantResponse(text, {
-          userPrompt: lastUserPrompt,
-          threadId: event.threadId,
-          turnId: event.turnId,
-          taskTitle: task?.title,
-        });
+        const canonical = existingStructured
+          ? { text, structured: existingStructured }
+          : canonicalizeAssistantResponse(text, {
+              userPrompt: lastUserPrompt,
+              threadId: event.threadId,
+              turnId: event.turnId,
+              taskTitle: task?.title,
+            });
         const boundedText = canonical.text;
+        const structured = canonical.structured || existingStructured;
+        console.log("DEBUG_CANONICAL:", JSON.stringify({ boundedText, hasStructured: Boolean(structured), structuredCompCount: structured?.components?.length }));
         pushMessage({
           role: "bot",
-          kind: canonical.structured && !boundedText ? "structured" : "text",
+          kind: structured && !boundedText ? "structured" : "text",
           text: boundedText,
-          ...(canonical.structured ? { structured: canonical.structured } : {}),
+          ...(structured ? { structured } : {}),
           turnId: event.turnId,
         });
 
         // kept so "finished" can say what it finished with, rather than
         // just that something ended
-        lastReply.set(event.threadId, boundedText);
+        lastReply.set(event.threadId, boundedText || (structured ? "Structured card" : ""));
       } else if (event.itemType === "assistant_image") {
         try {
           const decoded = decodeGeneratedImage(event.data);
@@ -5497,14 +5507,14 @@ bus.subscribe((event: RuntimeEvent) => {
         }
       }
       if (completedTurnId) {
-        const existingText = [...store.messagesFor(event.threadId)].reverse().find(
+        const existingAssistantMessage = [...store.messagesFor(event.threadId)].reverse().find(
           (message) =>
             message.role === "bot" &&
-            message.kind === "text" &&
+            (message.kind === "text" || message.kind === "structured") &&
             message.turnId === completedTurnId,
         );
-        if (!existingText) {
-          // A turn that finished without emitting an assistant text message (e.g. after tool execution
+        if (!existingAssistantMessage) {
+          // A turn that finished without emitting an assistant message (e.g. after tool execution
           // or upon interruption/timeout) must emit a terminal assistant response so the turn never
           // remains indefinitely stuck in a "Thinking…" state.
           const fallbackText = event.stopReason === "interrupted"
@@ -7189,7 +7199,9 @@ async function startTurn(
       .replace(/^(?:what|tell me|who|find|lookup|show|search)\s+(?:were|was|is|are|for)?\s*/i, "")
       .replace(/[?!.]+$/, "")
       .trim() || userTurnText;
-    const searchToolId = capabilityResolution.primaryCapabilityId || "web.scraper";
+    const searchToolId = defaultCapabilityRegistry.has("web.scraper")
+      ? "web.scraper"
+      : (capabilityResolution.primaryCapabilityId || "web.scraper");
     try {
       const searchRes = await defaultCapabilityRegistry.invoke(
         defaultCapabilityRegistry.has(searchToolId) ? searchToolId : "web.scraper",

@@ -280,9 +280,9 @@ private fun MarkdownTableView(table: MarkdownBlock.Table) {
             },
             measurePolicy = tableGridMeasurePolicy(
                 columnCount = table.headers.size,
-                minColumnWidth = 64.dp,
+                minColumnWidth = 28.dp,
                 maxColumnWidth = 260.dp,
-                columnGap = 16.dp,
+                columnGap = 12.dp,
                 rowGap = 6.dp,
                 alignments = table.alignments,
             ),

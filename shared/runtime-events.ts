@@ -3,6 +3,7 @@
  * store, and the inspector panel cannot drift; server/contracts.ts and
  * server/thread-events.ts re-export these under their historical names. */
 import type { AskQuestion } from "./ask-question.ts";
+import type { StructuredResponseData } from "./structured-response.ts";
 
 export type DriverKind = string;
 export type InstanceId = string;
@@ -83,7 +84,7 @@ export type RuntimeEvent = RuntimeEventBase &
       }
     | { type: "item.updated"; itemType: "tool" | "reasoning"; tokens?: number | null }
     | { type: "item.completed"; itemType: "tool"; ok: boolean; output?: string }
-    | { type: "item.completed"; itemType: "assistant_text"; text: string }
+    | { type: "item.completed"; itemType: "assistant_text"; text: string; structured?: StructuredResponseData }
     /** Provider-generated raster bytes. This event is folded into the
      * private attachment store and is never forwarded to renderer SSE: a
      * multi-megabyte base64 result belongs in one durable message URL, not

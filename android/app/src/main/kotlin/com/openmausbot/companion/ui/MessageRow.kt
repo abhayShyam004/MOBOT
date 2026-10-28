@@ -455,7 +455,6 @@ private fun MessageContent(
     val session = LocalCompanion.current.session
     when (message.kind) {
         Message.Kind.TEXT -> {
-            TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
             message.structured?.let { structured ->
                 Box(
                     modifier = Modifier
@@ -476,7 +475,7 @@ private fun MessageContent(
                         },
                     )
                 }
-            }
+            } ?: TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
         }
         // Native structured response system (Phase J)
         Message.Kind.STRUCTURED -> message.structured?.let { structured ->
@@ -875,9 +874,12 @@ private fun TextBubble(
             val standaloneFiles = remember(userAttachments) {
                 userAttachments.filter { !it.isImage }
             }
+            val hasTableOrDiff = remember(assistantCleanText, card) {
+                card != null || (assistantCleanText.isNotEmpty() && Markdown.blocks(assistantCleanText).any { it is MarkdownBlock.Table })
+            }
 
             Column(
-                modifier = Modifier.weight(if (card != null) 1f else 0.80f, fill = false),
+                modifier = Modifier.weight(if (hasTableOrDiff) 1f else 0.80f, fill = false),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // Rooms attribute each line to the member who said it
@@ -947,8 +949,10 @@ private fun TextBubble(
                 }
             }
 
-            // Assistant message: leave minimum 20% gutter on the right
-            Spacer(modifier = Modifier.weight(0.20f))
+            if (!hasTableOrDiff) {
+                // Assistant message: leave minimum 20% gutter on the right
+                Spacer(modifier = Modifier.weight(0.20f))
+            }
         }
     }
 }
