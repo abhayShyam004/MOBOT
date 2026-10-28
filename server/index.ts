@@ -4864,7 +4864,11 @@ bus.subscribe((event: RuntimeEvent) => {
       sanitized = {
         ...sanitized,
         text: canonical.text,
+        ...(canonical.structured ? { structured: canonical.structured } : {}),
       };
+      if (canonical.structured && !canonical.text && sanitized.kind === "text") {
+        sanitized.kind = "structured";
+      }
     }
     const message = store.appendMessage(event.threadId, group && m.role === "bot" ? { ...sanitized, from: speaker } : sanitized);
     return message;

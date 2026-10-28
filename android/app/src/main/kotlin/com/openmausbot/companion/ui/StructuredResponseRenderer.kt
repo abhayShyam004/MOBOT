@@ -3916,6 +3916,17 @@ private fun StandingsTableRenderer(
 
         // 2. Horizontally scrollable table container
         val scrollState = rememberScrollState()
+        val hasDraws = remember(table.rows) { table.rows.any { it.drawn != null } }
+        val isNrr = remember(table.rows, table.competition) {
+            table.rows.any { it.diff?.contains(".") == true } ||
+                table.competition.contains("IPL", ignoreCase = true) ||
+                table.competition.contains("Cricket", ignoreCase = true)
+        }
+        val diffHeader = if (isNrr) "NRR" else "DIFF"
+        val maxTeamNameLength = remember(table.rows) { table.rows.maxOfOrNull { it.teamName.length } ?: 12 }
+        val teamColWidth = maxOf(210.dp, (maxTeamNameLength * 8.5).dp)
+        val totalTableWidth = 36.dp + teamColWidth + 26.dp + 26.dp + (if (hasDraws) 26.dp else 0.dp) + 26.dp + 48.dp + 34.dp + 16.dp
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -3926,20 +3937,22 @@ private fun StandingsTableRenderer(
             Column(modifier = Modifier.padding(8.dp)) {
                 // Table Header Row
                 Row(
-                    modifier = Modifier.padding(bottom = 6.dp),
+                    modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("POS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(36.dp))
-                    Text("TEAM", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(130.dp))
+                    Text("TEAM", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(teamColWidth))
                     Text("P", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
                     Text("W", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                    Text("D", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                    if (hasDraws) {
+                        Text("D", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                    }
                     Text("L", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                    Text("DIFF", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+                    Text(diffHeader, fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(48.dp), textAlign = TextAlign.End)
                     Text("PTS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
                 }
 
-                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(340.dp))
+                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
 
                 // Table Rows
                 table.rows.forEach { r ->
@@ -3952,6 +3965,7 @@ private fun StandingsTableRenderer(
 
                     Row(
                         modifier = Modifier
+                            .width(totalTableWidth)
                             .padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -3978,16 +3992,18 @@ private fun StandingsTableRenderer(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = AppTheme.colors.textPrimary,
-                            modifier = Modifier.width(130.dp),
+                            modifier = Modifier.width(teamColWidth),
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            softWrap = false,
                         )
 
                         Text("${r.played}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
                         Text("${r.won}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                        Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                        if (hasDraws) {
+                            Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
+                        }
                         Text("${r.lost}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(26.dp), textAlign = TextAlign.End)
-                        Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
+                        Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(48.dp), textAlign = TextAlign.End)
                         Text("${r.points}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(34.dp), textAlign = TextAlign.End)
                     }
                 }
@@ -4099,6 +4115,10 @@ private fun MedalTallyRenderer(
 
         // 2. Horizontally scrollable table
         val scrollState = rememberScrollState()
+        val maxNationLength = remember(tally.rows) { tally.rows.maxOfOrNull { it.nation.length } ?: 10 }
+        val nationColWidth = maxOf(190.dp, (maxNationLength * 8.5).dp)
+        val totalTableWidth = 42.dp + nationColWidth + 36.dp + 36.dp + 38.dp + 38.dp + 16.dp
+
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -4109,18 +4129,18 @@ private fun MedalTallyRenderer(
             Column(modifier = Modifier.padding(8.dp)) {
                 // Header
                 Row(
-                    modifier = Modifier.padding(bottom = 6.dp),
+                    modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text("RANK", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(42.dp))
-                    Text("NATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(140.dp))
+                    Text("NATION", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(nationColWidth))
                     Text("GOLD", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFFFD700), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
                     Text("SILVER", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC0C0C0), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)
                     Text("BRONZE", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color(0xFFCD7F32), modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
                     Text("TOTAL", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(38.dp), textAlign = TextAlign.End)
                 }
 
-                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(330.dp))
+                HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
 
                 // Rows
                 tally.rows.forEach { r ->
@@ -4132,7 +4152,9 @@ private fun MedalTallyRenderer(
                     }
 
                     Row(
-                        modifier = Modifier.padding(vertical = 4.dp),
+                        modifier = Modifier
+                            .width(totalTableWidth)
+                            .padding(vertical = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text(
@@ -4148,9 +4170,9 @@ private fun MedalTallyRenderer(
                             fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = AppTheme.colors.textPrimary,
-                            modifier = Modifier.width(140.dp),
+                            modifier = Modifier.width(nationColWidth),
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
+                            softWrap = false,
                         )
 
                         Text("${r.gold}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFFFD700), modifier = Modifier.width(36.dp), textAlign = TextAlign.End)

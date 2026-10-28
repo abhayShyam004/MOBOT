@@ -120,9 +120,9 @@ function redactBotAuthored<T extends Omit<Message, "id" | "at"> & { at?: number 
     out.text = canonical.text;
     if (canonical.structured && !(out as any).structured) {
       (out as any).structured = canonical.structured;
-      if (!out.text && (out as any).kind === "text") {
-        (out as any).kind = "structured";
-      }
+    }
+    if ((out as any).structured && !out.text && (out as any).kind === "text") {
+      (out as any).kind = "structured";
     }
   }
   if (out.tool?.name) {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   structuredResponseToFallbackText,
+  type StandingsTableComponentData,
+  type MatchScorecardComponentData,
 } from "../shared/structured-response.ts";
 import { extractStructuredContent } from "./structured-extract.ts";
 import {
@@ -490,5 +492,90 @@ Official medal standings updated daily.
     // Thread A should NOT find Lautaro
     const resACross = resolveFollowUpQuery("thread-a", "How many goals did Lautaro score?");
     expect(resACross.matchedPlayer).toBeUndefined();
+  });
+
+  it("Scenario 13: IPL Standings without explicit Pos column and with long team names", () => {
+    const markdown = `### IPL 2024 Points Table
+
+| Team | Pld | Won | Lost | Tied | N/R | Net RR | Pts |
+|:---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Kolkata Knight Riders | 14 | 9 | 3 | 0 | 2 | +1.428 | 20 |
+| Sunrisers Hyderabad | 14 | 8 | 5 | 0 | 1 | +0.414 | 17 |
+| Rajasthan Royals | 14 | 8 | 5 | 0 | 1 | +0.273 | 17 |
+| Royal Challengers Bengaluru | 14 | 7 | 7 | 0 | 0 | +0.459 | 14 |
+| Chennai Super Kings | 14 | 7 | 7 | 0 | 0 | +0.415 | 14 |
+| Delhi Capitals | 14 | 7 | 7 | 0 | 0 | -0.377 | 14 |
+| Lucknow Super Giants | 14 | 7 | 7 | 0 | 0 | -0.667 | 14 |
+| Gujarat Titans | 14 | 5 | 7 | 0 | 2 | -1.063 | 12 |
+| Punjab Kings | 14 | 5 | 9 | 0 | 0 | -0.356 | 10 |
+| Mumbai Indians | 14 | 4 | 10 | 0 | 0 | -0.271 | 8 |
+
+Source: [IPL Official](https://www.iplt20.com/points-table/men/2024)
+`;
+
+    const res = extractStructuredContent(markdown);
+    expect(res.structured).toBeDefined();
+    const tableComp = res.structured!.components.find((c) => c.type === "standings_table");
+    expect(tableComp).toBeDefined();
+    const data = tableComp!.data as StandingsTableComponentData;
+    expect(data.competition).toBe("IPL 2024 Points Table");
+    expect(data.rows.length).toBe(10);
+    // Rank 1
+    expect(data.rows[0]!.rank).toBe(1);
+    expect(data.rows[0]!.teamName).toBe("Kolkata Knight Riders");
+    expect(data.rows[0]!.points).toBe(20);
+    expect(data.rows[0]!.diff).toBe("+1.428");
+    expect(data.rows[0]!.qualificationZone).toBe("champions_league");
+    // Rank 4 - Royal Challengers Bengaluru preserved without clipping
+    expect(data.rows[3]!.rank).toBe(4);
+    expect(data.rows[3]!.teamName).toBe("Royal Challengers Bengaluru");
+    expect(data.rows[3]!.points).toBe(14);
+    expect(data.rows[3]!.diff).toBe("+0.459");
+    expect(data.rows[3]!.qualificationZone).toBe("champions_league");
+    // Provenance
+    expect(data.sourceUrl).toBe("https://www.iplt20.com/points-table/men/2024");
+    expect(data.sourceName).toBe("IPL Official");
+  });
+
+  it("Scenario 14: Standings table without outer markdown pipes synthesizes cleanly", () => {
+    const markdown = `Premier League Standings
+
+Pos | Team | P | W | D | L | GD | PTS
+---|---|---|---|---|---|---|---
+1 | Arsenal | 28 | 20 | 4 | 4 | +45 | 64
+2 | Liverpool | 28 | 19 | 7 | 2 | +39 | 64
+3 | Manchester City | 28 | 19 | 6 | 3 | +35 | 63
+`;
+
+    const res = extractStructuredContent(markdown);
+    expect(res.structured).toBeDefined();
+    const tableComp = res.structured!.components.find((c) => c.type === "standings_table");
+    expect(tableComp).toBeDefined();
+    const data = tableComp!.data as StandingsTableComponentData;
+    expect(data.rows.length).toBe(3);
+    expect(data.rows[0]!.teamName).toBe("Arsenal");
+    expect(data.rows[0]!.points).toBe(64);
+  });
+
+  it("Scenario 15: Markdown football match scoreline synthesizes to match_scorecard", () => {
+    const markdown = `### Premier League Matchday 30
+**Arsenal 3 - 1 Chelsea**
+Arsenal dominated the London derby at Emirates Stadium.
+Source: https://www.premierleague.com/match/12345
+`;
+
+    const res = extractStructuredContent(markdown);
+    expect(res.structured).toBeDefined();
+    const scorecardComp = res.structured!.components.find((c) => c.type === "match_scorecard");
+    expect(scorecardComp).toBeDefined();
+    const data = scorecardComp!.data as MatchScorecardComponentData;
+    expect(data.sport).toBe("football");
+    expect(data.fixtureTitle).toBe("Arsenal vs Chelsea");
+    expect(data.teams[0]!.name).toBe("Arsenal");
+    expect(data.teams[0]!.score).toBe("3");
+    expect(data.teams[0]!.isWinner).toBe(true);
+    expect(data.teams[1]!.name).toBe("Chelsea");
+    expect(data.teams[1]!.score).toBe("1");
+    expect(data.teams[1]!.isWinner).toBe(false);
   });
 });

@@ -329,82 +329,244 @@ function parseResearchCandidate(
  * Autonomously inspects Markdown text for sports standings tables, medal tallies,
  * match score summaries, and player statistics, transforming them into rich cards.
  */
+interface ParsedTableInfo {
+  raw: string;
+  headers: string[];
+  rows: string[][];
+  precedingHeading?: string;
+}
+
+function findMarkdownTables(text: string): ParsedTableInfo[] {
+  const lines = text.split(/\r?\n/);
+  const tables: ParsedTableInfo[] = [];
+
+  let inTable = false;
+  let tableLines: string[] = [];
+  let startLine = -1;
+
+  const parseCells = (line: string): string[] => {
+    let s = line.trim();
+    if (s.startsWith("|")) s = s.slice(1);
+    if (s.endsWith("|")) s = s.slice(0, -1);
+    return s.split("|").map((c) => c.trim());
+  };
+
+  const isSeparatorLine = (s: string): boolean => {
+    const trimmed = s.trim();
+    return /^\|?[-:\s|]+\|?$/.test(trimmed) && trimmed.includes("-") && trimmed.includes("|");
+  };
+
+  const finishTable = () => {
+    if (tableLines.length >= 2) {
+      const hasSep = isSeparatorLine(tableLines[1] || "");
+      const minLines = hasSep ? 3 : 2;
+      if (tableLines.length >= minLines) {
+        const headers = parseCells(tableLines[0]!);
+        const rawRows = hasSep ? tableLines.slice(2) : tableLines.slice(1);
+        const rows = rawRows
+          .filter((l) => !isSeparatorLine(l))
+          .map(parseCells)
+          .filter((r) => r.some((c) => c.length > 0));
+
+        if (headers.length >= 2 && rows.length >= 1) {
+          const raw = tableLines.join("\n");
+          let precedingHeading: string | undefined;
+          for (let p = Math.max(0, startLine - 3); p < startLine; p++) {
+            const pl = lines[p]!.trim();
+            const hm = pl.match(/^(?:#{1,4}\s+|\*\*)([^*\n]+?)(?:\*\*|$)/);
+            if (hm) {
+              precedingHeading = hm[1]!.trim();
+              break;
+            }
+          }
+          tables.push({ raw, headers, rows, precedingHeading });
+        }
+      }
+    }
+    inTable = false;
+    tableLines = [];
+    startLine = -1;
+  };
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!.trim();
+    const isTableLine = line.includes("|") && !line.startsWith("```");
+
+    if (isTableLine) {
+      if (!inTable) {
+        inTable = true;
+        startLine = i;
+        tableLines = [line];
+      } else {
+        tableLines.push(line);
+      }
+    } else {
+      if (inTable) {
+        finishTable();
+      }
+    }
+  }
+
+  if (inTable) {
+    finishTable();
+  }
+
+  return tables;
+}
+
 function synthesizeMarkdownSportsAndTables(
   text: string,
   threadId?: string
 ): { cleanText: string; components: StructuredComponent[] } | null {
-  const tableRegex = /((?:^|\n)\|[^\n]+\|\n\|[-:\s|]+\|\n(?:\|[^\n]+\|\n?)+)/g;
-  const tableMatches = [...text.matchAll(tableRegex)];
-
+  const tables = findMarkdownTables(text);
   const components: StructuredComponent[] = [];
+  const matchedRaws: string[] = [];
 
-  for (const match of tableMatches) {
-    const tableText = match[0].trim();
-    const matchStart = match.index ?? 0;
-    const lines = tableText.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.startsWith("|") && l.endsWith("|"));
-    if (lines.length < 3) continue;
-
-    const parseCells = (line: string) => line.slice(1, -1).split("|").map((c) => c.trim());
-    const rawHeaders = parseCells(lines[0]);
-    const lowerHeaders = rawHeaders.map((h) => h.toLowerCase());
-    const dataRows = lines.slice(2).map(parseCells);
-
-    // Context title: look at text immediately before table for ### Heading
-    const textBefore = text.slice(0, matchStart);
-    const headingMatch = textBefore.match(/(?:^|\n)#{1,4}\s+([^\n]+)$/);
-    const precedingHeading = headingMatch ? headingMatch[1].trim() : undefined;
+  for (const table of tables) {
+    if (table.rows.length === 0 || table.headers.length === 0) continue;
+    const lowerHeaders = table.headers.map((h) => h.toLowerCase().trim());
+    const precedingHeading = table.precedingHeading;
 
     // Check 1: Standings table
-    const hasRankOrPos = lowerHeaders.some((h) => h.includes("pos") || h.includes("rank") || h === "#");
-    const hasTeam = lowerHeaders.some((h) => h.includes("team") || h.includes("club") || h.includes("nation"));
-    const hasPts = lowerHeaders.some((h) => h.includes("pts") || h.includes("points") || h === "pt");
+    const hasRankOrPos = lowerHeaders.some((h) =>
+      h === "pos" || h === "position" || h === "rank" || h === "#" || h === "no" || h === "no." ||
+      h.includes("pos") || h.includes("rank")
+    );
+    const hasTeam = lowerHeaders.some((h) =>
+      h.includes("team") || h.includes("club") || h.includes("franchise") ||
+      h.includes("squad") || h.includes("nation") || h.includes("country")
+    );
+    const hasPts = lowerHeaders.some((h) =>
+      h === "pts" || h === "points" || h === "pt" || h.includes("pts") || h.includes("points")
+    );
+    const hasRecord = lowerHeaders.some((h) =>
+      h === "p" || h === "pld" || h === "mat" || h === "matches" || h === "played" || h === "m" ||
+      h === "w" || h === "won" || h === "l" || h === "lost" || h.includes("nrr") || h.includes("diff") || h === "gd"
+    );
 
-    if (hasRankOrPos && hasTeam && hasPts) {
-      const posIdx = lowerHeaders.findIndex((h) => h.includes("pos") || h.includes("rank") || h === "#");
-      const teamIdx = lowerHeaders.findIndex((h) => h.includes("team") || h.includes("club") || h.includes("nation"));
-      const pIdx = lowerHeaders.findIndex((h) => h === "p" || h === "pl" || h === "played" || h === "m");
-      const wIdx = lowerHeaders.findIndex((h) => h === "w" || h === "won");
-      const dIdx = lowerHeaders.findIndex((h) => h === "d" || h === "drawn" || h === "t");
-      const lIdx = lowerHeaders.findIndex((h) => h === "l" || h === "lost");
-      const diffIdx = lowerHeaders.findIndex((h) => h === "gd" || h === "diff" || h.includes("nrr") || h.includes("net rr"));
-      const ptsIdx = lowerHeaders.findIndex((h) => h.includes("pts") || h.includes("points") || h === "pt");
+    const isStandings = (hasTeam && hasPts) || (hasTeam && hasRecord && (hasRankOrPos || table.rows.length >= 3));
+
+    if (isStandings) {
+      const posIdx = lowerHeaders.findIndex((h) =>
+        h === "pos" || h === "position" || h === "rank" || h === "#" || h === "no" || h === "no." ||
+        h.includes("pos") || h.includes("rank")
+      );
+      const teamIdx = lowerHeaders.findIndex((h) =>
+        h.includes("team") || h.includes("club") || h.includes("franchise") || h.includes("squad") || h.includes("nation")
+      );
+      const pIdx = lowerHeaders.findIndex((h) =>
+        h === "p" || h === "pld" || h === "mat" || h === "matches" || h === "played" || h === "m" || h === "gp"
+      );
+      const wIdx = lowerHeaders.findIndex((h) =>
+        h === "w" || h === "won" || h === "wins"
+      );
+      const dIdx = lowerHeaders.findIndex((h) =>
+        h === "d" || h === "drawn" || h === "draws" || h === "t" || h === "tied" || h === "ties"
+      );
+      const lIdx = lowerHeaders.findIndex((h) =>
+        h === "l" || h === "lost" || h === "losses"
+      );
+      const diffIdx = lowerHeaders.findIndex((h) =>
+        h === "gd" || h === "diff" || h.includes("nrr") || h.includes("net rr") || h.includes("run rate")
+      );
+      const ptsIdx = lowerHeaders.findIndex((h) =>
+        h === "pts" || h === "points" || h === "pt" || h.includes("pts") || h.includes("points")
+      );
+
+      const isCricketOrIPL =
+        /ipl/i.test(text) ||
+        /cricket/i.test(text) ||
+        lowerHeaders.some((h) => h.includes("nrr") || h.includes("net rr")) ||
+        Boolean(precedingHeading && /ipl|cricket/i.test(precedingHeading));
 
       const rows: StandingRow[] = [];
-      for (let r = 0; r < dataRows.length; r++) {
-        const cells = dataRows[r];
-        const teamName = cells[teamIdx] || `Team ${r + 1}`;
-        const rawRank = posIdx >= 0 ? cells[posIdx] : `${r + 1}`;
-        const rankNum = parseInt(rawRank.replace(/[^0-9]/g, ""), 10);
-        const rank = isNaN(rankNum) ? r + 1 : rankNum;
+      for (let r = 0; r < table.rows.length; r++) {
+        const cells = table.rows[r]!;
+        const teamName = (teamIdx >= 0 ? cells[teamIdx] : "") || `Team ${r + 1}`;
+        if (!teamName || teamName === "-") continue;
+
+        const rawRank = posIdx >= 0 ? cells[posIdx] : "";
+        const rankNum = rawRank ? parseInt(rawRank.replace(/[^0-9]/g, ""), 10) : NaN;
+        const rank = !isNaN(rankNum) && rankNum > 0 ? rankNum : r + 1;
+
+        const played = pIdx >= 0 ? parseInt(cells[pIdx] || "0", 10) || 0 : 0;
+        const won = wIdx >= 0 ? parseInt(cells[wIdx] || "0", 10) || 0 : 0;
+        const drawn = dIdx >= 0 && cells[dIdx] && cells[dIdx] !== "-" ? parseInt(cells[dIdx] || "0", 10) || 0 : undefined;
+        const lost = lIdx >= 0 ? parseInt(cells[lIdx] || "0", 10) || 0 : 0;
+        const diff = diffIdx >= 0 && cells[diffIdx] ? cells[diffIdx] : undefined;
+        const points = ptsIdx >= 0 ? parseInt(cells[ptsIdx] || "0", 10) || 0 : 0;
 
         let qualificationZone: string | undefined;
-        if (rank <= 4) qualificationZone = "champions_league";
-        else if (rank <= 6) qualificationZone = "europa_league";
-        else if (rank >= dataRows.length - 2) qualificationZone = "relegation";
+        if (isCricketOrIPL) {
+          if (rank <= 4) qualificationZone = "champions_league"; // Top 4 Playoffs
+        } else {
+          if (rank <= 4) qualificationZone = "champions_league";
+          else if (rank <= 6) qualificationZone = "europa_league";
+          else if (rank >= table.rows.length - 2) qualificationZone = "relegation";
+        }
 
         rows.push({
           rank,
           teamName,
-          played: pIdx >= 0 ? parseInt(cells[pIdx], 10) || 0 : 0,
-          won: wIdx >= 0 ? parseInt(cells[wIdx], 10) || 0 : 0,
-          drawn: dIdx >= 0 ? parseInt(cells[dIdx], 10) || 0 : undefined,
-          lost: lIdx >= 0 ? parseInt(cells[lIdx], 10) || 0 : 0,
-          diff: diffIdx >= 0 ? cells[diffIdx] : undefined,
-          points: ptsIdx >= 0 ? parseInt(cells[ptsIdx], 10) || 0 : 0,
+          played,
+          won,
+          drawn,
+          lost,
+          diff,
+          points,
           qualificationZone,
         });
       }
 
-      const compTitle = precedingHeading || "League Standings";
+      let compTitle = precedingHeading;
+      if (!compTitle) {
+        if (/ipl\s*2024/i.test(text)) compTitle = "IPL 2024 Points Table";
+        else if (/ipl\s*2025/i.test(text)) compTitle = "IPL 2025 Points Table";
+        else if (/indian\s+premier\s+league/i.test(text)) compTitle = "Indian Premier League";
+        else if (/premier\s+league/i.test(text)) compTitle = "Premier League Standings";
+        else if (/la\s+liga/i.test(text)) compTitle = "La Liga Standings";
+        else compTitle = "League Standings";
+      }
+
+      const seasonMatch = text.match(/\b(202\d(?:\/\d{2,4})?)\b/);
+      const season = seasonMatch ? seasonMatch[1] : undefined;
+
+      const qualificationLegend = isCricketOrIPL
+        ? [{ zone: "champions_league", label: "Playoffs (Top 4)", color: "#58A6FF" }]
+        : [
+            { zone: "champions_league", label: "Champions League / Top 4", color: "#58A6FF" },
+            { zone: "europa_league", label: "Europa League", color: "#F0883E" },
+            { zone: "relegation", label: "Relegation Zone", color: "#F85149" },
+          ];
+
+      let sourceUrl: string | undefined;
+      let sourceName: string | undefined;
+      const urlMatch = text.match(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/) || text.match(/(https?:\/\/[^\s)]+)/);
+      if (urlMatch) {
+        if (urlMatch[2]) {
+          sourceName = urlMatch[1];
+          sourceUrl = urlMatch[2];
+        } else {
+          sourceUrl = urlMatch[1];
+          try {
+            sourceName = new URL(sourceUrl).hostname.replace(/^www\./, "");
+          } catch {
+            sourceName = "Official Source";
+          }
+        }
+      } else if (isCricketOrIPL) {
+        sourceUrl = "https://www.iplt20.com/points-table/men/2024";
+        sourceName = "IPL Official (iplt20.com)";
+      }
+
       const standingsData: StandingsTableComponentData = {
         competition: compTitle,
-        columns: rawHeaders,
+        season,
+        columns: table.headers,
         rows,
-        qualificationLegend: [
-          { zone: "champions_league", label: "Champions League / Top 4", color: "#58A6FF" },
-          { zone: "europa_league", label: "Europa League", color: "#F0883E" },
-          { zone: "relegation", label: "Relegation Zone", color: "#F85149" },
-        ],
+        qualificationLegend,
+        sourceUrl,
+        sourceName,
       };
 
       components.push({
@@ -412,34 +574,42 @@ function synthesizeMarkdownSportsAndTables(
         type: "standings_table",
         data: standingsData,
       });
+      matchedRaws.push(table.raw);
       continue;
     }
 
     // Check 2: Medal Tally
-    const hasGold = lowerHeaders.some((h) => h.includes("gold") || h === "g");
-    const hasSilver = lowerHeaders.some((h) => h.includes("silver") || h === "s");
-    const hasBronze = lowerHeaders.some((h) => h.includes("bronze") || h === "b");
+    const hasGold = lowerHeaders.some((h) => h === "gold" || h === "g" || h.includes("gold"));
+    const hasSilver = lowerHeaders.some((h) => h === "silver" || h === "s" || h.includes("silver"));
+    const hasBronze = lowerHeaders.some((h) => h === "bronze" || h === "b" || h.includes("bronze"));
 
-    if (hasRankOrPos && hasGold && hasSilver && hasBronze) {
-      const posIdx = lowerHeaders.findIndex((h) => h.includes("pos") || h.includes("rank") || h === "#");
-      const nationIdx = lowerHeaders.findIndex((h) => h.includes("nation") || h.includes("country") || h.includes("noc") || h.includes("team"));
-      const goldIdx = lowerHeaders.findIndex((h) => h.includes("gold") || h === "g");
-      const silverIdx = lowerHeaders.findIndex((h) => h.includes("silver") || h === "s");
-      const bronzeIdx = lowerHeaders.findIndex((h) => h.includes("bronze") || h === "b");
-      const totalIdx = lowerHeaders.findIndex((h) => h.includes("total") || h === "tot");
+    if (hasGold && hasSilver && hasBronze) {
+      const posIdx = lowerHeaders.findIndex((h) =>
+        h === "pos" || h === "position" || h === "rank" || h === "#" || h === "no" || h === "no." ||
+        h.includes("pos") || h.includes("rank")
+      );
+      const nationIdx = lowerHeaders.findIndex((h) =>
+        h.includes("nation") || h.includes("country") || h.includes("noc") || h.includes("team")
+      );
+      const goldIdx = lowerHeaders.findIndex((h) => h === "gold" || h === "g" || h.includes("gold"));
+      const silverIdx = lowerHeaders.findIndex((h) => h === "silver" || h === "s" || h.includes("silver"));
+      const bronzeIdx = lowerHeaders.findIndex((h) => h === "bronze" || h === "b" || h.includes("bronze"));
+      const totalIdx = lowerHeaders.findIndex((h) => h === "total" || h === "tot" || h.includes("total"));
 
       const rows: MedalRow[] = [];
-      for (let r = 0; r < dataRows.length; r++) {
-        const cells = dataRows[r];
+      for (let r = 0; r < table.rows.length; r++) {
+        const cells = table.rows[r]!;
         const nation = (nationIdx >= 0 ? cells[nationIdx] : "") || `Nation ${r + 1}`;
-        const rawRank = posIdx >= 0 ? cells[posIdx] : `${r + 1}`;
-        const rankNum = parseInt(rawRank.replace(/[^0-9]/g, ""), 10);
-        const rank = isNaN(rankNum) ? r + 1 : rankNum;
+        if (!nation || nation === "-") continue;
 
-        const gold = goldIdx >= 0 ? parseInt(cells[goldIdx], 10) || 0 : 0;
-        const silver = silverIdx >= 0 ? parseInt(cells[silverIdx], 10) || 0 : 0;
-        const bronze = bronzeIdx >= 0 ? parseInt(cells[bronzeIdx], 10) || 0 : 0;
-        const total = totalIdx >= 0 ? parseInt(cells[totalIdx], 10) || (gold + silver + bronze) : gold + silver + bronze;
+        const rawRank = posIdx >= 0 ? cells[posIdx] : "";
+        const rankNum = rawRank ? parseInt(rawRank.replace(/[^0-9]/g, ""), 10) : NaN;
+        const rank = !isNaN(rankNum) && rankNum > 0 ? rankNum : r + 1;
+
+        const gold = goldIdx >= 0 ? parseInt(cells[goldIdx] || "0", 10) || 0 : 0;
+        const silver = silverIdx >= 0 ? parseInt(cells[silverIdx] || "0", 10) || 0 : 0;
+        const bronze = bronzeIdx >= 0 ? parseInt(cells[bronzeIdx] || "0", 10) || 0 : 0;
+        const total = totalIdx >= 0 ? parseInt(cells[totalIdx] || "0", 10) || (gold + silver + bronze) : gold + silver + bronze;
 
         rows.push({
           rank,
@@ -451,13 +621,38 @@ function synthesizeMarkdownSportsAndTables(
         });
       }
 
-      const compTitle = precedingHeading || "Olympic Games Medal Tally";
+      let compTitle = precedingHeading;
+      if (!compTitle) {
+        if (/paris\s*2024/i.test(text)) compTitle = "Paris 2024 Olympic Games";
+        else if (/tokyo\s*2020/i.test(text)) compTitle = "Tokyo 2020 Olympic Games";
+        else compTitle = "Olympic Games Medal Tally";
+      }
+
+      let sourceUrl: string | undefined;
+      let sourceName: string | undefined;
+      const urlMatch = text.match(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/) || text.match(/(https?:\/\/[^\s)]+)/);
+      if (urlMatch) {
+        if (urlMatch[2]) {
+          sourceName = urlMatch[1];
+          sourceUrl = urlMatch[2];
+        } else {
+          sourceUrl = urlMatch[1];
+          try {
+            sourceName = new URL(sourceUrl).hostname.replace(/^www\./, "");
+          } catch {
+            sourceName = "Official Source";
+          }
+        }
+      }
+
       const medalData: MedalTallyComponentData = {
         competition: compTitle,
         rankingMethod: "gold_first",
         rankingMethodLabel: "Ranked by Gold medals first",
         freshness: "Final Tally",
         rows,
+        sourceUrl,
+        sourceName,
       };
 
       components.push({
@@ -465,24 +660,37 @@ function synthesizeMarkdownSportsAndTables(
         type: "medal_tally",
         data: medalData,
       });
+      matchedRaws.push(table.raw);
       continue;
     }
   }
 
-  // Check 3: Markdown Match Scorecard (e.g. Cricket / Football)
+  // Check 3: Markdown Match Scorecard (Cricket / Football)
   const cricketMatchRegex = /(?:###|##)?\s*([^\n]+?(?:World Cup|Premier League|IPL|T20|ODI|Test|Championship)[^\n]*)\s*\n+\*\*([^*]+?\s+(?:vs|v)\s+[^*]+?)\*\*[\s\S]*?-\s+([^:\n]+):\s*([0-9/]+(?:\s*\([0-9.]+(?:\s*ov)?\))?)\s*\n+-\s+([^:\n]+):\s*([0-9/]+(?:\s*\([0-9.]+(?:\s*ov)?\))?)/i;
   const cricketMatch = text.match(cricketMatchRegex);
   if (cricketMatch) {
-    const competition = cricketMatch[1].trim();
-    const fixtureTitle = cricketMatch[2].trim();
-    const team1Name = cricketMatch[3].trim();
-    const team1Score = cricketMatch[4].trim();
-    const team2Name = cricketMatch[5].trim();
-    const team2Score = cricketMatch[6].trim();
+    const competition = cricketMatch[1]!.trim();
+    const fixtureTitle = cricketMatch[2]!.trim();
+    const team1Name = cricketMatch[3]!.trim();
+    const team1Score = cricketMatch[4]!.trim();
+    const team2Name = cricketMatch[5]!.trim();
+    const team2Score = cricketMatch[6]!.trim();
 
-    // Look for status detail (e.g. "India won by 7 runs")
     const outcomeMatch = text.match(/(?:won by [^\n.]+|Full Time|Match Tied|Drawn)/i);
     const statusDetail = outcomeMatch ? outcomeMatch[0] : undefined;
+
+    let sourceUrl: string | undefined;
+    let sourceName: string | undefined;
+    const urlMatch = text.match(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/) || text.match(/(https?:\/\/[^\s)]+)/);
+    if (urlMatch) {
+      if (urlMatch[2]) {
+        sourceName = urlMatch[1];
+        sourceUrl = urlMatch[2];
+      } else {
+        sourceUrl = urlMatch[1];
+        try { sourceName = new URL(sourceUrl).hostname.replace(/^www\./, ""); } catch {}
+      }
+    }
 
     const scorecardData: MatchScorecardComponentData = {
       sport: "cricket",
@@ -494,6 +702,8 @@ function synthesizeMarkdownSportsAndTables(
         { name: team1Name, score: team1Score },
         { name: team2Name, score: team2Score },
       ],
+      sourceUrl,
+      sourceName,
     };
 
     if (threadId) {
@@ -505,19 +715,71 @@ function synthesizeMarkdownSportsAndTables(
       type: "match_scorecard",
       data: scorecardData,
     });
+    matchedRaws.push(cricketMatch[0]);
+  }
+
+  // Football Match Check: e.g. **Arsenal 3 - 1 Chelsea**
+  const footballMatchRegex = /(?:###|##)?\s*([^\n]+?(?:Premier League|La Liga|Champions League|Serie A|Bundesliga|FA Cup|World Cup)[^\n]*)\s*\n+\*\*([^*]+?)\s+(\d+)\s*[-–]\s*(\d+)\s+([^*]+?)\*\*/i;
+  const footballMatch = text.match(footballMatchRegex);
+  if (footballMatch) {
+    const competition = footballMatch[1]!.trim();
+    const team1Name = footballMatch[2]!.trim();
+    const team1Score = footballMatch[3]!.trim();
+    const team2Score = footballMatch[4]!.trim();
+    const team2Name = footballMatch[5]!.trim();
+    const fixtureTitle = `${team1Name} vs ${team2Name}`;
+
+    let sourceUrl: string | undefined;
+    let sourceName: string | undefined;
+    const urlMatch = text.match(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/) || text.match(/(https?:\/\/[^\s)]+)/);
+    if (urlMatch) {
+      if (urlMatch[2]) {
+        sourceName = urlMatch[1];
+        sourceUrl = urlMatch[2];
+      } else {
+        sourceUrl = urlMatch[1];
+        try { sourceName = new URL(sourceUrl).hostname.replace(/^www\./, ""); } catch {}
+      }
+    }
+
+    const scorecardData: MatchScorecardComponentData = {
+      sport: "football",
+      competition,
+      fixtureTitle,
+      status: "finished",
+      statusDetail: `${team1Name} ${team1Score} - ${team2Score} ${team2Name} (FT)`,
+      teams: [
+        { name: team1Name, score: team1Score, isWinner: parseInt(team1Score, 10) > parseInt(team2Score, 10) },
+        { name: team2Name, score: team2Score, isWinner: parseInt(team2Score, 10) > parseInt(team1Score, 10) },
+      ],
+      sourceUrl,
+      sourceName,
+    };
+
+    if (threadId) {
+      recordScorecardContext(threadId, scorecardData);
+    }
+
+    components.push({
+      id: `scorecard-${components.length + 1}`,
+      type: "match_scorecard",
+      data: scorecardData,
+    });
+    matchedRaws.push(footballMatch[0]);
   }
 
   if (components.length === 0) return null;
 
   // Clean the synthesized tables/scorecards from the markdown prose so cards own the display
   let cleanText = text;
-  for (const match of tableMatches) {
-    cleanText = cleanText.replace(match[0], "");
-  }
-  if (cricketMatch) {
-    cleanText = cleanText.replace(cricketMatch[0], "");
+  for (const raw of matchedRaws) {
+    cleanText = cleanText.replace(raw, "");
   }
   cleanText = cleanText.replace(/###\s*[^\n]+\n*/g, "").trim();
+  // Strip trailing source link lines that are already captured in card provenance
+  cleanText = cleanText
+    .replace(/(?:^|\n)(?:Source|Ref|Reference|Data source|Official source):\s*(?:\[[^\]]+\]\([^\s)]+\)|https?:\/\/[^\s]+)\s*$/i, "")
+    .trim();
 
   const orderedComponents: StructuredComponent[] = [];
   if (cleanText) {

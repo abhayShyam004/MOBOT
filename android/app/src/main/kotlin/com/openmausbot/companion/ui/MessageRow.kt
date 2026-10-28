@@ -457,41 +457,9 @@ private fun MessageContent(
         Message.Kind.TEXT -> {
             TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
             message.structured?.let { structured ->
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Start,
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .weight(0.92f, fill = false)
-                            .padding(top = 4.dp),
-                    ) {
-                        StructuredResponseView(
-                            chat = chat,
-                            message = message,
-                            structured = structured,
-                            onEvent = { componentId, action, payload ->
-                                if (action == "remix" && onPromptAction != null) {
-                                    val targetType = payload["targetType"] ?: "remix"
-                                    onPromptAction("Remix the ${targetType.replace('_', ' ')} in section \"$componentId\" while keeping the rest of the response stable.")
-                                } else if ((action == "open_result" || action == "open_link") && openLink != null) {
-                                    payload["url"]?.let { url -> openLink(url, message) }
-                                }
-                            },
-                        )
-                    }
-                }
-            }
-        }
-        // Native structured response system (Phase J)
-        Message.Kind.STRUCTURED -> message.structured?.let { structured ->
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Start,
-            ) {
-                Column(
+                Box(
                     modifier = Modifier
-                        .weight(0.92f, fill = false)
+                        .fillMaxWidth()
                         .padding(top = 4.dp),
                 ) {
                     StructuredResponseView(
@@ -508,6 +476,28 @@ private fun MessageContent(
                         },
                     )
                 }
+            }
+        }
+        // Native structured response system (Phase J)
+        Message.Kind.STRUCTURED -> message.structured?.let { structured ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 4.dp),
+            ) {
+                StructuredResponseView(
+                    chat = chat,
+                    message = message,
+                    structured = structured,
+                    onEvent = { componentId, action, payload ->
+                        if (action == "remix" && onPromptAction != null) {
+                            val targetType = payload["targetType"] ?: "remix"
+                            onPromptAction("Remix the ${targetType.replace('_', ' ')} in section \"$componentId\" while keeping the rest of the response stable.")
+                        } else if ((action == "open_result" || action == "open_link") && openLink != null) {
+                            payload["url"]?.let { url -> openLink(url, message) }
+                        }
+                    },
+                )
             }
         } ?: if (!message.text.isNullOrEmpty()) {
             TextBubble(chat.threadId, message, endsRun, openLink, openAttachment, onPromptAction)
@@ -887,7 +877,7 @@ private fun TextBubble(
             }
 
             Column(
-                modifier = Modifier.weight(0.80f, fill = false),
+                modifier = Modifier.weight(if (card != null) 1f else 0.80f, fill = false),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // Rooms attribute each line to the member who said it
