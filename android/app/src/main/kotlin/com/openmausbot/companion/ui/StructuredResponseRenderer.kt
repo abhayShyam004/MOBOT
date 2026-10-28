@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -3335,87 +3336,26 @@ private fun TextRenderer(component: StructuredComponent) {
 
 // ── Sports & Rich Data Card Utilities ──
 
-private fun isoToFlag(code: String): String {
-    if (code.length != 2) return ""
-    val c1 = code[0].uppercaseChar()
-    val c2 = code[1].uppercaseChar()
-    if (c1 !in 'A'..'Z' || c2 !in 'A'..'Z') return ""
-    val codePoints = intArrayOf(0x1F1E6 + (c1 - 'A'), 0x1F1E6 + (c2 - 'A'))
-    return String(codePoints, 0, 2)
-}
-
 @Composable
 private fun CountryFlagOrBadge(
     name: String,
     flag: String? = null,
     shortName: String? = null,
     color: String? = null,
+    logoUrl: String? = null,
+    sport: String? = null,
     modifier: Modifier = Modifier,
 ) {
-    val countryFlag = remember(name, flag, shortName) {
-        if (!flag.isNullOrBlank()) return@remember flag
-        val key = name.lowercase().trim()
-        val short = shortName?.lowercase()?.trim() ?: ""
-        val iso = when {
-            key.contains("india") || short == "ind" -> "IN"
-            key.contains("south africa") || short in listOf("sa", "rsa") -> "ZA"
-            key.contains("australia") || short == "aus" -> "AU"
-            key.contains("new zealand") || short == "nz" -> "NZ"
-            key.contains("england") || key.contains("great britain") || key.contains("united kingdom") || short in listOf("eng", "gbr", "uk") -> "GB"
-            key.contains("pakistan") || short == "pak" -> "PK"
-            key.contains("sri lanka") || short == "sl" -> "LK"
-            key.contains("bangladesh") || short == "ban" -> "BD"
-            key.contains("afghanistan") || short == "afg" -> "AF"
-            key.contains("spain") || short == "esp" -> "ES"
-            key.contains("serbia") || short == "srb" -> "RS"
-            key.contains("united states") || key.contains("usa") || short == "usa" -> "US"
-            key.contains("china") || short == "chn" -> "CN"
-            key.contains("japan") || short == "jpn" -> "JP"
-            key.contains("france") || short == "fra" -> "FR"
-            key.contains("germany") || short == "ger" -> "DE"
-            key.contains("italy") || short == "ita" -> "IT"
-            key.contains("brazil") || short == "bra" -> "BR"
-            key.contains("argentina") || short == "arg" -> "AR"
-            key.contains("netherlands") || short == "ned" -> "NL"
-            key.contains("canada") || short == "can" -> "CA"
-            else -> null
-        }
-        iso?.let { isoToFlag(it) }
-    }
-
-    if (countryFlag != null) {
-        Text(
-            text = countryFlag,
-            fontSize = 17.sp,
-            modifier = modifier,
-        )
-    } else {
-        val initials = remember(name, shortName) {
-            shortName ?: name.split(" ").filter { it.isNotBlank() }.map { it.first() }.take(2).joinToString("").uppercase()
-        }
-        val teamColor = remember(color) {
-            if (!color.isNullOrBlank()) {
-                try { Color(android.graphics.Color.parseColor(color)) } catch (_: Exception) { Color(0xFF3B82F6) }
-            } else {
-                Color(0xFF3B82F6)
-            }
-        }
-        Box(
-            modifier = modifier
-                .size(22.dp)
-                .clip(CircleShape)
-                .background(teamColor.copy(alpha = 0.2f))
-                .border(1.dp, teamColor.copy(alpha = 0.6f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = initials.take(3),
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                color = teamColor,
-            )
-        }
-    }
+    RichTeamLogo(
+        name = name,
+        sport = sport,
+        shortName = shortName,
+        logoUrl = logoUrl,
+        flag = flag,
+        color = color,
+        modifier = modifier,
+        size = 20.dp,
+    )
 }
 
 @Composable
@@ -3651,11 +3591,14 @@ private fun CricketScorecardView(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.weight(1f, fill = false),
                         ) {
-                            CountryFlagOrBadge(
+                            RichTeamLogo(
                                 name = team.name,
-                                flag = team.flag,
+                                sport = "cricket",
                                 shortName = team.shortName,
+                                logoUrl = team.logoUrl,
+                                flag = team.flag,
                                 color = team.color,
+                                size = 22.dp,
                             )
                             Text(
                                 text = team.name,
@@ -4022,9 +3965,29 @@ private fun FootballScorecardView(
                         horizontalAlignment = Alignment.Start,
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            CountryFlagOrBadge(team1.name, team1.flag, team1.shortName, team1.color)
-                            Text(team1.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, maxLines = 1)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            RichTeamLogo(
+                                name = team1.name,
+                                sport = "football",
+                                shortName = team1.shortName,
+                                logoUrl = team1.logoUrl,
+                                flag = team1.flag,
+                                color = team1.color,
+                                size = 22.dp,
+                            )
+                            Text(
+                                text = team1.name,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AppTheme.colors.textPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
                         }
                         val scorers = team1.scorers ?: scorecard.events.filter { it.teamName == team1.name && it.type == "goal" }.joinToString(", ") { "${it.playerName} ${it.minute}" }
                         if (scorers.isNotBlank()) {
@@ -4038,7 +4001,7 @@ private fun FootballScorecardView(
                         fontSize = 24.sp,
                         fontWeight = FontWeight.Bold,
                         color = AppTheme.colors.textPrimary,
-                        modifier = Modifier.padding(horizontal = 12.dp),
+                        modifier = Modifier.padding(horizontal = 6.dp),
                     )
 
                     // Away Team
@@ -4047,9 +4010,30 @@ private fun FootballScorecardView(
                         horizontalAlignment = Alignment.End,
                         verticalArrangement = Arrangement.spacedBy(2.dp),
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            Text(team2.name, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, maxLines = 1)
-                            CountryFlagOrBadge(team2.name, team2.flag, team2.shortName, team2.color)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                text = team2.name,
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AppTheme.colors.textPrimary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = TextAlign.End,
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            RichTeamLogo(
+                                name = team2.name,
+                                sport = "football",
+                                shortName = team2.shortName,
+                                logoUrl = team2.logoUrl,
+                                flag = team2.flag,
+                                color = team2.color,
+                                size = 22.dp,
+                            )
                         }
                         val scorers = team2.scorers ?: scorecard.events.filter { it.teamName == team2.name && it.type == "goal" }.joinToString(", ") { "${it.playerName} ${it.minute}" }
                         if (scorers.isNotBlank()) {
@@ -4232,7 +4216,15 @@ private fun TennisScorecardView(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             modifier = Modifier.weight(1f, fill = false),
                         ) {
-                            CountryFlagOrBadge(p.name, p.flag, p.shortName, p.color)
+                            RichTeamLogo(
+                                name = p.name,
+                                sport = "tennis",
+                                shortName = p.shortName,
+                                logoUrl = p.logoUrl,
+                                flag = p.flag,
+                                color = p.color,
+                                size = 20.dp,
+                            )
                             val seedText = if (!p.seed.isNullOrBlank()) " [${p.seed}]" else ""
                             Text(
                                 text = "${p.name}$seedText",
@@ -4367,7 +4359,15 @@ private fun GenericScorecardView(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            CountryFlagOrBadge(team.name, team.flag, team.shortName, team.color)
+                            RichTeamLogo(
+                                name = team.name,
+                                sport = scorecard.sport,
+                                shortName = team.shortName,
+                                logoUrl = team.logoUrl,
+                                flag = team.flag,
+                                color = team.color,
+                                size = 20.dp,
+                            )
                             Text(
                                 text = team.name,
                                 fontSize = 14.sp,
@@ -4474,23 +4474,11 @@ private fun PlayerStatsRenderer(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // Circular Avatar / Portrait Badge
-            Box(
-                modifier = Modifier
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .background(AppTheme.colors.accent.copy(alpha = 0.2f))
-                    .border(1.dp, AppTheme.colors.accent.copy(alpha = 0.5f), CircleShape),
-                contentAlignment = Alignment.Center,
-            ) {
-                val initials = player.playerName.split(" ").filter { it.isNotBlank() }.map { it.first() }.take(2).joinToString("").uppercase()
-                Text(
-                    text = initials,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = AppTheme.colors.accent,
-                )
-            }
+            RichPlayerAvatar(
+                playerName = player.playerName,
+                avatarUrl = player.avatarUrl,
+                size = 44.dp,
+            )
 
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(
@@ -4696,7 +4684,9 @@ private fun StandingsTableRenderer(
         }
 
         // 2. Responsive Table Container (uses available width before horizontal scroll)
-        val scrollState = rememberScrollState()
+        val hScrollState = rememberScrollState()
+        val vScrollState = rememberScrollState()
+        val isTableScrollable = remember(table.rows) { table.rows.size > 7 }
         val hasPlayed = remember(table.rows) { table.rows.any { it.played > 0 } }
         val hasWon = remember(table.rows) { table.rows.any { it.won > 0 } }
         val hasDraws = remember(table.rows) { table.rows.any { it.drawn != null } }
@@ -4733,13 +4723,15 @@ private fun StandingsTableRenderer(
             val teamColWidth = if (needsHorizontalScroll) maxOf(140.dp, (maxTeamNameLength * 8).dp) else naturalTeamWidth
             val totalTableWidth = if (needsHorizontalScroll) (nonTeamWidth + teamColWidth) else contentMaxWidth
 
-            val scrollModifier = if (needsHorizontalScroll) Modifier.horizontalScroll(scrollState) else Modifier
+            val scrollModifier = if (needsHorizontalScroll) Modifier.horizontalScroll(hScrollState) else Modifier
 
             Box(modifier = Modifier.fillMaxWidth().then(scrollModifier)) {
-                Column(modifier = Modifier.width(totalTableWidth).padding(8.dp)) {
-                    // Table Header Row
+                Column(modifier = Modifier.width(totalTableWidth)) {
+                    // Stationary Table Header Row
                     Row(
-                        modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
+                        modifier = Modifier
+                            .width(totalTableWidth)
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("POS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(rankColWidth), maxLines = 1, softWrap = false)
@@ -4766,78 +4758,117 @@ private fun StandingsTableRenderer(
 
                     HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
 
-                    // Table Rows
-                    table.rows.forEach { r ->
-                        val zoneColor = when (r.qualificationZone) {
-                            "champions_league" -> Color(0xFF10B981) // Green accent bar
-                            "europa_league" -> Color(0xFF3B82F6) // Blue accent bar
-                            "relegation" -> Color(0xFFEF4444) // Red accent bar
-                            else -> if (r.rank <= 4) Color(0xFF10B981) else null
-                        }
+                    // Embedded Scrollable Rows Container
+                    val rowsModifier = if (isTableScrollable) {
+                        Modifier
+                            .width(totalTableWidth)
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(vScrollState)
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    } else {
+                        Modifier
+                            .width(totalTableWidth)
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    }
 
-                        Row(
-                            modifier = Modifier
-                                .width(totalTableWidth)
-                                .padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Row(modifier = Modifier.width(rankColWidth), verticalAlignment = Alignment.CenterVertically) {
-                                if (zoneColor != null) {
-                                    Box(
-                                        modifier = Modifier
-                                            .size(width = 3.dp, height = 14.dp)
-                                            .clip(RoundedCornerShape(1.dp))
-                                            .background(zoneColor),
-                                    )
-                                    Spacer(Modifier.width(3.dp))
-                                }
-                                Text(
-                                    text = "${r.rank}",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = AppTheme.colors.textSecondary,
-                                )
+                    Column(modifier = rowsModifier) {
+                        table.rows.forEach { r ->
+                            val zoneColor = when (r.qualificationZone) {
+                                "champions_league" -> Color(0xFF10B981) // Green accent bar
+                                "europa_league" -> Color(0xFF3B82F6) // Blue accent bar
+                                "relegation" -> Color(0xFFEF4444) // Red accent bar
+                                else -> if (r.rank <= 4) Color(0xFF10B981) else null
                             }
 
                             Row(
-                                modifier = Modifier.width(teamColWidth),
+                                modifier = Modifier
+                                    .width(totalTableWidth)
+                                    .padding(vertical = 4.dp),
                                 verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
                             ) {
-                                CountryFlagOrBadge(
-                                    name = r.teamName,
-                                    flag = r.flag,
-                                    shortName = r.teamShort,
-                                )
-                                Text(
-                                    text = r.teamName,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = AppTheme.colors.textPrimary,
-                                    maxLines = 2,
-                                    softWrap = true,
-                                    lineHeight = 16.sp,
-                                )
-                            }
+                                Row(modifier = Modifier.width(rankColWidth), verticalAlignment = Alignment.CenterVertically) {
+                                    if (zoneColor != null) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(width = 3.dp, height = 14.dp)
+                                                .clip(RoundedCornerShape(1.dp))
+                                                .background(zoneColor),
+                                        )
+                                        Spacer(Modifier.width(3.dp))
+                                    }
+                                    Text(
+                                        text = "${r.rank}",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = AppTheme.colors.textSecondary,
+                                    )
+                                }
 
-                            if (hasPlayed) {
-                                Text("${r.played}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(pColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                Row(
+                                    modifier = Modifier.width(teamColWidth),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    RichTeamLogo(
+                                        name = r.teamName,
+                                        shortName = r.teamShort,
+                                        logoUrl = r.logoUrl,
+                                        flag = r.flag,
+                                        size = 18.dp,
+                                    )
+                                    Text(
+                                        text = r.teamName,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = AppTheme.colors.textPrimary,
+                                        maxLines = 2,
+                                        softWrap = true,
+                                        lineHeight = 16.sp,
+                                    )
+                                }
+
+                                if (hasPlayed) {
+                                    Text("${r.played}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(pColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                }
+                                if (hasWon) {
+                                    Text("${r.won}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(wColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                }
+                                if (hasDraws) {
+                                    Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(dColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                }
+                                if (hasLost) {
+                                    Text("${r.lost}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(lColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                }
+                                if (hasDiff) {
+                                    Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(diffColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                }
+                                if (hasPoints) {
+                                    Text("${r.points}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(ptsColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                }
                             }
-                            if (hasWon) {
-                                Text("${r.won}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(wColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
-                            }
-                            if (hasDraws) {
-                                Text(r.drawn?.toString() ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(dColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
-                            }
-                            if (hasLost) {
-                                Text("${r.lost}", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(lColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
-                            }
-                            if (hasDiff) {
-                                Text(r.diff ?: "-", fontSize = 11.sp, color = AppTheme.colors.textSecondary, modifier = Modifier.width(diffColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
-                            }
-                            if (hasPoints) {
-                                Text("${r.points}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(ptsColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
-                            }
+                        }
+                    }
+
+                    if (isTableScrollable) {
+                        HorizontalDivider(color = AppTheme.colors.hairline.copy(alpha = 0.5f), modifier = Modifier.width(totalTableWidth))
+                        Row(
+                            modifier = Modifier
+                                .width(totalTableWidth)
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(
+                                text = "Scroll for all ${table.rows.size} teams",
+                                fontSize = 9.sp,
+                                color = AppTheme.colors.textTertiary,
+                            )
+                            Text(
+                                text = "1-${table.rows.size}",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = AppTheme.colors.textTertiary,
+                            )
                         }
                     }
                 }
@@ -4944,7 +4975,9 @@ private fun MedalTallyRenderer(
         }
 
         // 2. Responsive Table Container (uses available width before horizontal scroll)
-        val scrollState = rememberScrollState()
+        val hScrollState = rememberScrollState()
+        val vScrollState = rememberScrollState()
+        val isMedalScrollable = remember(tally.rows) { tally.rows.size > 7 }
         val maxNationLength = remember(tally.rows) { tally.rows.maxOfOrNull { it.nation.length } ?: 10 }
         val rankColWidth = 26.dp
         val gColWidth = 36.dp
@@ -4965,13 +4998,15 @@ private fun MedalTallyRenderer(
             val nationColWidth = if (needsHorizontalScroll) maxOf(120.dp, (maxNationLength * 8).dp) else naturalNationWidth
             val totalTableWidth = if (needsHorizontalScroll) (nonNationWidth + nationColWidth) else contentMaxWidth
 
-            val scrollModifier = if (needsHorizontalScroll) Modifier.horizontalScroll(scrollState) else Modifier
+            val scrollModifier = if (needsHorizontalScroll) Modifier.horizontalScroll(hScrollState) else Modifier
 
             Box(modifier = Modifier.fillMaxWidth().then(scrollModifier)) {
-                Column(modifier = Modifier.width(totalTableWidth).padding(8.dp)) {
-                    // Header
+                Column(modifier = Modifier.width(totalTableWidth)) {
+                    // Stationary Header
                     Row(
-                        modifier = Modifier.width(totalTableWidth).padding(bottom = 6.dp),
+                        modifier = Modifier
+                            .width(totalTableWidth)
+                            .padding(horizontal = 8.dp, vertical = 6.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         Text("POS", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textTertiary, modifier = Modifier.width(rankColWidth), maxLines = 1, softWrap = false)
@@ -4996,52 +5031,95 @@ private fun MedalTallyRenderer(
 
                     HorizontalDivider(color = AppTheme.colors.hairline, modifier = Modifier.width(totalTableWidth))
 
-                    // Rows
-                    tally.rows.forEach { r ->
-                        val rankColor = when (r.rank) {
-                            1 -> Color(0xFFF59E0B)
-                            2 -> Color(0xFF9CA3AF)
-                            3 -> Color(0xFFB45309)
-                            else -> AppTheme.colors.textSecondary
-                        }
+                    // Embedded Scrollable Rows Container
+                    val rowsModifier = if (isMedalScrollable) {
+                        Modifier
+                            .width(totalTableWidth)
+                            .heightIn(max = 280.dp)
+                            .verticalScroll(vScrollState)
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    } else {
+                        Modifier
+                            .width(totalTableWidth)
+                            .padding(horizontal = 8.dp, vertical = 2.dp)
+                    }
 
+                    Column(modifier = rowsModifier) {
+                        tally.rows.forEach { r ->
+                            val rankColor = when (r.rank) {
+                                1 -> Color(0xFFF59E0B)
+                                2 -> Color(0xFF9CA3AF)
+                                3 -> Color(0xFFB45309)
+                                else -> AppTheme.colors.textSecondary
+                            }
+
+                            Row(
+                                modifier = Modifier
+                                    .width(totalTableWidth)
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    text = "${r.rank}",
+                                    fontSize = 12.sp,
+                                    fontWeight = if (r.rank <= 3) FontWeight.Bold else FontWeight.SemiBold,
+                                    color = rankColor,
+                                    modifier = Modifier.width(rankColWidth),
+                                    maxLines = 1,
+                                    softWrap = false,
+                                )
+
+                                Row(
+                                    modifier = Modifier.width(nationColWidth),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                ) {
+                                    RichCountryFlag(
+                                        name = r.nation,
+                                        code = r.nocCode ?: r.flag,
+                                        flagUrl = r.flagUrl,
+                                        width = 20.dp,
+                                        height = 14.dp,
+                                    )
+                                    Text(
+                                        text = if (!r.nocCode.isNullOrBlank()) "${r.nation} (${r.nocCode})" else r.nation,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = AppTheme.colors.textPrimary,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        softWrap = false,
+                                    )
+                                }
+
+                                Text("${r.gold}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFF59E0B), modifier = Modifier.width(gColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                Text("${r.silver}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF9CA3AF), modifier = Modifier.width(sColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                Text("${r.bronze}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFB45309), modifier = Modifier.width(bColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                                Text("${r.total}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(tColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                            }
+                        }
+                    }
+
+                    if (isMedalScrollable) {
+                        HorizontalDivider(color = AppTheme.colors.hairline.copy(alpha = 0.5f), modifier = Modifier.width(totalTableWidth))
                         Row(
                             modifier = Modifier
                                 .width(totalTableWidth)
-                                .padding(vertical = 4.dp),
+                                .padding(horizontal = 8.dp, vertical = 4.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                text = "${r.rank}",
-                                fontSize = 12.sp,
-                                fontWeight = if (r.rank <= 3) FontWeight.Bold else FontWeight.SemiBold,
-                                color = rankColor,
-                                modifier = Modifier.width(rankColWidth),
-                                maxLines = 1,
-                                softWrap = false,
+                                text = "Scroll for all ${tally.rows.size} nations",
+                                fontSize = 9.sp,
+                                color = AppTheme.colors.textTertiary,
                             )
-
-                            Row(
-                                modifier = Modifier.width(nationColWidth),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                            ) {
-                                CountryFlagOrBadge(name = r.nation, flag = r.flag, shortName = r.nocCode)
-                                Text(
-                                    text = if (!r.nocCode.isNullOrBlank()) "${r.nation} (${r.nocCode})" else r.nation,
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = AppTheme.colors.textPrimary,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    softWrap = false,
-                                )
-                            }
-
-                            Text("${r.gold}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFF59E0B), modifier = Modifier.width(gColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
-                            Text("${r.silver}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFF9CA3AF), modifier = Modifier.width(sColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
-                            Text("${r.bronze}", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = Color(0xFFB45309), modifier = Modifier.width(bColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
-                            Text("${r.total}", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = AppTheme.colors.textPrimary, modifier = Modifier.width(tColWidth), textAlign = TextAlign.End, maxLines = 1, softWrap = false)
+                            Text(
+                                text = "1-${tally.rows.size}",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = AppTheme.colors.textTertiary,
+                            )
                         }
                     }
                 }

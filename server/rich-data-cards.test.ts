@@ -890,4 +890,71 @@ Source: [Premier League](https://www.premierleague.com)`;
     expect(comp?.data.highlights[0]).toContain("Orange Cap");
     expect(comp?.data.actionLabel).toBe("Full Scorecard");
   });
+
+  it("Scenario 25: Asset completeness and embedded table scrolling preservation", () => {
+    const raw = `\`\`\`json
+{
+  "version": 1,
+  "components": [
+    {
+      "id": "standings-premier-league",
+      "type": "standings_table",
+      "data": {
+        "competition": "Premier League",
+        "season": "2024/25",
+        "rows": [
+          { "rank": 1, "teamName": "Arsenal", "teamShort": "ARS", "logoUrl": "https://crests.football-data.org/57.png", "played": 28, "won": 20, "points": 64 },
+          { "rank": 2, "teamName": "Manchester City", "teamShort": "MCI", "logoUrl": "https://crests.football-data.org/65.png", "played": 28, "won": 19, "points": 63 },
+          { "rank": 3, "teamName": "Liverpool", "teamShort": "LIV", "logoUrl": "https://crests.football-data.org/64.png", "played": 28, "won": 19, "points": 62 },
+          { "rank": 4, "teamName": "Aston Villa", "teamShort": "AVL", "played": 28, "won": 16, "points": 55 },
+          { "rank": 5, "teamName": "Tottenham Hotspur", "teamShort": "TOT", "played": 28, "won": 16, "points": 53 },
+          { "rank": 6, "teamName": "Manchester United", "teamShort": "MUN", "played": 28, "won": 15, "points": 47 },
+          { "rank": 7, "teamName": "West Ham", "played": 28, "won": 12, "points": 43 },
+          { "rank": 8, "teamName": "Brighton", "played": 28, "won": 11, "points": 42 },
+          { "rank": 9, "teamName": "Chelsea", "teamShort": "CHE", "played": 28, "won": 11, "points": 39 },
+          { "rank": 10, "teamName": "Newcastle United", "teamShort": "NEW", "played": 28, "won": 12, "points": 40 }
+        ],
+        "actionLabel": "View Full Table",
+        "sourceUrl": "https://www.premierleague.com/tables",
+        "sourceName": "Premier League"
+      }
+    },
+    {
+      "id": "medals-asian-games",
+      "type": "medal_tally",
+      "data": {
+        "competition": "Asian Games 2023",
+        "rows": [
+          { "rank": 1, "nation": "China", "nocCode": "CHN", "flagUrl": "https://flagcdn.com/w40/cn.png", "gold": 201, "silver": 111, "bronze": 71, "total": 383 },
+          { "rank": 2, "nation": "Japan", "nocCode": "JPN", "flagUrl": "https://flagcdn.com/w40/jp.png", "gold": 52, "silver": 67, "bronze": 69, "total": 188 },
+          { "rank": 3, "nation": "South Korea", "nocCode": "KOR", "gold": 42, "silver": 59, "bronze": 89, "total": 190 },
+          { "rank": 4, "nation": "India", "nocCode": "IND", "flagUrl": "https://flagcdn.com/w40/in.png", "gold": 28, "silver": 38, "bronze": 41, "total": 107 },
+          { "rank": 5, "nation": "Uzbekistan", "nocCode": "UZB", "gold": 22, "silver": 18, "bronze": 31, "total": 71 },
+          { "rank": 6, "nation": "Chinese Taipei", "nocCode": "TPE", "gold": 19, "silver": 20, "bronze": 28, "total": 67 },
+          { "rank": 7, "nation": "Iran", "nocCode": "IRI", "gold": 13, "silver": 21, "bronze": 20, "total": 54 },
+          { "rank": 8, "nation": "Thailand", "nocCode": "THA", "gold": 12, "silver": 14, "bronze": 32, "total": 58 }
+        ],
+        "sourceUrl": "https://info.hangzhou2022.cn",
+        "sourceName": "Hangzhou 2022 Official"
+      }
+    }
+  ]
+}
+\`\`\`
+`;
+    const res = extractStructuredContent(raw);
+    expect(res.structured).toBeDefined();
+    expect(res.structured?.components.length).toBe(2);
+
+    const standings = res.structured?.components[0]?.data as StandingsTableComponentData;
+    expect(standings.rows.length).toBe(10);
+    expect(standings.rows[0]?.logoUrl).toBe("https://crests.football-data.org/57.png");
+    expect(standings.rows[1]?.logoUrl).toBe("https://crests.football-data.org/65.png");
+
+    const medals = res.structured?.components[1]?.data as MedalTallyComponentData;
+    expect(medals.rows.length).toBe(8);
+    expect(medals.rows[0]?.flagUrl).toBe("https://flagcdn.com/w40/cn.png");
+    expect(medals.rows[3]?.nocCode).toBe("IND");
+    expect(medals.rows[3]?.gold).toBe(28);
+  });
 });
