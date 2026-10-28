@@ -986,6 +986,30 @@ export const STRUCTURED_COMPONENT_REGISTRY: Record<StructuredComponentType, Comp
     mobileLayout: "compact",
     viewSwitchableTo: ["card", "dashboard"],
   },
+  task_execution: {
+    type: "task_execution",
+    schemaVersion: 1,
+    semanticPurpose: "Device and background task execution status card with stages, evidence links, and outcome details.",
+    supportedInteractions: ["view_details"],
+    mobileLayout: "compact",
+    viewSwitchableTo: ["card"],
+  },
+  phone_task: {
+    type: "phone_task",
+    schemaVersion: 1,
+    semanticPurpose: "Phone control and device action execution status card with stages and device context.",
+    supportedInteractions: ["view_details"],
+    mobileLayout: "compact",
+    viewSwitchableTo: ["card"],
+  },
+  tennis_match: {
+    type: "tennis_match",
+    schemaVersion: 1,
+    semanticPurpose: "Tennis match scorecard with set-by-set breakdown and player stats.",
+    supportedInteractions: ["view_details", "open_source"],
+    mobileLayout: "adaptive",
+    viewSwitchableTo: ["table", "card"],
+  },
 };
 
 /**

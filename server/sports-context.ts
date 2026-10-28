@@ -153,8 +153,9 @@ export function recordScorecardContext(
     }
   }
 
+  const validSport = scorecard.sport === "cricket" || scorecard.sport === "football" ? scorecard.sport : "generic";
   return recordSportsContext(threadId, {
-    sport: scorecard.sport,
+    sport: validSport,
     competition: scorecard.competition,
     fixtureTitle: scorecard.fixtureTitle,
     teams,
@@ -223,8 +224,9 @@ export function recordPlayerStatsContext(
   const existing = activeContexts.get(threadId);
   const teams = existing?.teams && existing.teams.length > 0 ? existing.teams : [playerStats.teamName, playerStats.opponentName || ""].filter(Boolean);
 
+  const validSport = playerStats.sport === "cricket" || playerStats.sport === "football" ? playerStats.sport : "generic";
   return recordSportsContext(threadId, {
-    sport: playerStats.sport,
+    sport: validSport,
     competition: playerStats.competition || existing?.competition || "Sports Fixture",
     fixtureTitle: playerStats.fixtureTitle || existing?.fixtureTitle || `${playerStats.teamName} vs ${playerStats.opponentName || "Opponent"}`,
     teams,

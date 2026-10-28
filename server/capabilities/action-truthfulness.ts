@@ -261,6 +261,34 @@ export function verifyAndEnforceTurnTruthfulness(options: {
     }
   }
 
+  // 4. Browser Search & Screenshot Delivery Truthfulness Check
+  const browserReceipt = getLatestReceipt(threadId, "browser.search_fallback", turnId);
+  if (browserReceipt) {
+    if (browserReceipt.status === "SUCCEEDED") {
+      const claimsRefusal =
+        /\b(?:cannot|can't)\s+(?:verify|check|access)\b/i.test(assistantText) ||
+        /\blive\s+(?:match-stat\s+)?tools\s+aren't\s+available\b/i.test(assistantText) ||
+        /\btools\s+(?:are\s+not|aren't)\s+available\b/i.test(assistantText);
+      if (claimsRefusal) {
+        violations.push("Refusal claimed while browser search fallback succeeded with verified evidence");
+        const evidence = browserReceipt.evidence?.metadata;
+        const answer = evidence?.extractedAnswer || evidence?.sourceTitle;
+        const url = evidence?.sourceUrl;
+        const link = url ? ` [${evidence?.sourceTitle || "Official Source"}](${url})` : "";
+        correctedText = `${answer ? answer : "Information verified via browser research."}${link} Verified details and scorecard are shown in the attached screenshot.`;
+      }
+    } else if (browserReceipt.status === "FAILED") {
+      const claimsDeliveredScreenshot =
+        /\b(?:here is|attached|sent|captured)\s+(?:a|the)?\s*screenshot\b/i.test(assistantText) ||
+        /\bscreenshot\s+(?:is attached|was sent|has been delivered)\b/i.test(assistantText);
+      if (claimsDeliveredScreenshot) {
+        violations.push("Screenshot delivery claimed while browser fallback attachment delivery failed");
+        dominantStatus = "FAILED";
+        correctedText = `Browser search was attempted, but screenshot attachment delivery failed (${browserReceipt.error?.message || "could not store image"}).`;
+      }
+    }
+  }
+
   return {
     text: correctedText,
     corrected: violations.length > 0,

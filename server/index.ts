@@ -416,6 +416,11 @@ import { KNOWN_PACKAGES, HUMAN_LABELS } from "./drivers/phone-proxy.ts";
 import { sharedPersistentJobManager } from "./tasks.ts";
 import { sharedBackgroundExecutionManager } from "./background-execution.ts";
 import { BackgroundResearchWorker } from "./background-research-worker.ts";
+import {
+  executeBrowserSearchFallback,
+  isBrowserFallbackAvailable,
+  shouldTriggerBrowserFallback,
+} from "./browser-search-fallback.ts";
 
 import { artifactsFromToolOutput, defaultArtifactManager, isUserFacingArtifact } from "./computer-agent/artifact-manager.ts";
 import { readCuaConnection, gatedLocalComputer } from "./local-computer.ts";
@@ -5108,25 +5113,42 @@ bus.subscribe((event: RuntimeEvent) => {
         const registered = artifactsFromToolOutput(event.output);
         if (registered.length) {
           attachArtifactsToTurn(event.threadId, event.turnId, registered);
-        } else if (/screenshot|take_screenshot|screen_capture/i.test(toolName) && event.output) {
+        } else if (/screenshot|take_screenshot|screen_capture|browser_screenshot/i.test(toolName) && event.output) {
           try {
             let b64 = "";
+            let detectedMime = "image/png";
             if (typeof event.output === "string") {
-              const match = event.output.match(/"base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/);
-              if (match) b64 = match[1];
+              const matchB64 = event.output.match(/"base64"\s*:\s*"([A-Za-z0-9+/=]{100,})"/);
+              const matchData = event.output.match(/"data"\s*:\s*"([A-Za-z0-9+/=]{100,})"/);
+              if (matchB64) b64 = matchB64[1];
+              else if (matchData) b64 = matchData[1];
+              if (event.output.includes("image/jpeg") || event.output.includes("image/jpg")) detectedMime = "image/jpeg";
             } else if (typeof event.output === "object" && event.output !== null) {
               const rec = event.output as Record<string, unknown>;
-              b64 = typeof rec.base64 === "string" ? rec.base64 : (typeof rec.data === "string" ? rec.data : "");
+              if (typeof rec.base64 === "string") b64 = rec.base64;
+              else if (typeof rec.data === "string") b64 = rec.data;
+              else if (Array.isArray(rec.content) && rec.content.length > 0) {
+                const firstPart = rec.content[0] as Record<string, unknown>;
+                if (firstPart && typeof firstPart.data === "string") {
+                  b64 = firstPart.data;
+                  if (typeof firstPart.mimeType === "string" && firstPart.mimeType.includes("jpeg")) {
+                    detectedMime = "image/jpeg";
+                  }
+                }
+              }
             }
             if (b64 && b64.length > 100) {
               const buf = Buffer.from(b64, "base64");
-              const saved = saveImage(buf, "image/png");
+              if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+                detectedMime = "image/jpeg";
+              }
+              const saved = saveImage(buf, detectedMime);
               const fname = basename(saved.path);
               const aPath = `/api/attachments/${fname}`;
               attachArtifactsToTurn(event.threadId, event.turnId, [{
                 kind: "image",
                 path: aPath,
-                mime: "image/png",
+                mime: detectedMime,
                 name: fname,
               }]);
             }
@@ -7198,42 +7220,146 @@ async function startTurn(
   });
 
   let capabilityGroundingContext = "";
-  if (capabilityResolution.chosenModality === "web_search") {
-    // Freshness-sensitive factual web query: execute search capability to ground the answer
-    const query = userTurnText
-      .replace(/^(?:what|tell me|who|find|lookup|show|search)\s+(?:were|was|is|are|for)?\s*/i, "")
-      .replace(/[?!.]+$/, "")
-      .trim() || userTurnText;
-    const searchToolId = defaultCapabilityRegistry.has("web.scraper")
-      ? "web.scraper"
-      : (capabilityResolution.primaryCapabilityId || "web.scraper");
-    try {
-      const searchRes = await defaultCapabilityRegistry.invoke(
-        defaultCapabilityRegistry.has(searchToolId) ? searchToolId : "web.scraper",
-        "search",
-        { query }
-      );
-      if (searchRes.success && searchRes.data) {
-        const data = searchRes.data as any;
-        const results = Array.isArray(data.results) ? data.results : [];
-        if (results.length > 0) {
+  if (capabilityResolution.chosenModality === "web_search" || shouldTriggerBrowserFallback(userTurnText)) {
+    // Official Roadmap: Automatic Browser Search Fallback with Screenshot Delivery
+    if (capabilityResolution.primaryCapabilityId === "device.browser" || isBrowserFallbackAvailable()) {
+      try {
+        const fallbackRes = await executeBrowserSearchFallback({
+          botId: bot.id,
+          threadId,
+          turnId: dispatchClaimId,
+          userQuestion: userTurnText, // Search original question verbatim!
+          storeInstance: store,
+        });
+
+        if (fallbackRes.success) {
+          if (fallbackRes.attachment) {
+            attachArtifactsToTurn(threadId, undefined, [fallbackRes.attachment]);
+            attachArtifactsToTurn(threadId, dispatchClaimId, [fallbackRes.attachment]);
+            const targetAttachment = fallbackRes.attachment;
+            const originalSettler = directFollowupSettlers.get(dispatchClaimId);
+            if (originalSettler) {
+              const origSettle = originalSettler.settle;
+              directFollowupSettlers.set(dispatchClaimId, {
+                threadId,
+                settle: () => {
+                  try {
+                    const lastBotMsg = [...store.messagesFor(threadId)].reverse().find(
+                      (m) => m.role === "bot" && (m.kind === "text" || m.kind === "structured")
+                    );
+                    if (lastBotMsg) {
+                      const cur = lastBotMsg.attachments ?? [];
+                      if (!cur.some((a) => a.path === targetAttachment.path)) {
+                        store.patchMessage(threadId, lastBotMsg.id, {
+                          attachments: [...cur, targetAttachment],
+                        });
+                      }
+                    }
+                  } catch (e) {
+                    console.warn("[BrowserFallback] Post-settle attachment patch failed:", e);
+                  }
+                  origSettle?.();
+                },
+              });
+            }
+          }
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "browser.search_fallback",
+            status: "SUCCEEDED",
+            evidence: {
+              resourceId: fallbackRes.attachment?.path || fallbackRes.sourceUrl,
+              metadata: {
+                verbatimQuery: fallbackRes.verbatimQuery,
+                sourceUrl: fallbackRes.sourceUrl,
+                sourceTitle: fallbackRes.sourceTitle,
+                extractedAnswer: fallbackRes.extractedAnswer,
+                screenshotHash: fallbackRes.screenshotHash,
+                attachmentPath: fallbackRes.attachment?.path,
+              },
+            },
+            attemptedAt: Date.now(),
+          });
+
           capabilityGroundingContext =
-            `\n\n[Verified Real-Time Search Results via ${searchToolId} for "${query}"]:\n` +
-            results
-              .slice(0, 5)
-              .map((r: any, idx: number) => `${idx + 1}. ${r.title} — ${r.url}\n   ${r.snippet || r.text || ""}`)
-              .join("\n");
+            `\n\n[Verified Real-Time Browser Research via Android WebView]:\n` +
+            `Query (Verbatim): "${fallbackRes.verbatimQuery}"\n` +
+            `Source: ${fallbackRes.sourceTitle || "Verified Web Source"} (${fallbackRes.sourceUrl})\n` +
+            `Verified Answer: ${fallbackRes.extractedAnswer}\n` +
+            (fallbackRes.uncertaintyNotice ? `Uncertainty / Calibration: ${fallbackRes.uncertaintyNotice}\n` : "") +
+            (fallbackRes.attachment ? `Screenshot Delivered: Attached as ${fallbackRes.attachment.path} (SHA-256: ${fallbackRes.attachment.hash})\n` : "") +
+            `Instructions: Present this verified factual information directly to the user in a concise response (<100 words), include the markdown link to ${fallbackRes.sourceUrl}, and cite the attached screenshot. Do NOT claim the information is unavailable.`;
+        } else if (fallbackRes.deliveryFailed) {
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "browser.search_fallback",
+            status: "FAILED",
+            error: { code: "ERR_ATTACHMENT_DELIVERY_FAILED", message: fallbackRes.error || "Attachment delivery failed" },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext =
+            `\n\n[Browser Research Limitation]: Screenshot was captured but attachment delivery failed to store. Truthfully inform the user of this limitation; do not claim a screenshot was delivered.`;
+        } else {
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "browser.search_fallback",
+            status: "FAILED",
+            error: { code: "ERR_BROWSER_SEARCH_FAILED", message: fallbackRes.error || "Search failed" },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext =
+            `\n\n[Browser Research Limitation]: Browser research attempted for verbatim query "${fallbackRes.verbatimQuery}", but no credible answer could be verified (${fallbackRes.error || "no credible source"}). Truthfully inform the user of this limitation rather than guessing.`;
+        }
+      } catch (err: any) {
+        capabilityGroundingContext =
+          `\n\n[Browser Research Error]: ${err?.message || String(err)}. Inform user truthfully.`;
+      }
+    } else {
+      // Fallback to web.scraper if browser is not available
+      const query = userTurnText
+        .replace(/^(?:what|tell me|who|find|lookup|show|search)\s+(?:were|was|is|are|for)?\s*/i, "")
+        .replace(/[?!.]+$/, "")
+        .trim() || userTurnText;
+      const searchToolId = defaultCapabilityRegistry.has("web.scraper")
+        ? "web.scraper"
+        : (capabilityResolution.primaryCapabilityId || "web.scraper");
+      try {
+        const searchRes = await defaultCapabilityRegistry.invoke(
+          defaultCapabilityRegistry.has(searchToolId) ? searchToolId : "web.scraper",
+          "search",
+          { query }
+        );
+        if (searchRes.success && searchRes.data) {
+          const data = searchRes.data as any;
+          const results = Array.isArray(data.results) ? data.results : [];
+          if (results.length > 0) {
+            capabilityGroundingContext =
+              `\n\n[Verified Real-Time Search Results via ${searchToolId} for "${query}"]:\n` +
+              results
+                .slice(0, 5)
+                .map((r: any, idx: number) => `${idx + 1}. ${r.title} — ${r.url}\n   ${r.snippet || r.text || ""}`)
+                .join("\n");
+          } else {
+            capabilityGroundingContext =
+              `\n\n[Real-Time Search Attempted via ${searchToolId}]: No search results returned for "${query}". You must truthfully inform the user that live search returned no results rather than generating unverified headlines.`;
+          }
         } else {
           capabilityGroundingContext =
-            `\n\n[Real-Time Search Attempted via ${searchToolId}]: No search results returned for "${query}". You must truthfully inform the user that live search returned no results rather than generating unverified headlines.`;
+            `\n\n[Real-Time Search Notice]: Search retrieval failed (${searchRes.error?.message || "unavailable"}). You must truthfully inform the user of the retrieval limitation rather than hallucinating search results.`;
         }
-      } else {
+      } catch (err: any) {
         capabilityGroundingContext =
-          `\n\n[Real-Time Search Notice]: Search retrieval failed (${searchRes.error?.message || "unavailable"}). You must truthfully inform the user of the retrieval limitation rather than hallucinating search results.`;
+          `\n\n[Real-Time Search Notice]: Search error (${err?.message || String(err)}). Inform the user truthfully that live search could not be executed.`;
       }
-    } catch (err: any) {
-      capabilityGroundingContext =
-        `\n\n[Real-Time Search Notice]: Search error (${err?.message || String(err)}). Inform the user truthfully that live search could not be executed.`;
     }
   } else if (capabilityResolution.chosenModality === "composio_service") {
     // SaaS service integration: determine required service (gmail, github, googlecalendar, slack, linear, whatsapp)

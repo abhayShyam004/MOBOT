@@ -781,7 +781,13 @@ export class DeviceCapabilityRegistry {
       !isDeviceSensorQuery &&
       (request.requiredDataFreshness === "realtime" ||
         (request.requiredDataFreshness !== "historical" &&
-          (hasAnyToken("search", "headlines", "news", "today", "weather", "stock", "price", "latest", "lookup", "recent", "internet", "from the internet", "web", "online", "ipl", "table", "standings", "scorecard", "score", "match", "tournament", "league", "points") ||
+          (hasAnyToken(
+            "search", "headlines", "news", "today", "weather", "stock", "price", "latest", "lookup", "recent",
+            "internet", "from the internet", "web", "online", "ipl", "table", "standings", "scorecard", "score",
+            "match", "tournament", "league", "points", "game", "last game", "last match", "fours", "sixes",
+            "goals", "runs", "wickets", "stats", "statistics", "who won", "how many", "winner", "result", "results",
+            "box office", "nobel"
+          ) ||
             (hasAnyToken("current") && hasAnyToken("weather", "stock", "price", "news", "events", "exchange", "rate", "temperature"))
           )
         )
@@ -1014,7 +1020,7 @@ export function normalizeCapabilityMatchRequest(
   // Inferred freshness if not provided
   let inferredFreshness: "realtime" | "static" | "historical" = partial.requiredDataFreshness ?? "static";
   if (!partial.requiredDataFreshness) {
-    if (/\b(?:today|tonight|right now|live|current|latest|recent|news|headlines|weather|stock|price)\b/i.test(lowerObj)) {
+    if (/\b(?:today|tonight|right now|live|current|latest|recent|news|headlines|weather|stock|price|last\s+(?:game|match|innings|season|race|fight)|fours?|sixes?|scorecard|runs?|wickets?|goals?|stats?|who\s+won|points\s+table|standings)\b/i.test(lowerObj)) {
       inferredFreshness = "realtime";
     } else if (/\b(?:historical|history|ancient|in \d{4}|who won.*(?:19\d\d|20[01]\d))\b/i.test(lowerObj)) {
       inferredFreshness = "historical";
