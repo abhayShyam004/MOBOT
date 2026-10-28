@@ -330,14 +330,6 @@ export class DeviceSafetyPolicy {
 
     // ── 6. Phone Control & Native Gestures (device.phone_control) ──
     if (lowerCap === 'device.phone_control' || lowerCap === 'android_computer') {
-      if (['status', 'read_screen', 'screenshot', 'list_apps', 'get_location'].includes(lowerOp)) {
-        return {
-          tier: 'low',
-          requiresExplicitConfirmation: false,
-          consequentialImpactDescription: `Reading on-screen device state.`,
-          reversible: true,
-        };
-      }
       // Check if gesture targets a high-consequence button
       const targetText = String(parameters.text || parameters.label || parameters.query || '');
       const isDestructiveGesture = /\b(?:delete|uninstall|clear data|factory reset|format|send money|pay|checkout)\b/i.test(targetText);
@@ -347,6 +339,14 @@ export class DeviceSafetyPolicy {
           requiresExplicitConfirmation: true, // Destructive UI gesture
           consequentialImpactDescription: `Interacting with high-consequence UI control '${targetText}'.`,
           reversible: false,
+        };
+      }
+      if (['status', 'read_screen', 'screenshot', 'take_screenshot', 'list_apps', 'get_location', 'restore_host', 'open_app', 'launch', 'scroll', 'press_key', 'tap', 'click', 'type', 'type_text'].includes(lowerOp)) {
+        return {
+          tier: 'low',
+          requiresExplicitConfirmation: false,
+          consequentialImpactDescription: `Operating device UI (${operation}).`,
+          reversible: true,
         };
       }
       return {

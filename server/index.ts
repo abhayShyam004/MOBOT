@@ -5464,17 +5464,22 @@ bus.subscribe((event: RuntimeEvent) => {
         });
       }
       const generatedKey = generatedImageTurnKey(event.threadId, event.turnId);
+      const activeKey = generatedImageTurnKey(event.threadId, undefined);
       const generated = [
         ...(generatedImagesByTurn.get(generatedKey) ?? []),
+        ...(generatedImagesByTurn.get(activeKey) ?? []),
         ...(registeredArtifactsByTurn.get(generatedKey) ?? []),
+        ...(registeredArtifactsByTurn.get(activeKey) ?? []),
       ];
       generatedImagesByTurn.delete(generatedKey);
+      generatedImagesByTurn.delete(activeKey);
       registeredArtifactsByTurn.delete(generatedKey);
+      registeredArtifactsByTurn.delete(activeKey);
       if (generated.length) {
         const response = [...store.messagesFor(event.threadId)].reverse().find(
           (message) =>
             message.role === "bot" &&
-            message.kind === "text" &&
+            (message.kind === "text" || message.kind === "structured") &&
             message.turnId === completedTurnId,
         );
         // An artifact already bound to an earlier message of this same turn
@@ -7564,6 +7569,7 @@ async function startTurn(
           { botId: bot.id, threadId }
         );
         if (launchRes.success) {
+          phoneToolsUsedByThread.add(threadId);
           const effectivePkg = (launchRes.data as any)?.packageName || targetPackage;
           const displayLabel = HUMAN_LABELS[effectivePkg] || humanName;
           recordActionReceipt({
@@ -7620,6 +7626,7 @@ async function startTurn(
           { botId: bot.id, threadId }
         );
         if (typeRes.success) {
+          phoneToolsUsedByThread.add(threadId);
           recordActionReceipt({
             operationId: dispatchClaimId,
             botId: bot.id,
@@ -7660,6 +7667,66 @@ async function startTurn(
           actionType: "device.phone_control",
           status: "FAILED",
           error: { code: "ERR_TYPE_FAILED", message: msg },
+          attemptedAt: Date.now(),
+        });
+        capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${msg}.`;
+      }
+    } else if (isScreenshotIntent) {
+      try {
+        const screenshotRes = await defaultCapabilityRegistry.invoke(
+          "device.phone_control",
+          "take_screenshot",
+          { includeBase64: true },
+          { botId: bot.id, threadId }
+        );
+        if (screenshotRes.success && screenshotRes.data) {
+          const sData = screenshotRes.data as any;
+          if (sData.attachment) {
+            const key = generatedImageTurnKey(threadId, undefined);
+            const current = generatedImagesByTurn.get(key) ?? [];
+            current.push(sData.attachment);
+            generatedImagesByTurn.set(key, current);
+          }
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "device.phone_control",
+            status: "SUCCEEDED",
+            evidence: {
+              resourceId: sData.path || "screenshot",
+              metadata: { width: sData.width, height: sData.height, path: sData.path },
+            },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext += `\n\n[Phone Control Action Succeeded]: Captured a fresh screenshot (${sData.width}x${sData.height}) of the current screen. The screenshot image is attached to your response and visible in the chat.`;
+        } else {
+          recordActionReceipt({
+            operationId: dispatchClaimId,
+            botId: bot.id,
+            threadId,
+            turnId: dispatchClaimId,
+            actionType: "device.phone_control",
+            status: "FAILED",
+            error: {
+              code: screenshotRes.error?.code || "ERR_SCREENSHOT_FAILED",
+              message: screenshotRes.error?.message || "Failed to capture screenshot",
+            },
+            attemptedAt: Date.now(),
+          });
+          capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${screenshotRes.error?.message || "Failed to capture screenshot"}.`;
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        recordActionReceipt({
+          operationId: dispatchClaimId,
+          botId: bot.id,
+          threadId,
+          turnId: dispatchClaimId,
+          actionType: "device.phone_control",
+          status: "FAILED",
+          error: { code: "ERR_SCREENSHOT_FAILED", message: msg },
           attemptedAt: Date.now(),
         });
         capabilityGroundingContext += `\n\n[Phone Control Action Failed]: ${msg}.`;

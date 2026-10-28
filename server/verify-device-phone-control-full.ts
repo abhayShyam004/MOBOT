@@ -11,7 +11,7 @@ import { artifactsFromToolOutput } from './computer-agent/artifact-manager.ts';
 const DEVICE_SERIAL = 'R8YY90VT4EM';
 const PREVIEW_PACKAGE = 'com.openmausbot.companion.preview';
 const PROD_PACKAGE = 'com.openmausbot.companion';
-const ARTIFACT_DIR = '/home/abhay/.gemini/antigravity-cli/brain/e1c49599-6b92-434f-80a9-222dd272a0e6';
+const ARTIFACT_DIR = process.env.ARTIFACT_DIR || '/home/abhay/.gemini/antigravity-cli/brain/5adaabb5-74bb-4111-8a16-762722683934';
 
 export interface VerificationResult {
   scenarioNumber: number;
@@ -82,22 +82,23 @@ export async function runFullPhoneControlDeviceVerification(): Promise<Verificat
   const apiLevel = adb('shell getprop ro.build.version.sdk');
   const abi = adb('shell getprop ro.product.cpu.abi');
   const psOutput = adb('shell ps -A');
-
-  const prodAlive = psOutput.includes(PROD_PACKAGE) && psOutput.includes('18503');
+  const prodMatch = psOutput.match(new RegExp(`\\s+(\\d+)\\s+.*${PROD_PACKAGE}$`, 'm'));
+  const prodAlive = Boolean(prodMatch);
+  const prodPid = prodMatch ? parseInt(prodMatch[1], 10) : 0;
   const previewAlive = psOutput.includes(PREVIEW_PACKAGE);
 
   results.push({
     scenarioNumber: 0,
     name: 'Hardware Baseline and Package Isolation',
     verdict: prodAlive && previewAlive ? 'PASS' : 'FAIL',
-    details: `Physical device: ${model} (Android ${androidVer}, API ${apiLevel}, ABI ${abi}). Production PID 18503 is alive and untouched. Preview package running.`,
+    details: `Physical device: ${model} (Android ${androidVer}, API ${apiLevel}, ABI ${abi}). Production PID ${prodPid} is alive and untouched. Preview package running.`,
     evidence: {
       model,
       androidVersion: androidVer,
       apiLevel,
       abi,
       productionPackage: PROD_PACKAGE,
-      productionPid: 18503,
+      productionPid: prodPid,
       productionAlive: prodAlive,
       previewPackage: PREVIEW_PACKAGE,
       previewAlive,

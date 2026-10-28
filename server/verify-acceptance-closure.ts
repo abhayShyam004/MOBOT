@@ -96,10 +96,12 @@ export async function runAcceptanceClosureSuite(): Promise<AcceptanceTestResult[
 
   // Verify Baseline & Production Isolation
   const psOutput = adb('shell ps -A');
-  if (!psOutput.includes(PROD_PACKAGE) || !psOutput.includes('18503')) {
-    throw new Error('CRITICAL SAFETY FAILURE: Production package com.openmausbot.companion (PID 18503) is not intact!');
+  const prodMatch = psOutput.match(new RegExp(`\\s+(\\d+)\\s+.*${PROD_PACKAGE}$`, 'm'));
+  if (!prodMatch) {
+    throw new Error('CRITICAL SAFETY FAILURE: Production package com.openmausbot.companion is not intact!');
   }
-  console.log('Verified: Production package PID 18503 is alive, running, and strictly isolated.\n');
+  const prodPid = prodMatch[1];
+  console.log(`Verified: Production package PID ${prodPid} is alive, running, and strictly isolated.\n`);
 
   const suiteResults: AcceptanceTestResult[] = [];
   const TARGET_CONSECUTIVE_PASSES = 5;

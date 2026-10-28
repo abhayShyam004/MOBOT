@@ -232,6 +232,21 @@ export const ANDROID_COMPUTER_SYSTEM_PROMPT =
   " What a failed attempt prints is diagnostic material, not an answer: never put tool names, command lines, file paths, environment names, exit codes, or" +
   " session ids into a reply, and never repeat a terminal's raw output as if it were your own words. Report what happened in the person's own terms — what worked, what did not, and what it means for what they asked for — and" +
   " never claim an outcome the tools did not confirm." +
+  " NATIVE ANDROID PHONE CONTROL & AUTOMATION DIRECTIVE:" +
+  " You can control and automate this Android phone through your native phone_* tools:" +
+  " (1) phone_status: Check automation status, Accessibility readiness, active foreground app, and lock state." +
+  " (2) phone_list_apps: Discover installed launchable applications by name and package name." +
+  " (3) phone_open_app: Launch any installed app by its name (e.g. 'Settings', 'Chrome', 'Calculator') or package name, and verify it settles in the foreground." +
+  " (4) phone_read_screen: Inspect the active foreground screen hierarchy to find buttons, text, inputs, and coordinates." +
+  " (5) phone_tap: Tap on any element by visible text (e.g. 'Display', 'Network & internet'), resource ID, or x,y coordinates." +
+  " (6) phone_type: Inject text into the active focused input field on screen." +
+  " (7) phone_scroll: Scroll the active screen up, down, left, right, forward, or backward to reveal more content." +
+  " (8) phone_press_key: Perform system navigation: 'back', 'home', 'recents', 'notifications'." +
+  " (9) phone_take_screenshot: Capture a fresh native screenshot on demand. It will automatically attach to your response so the user can see it in chat." +
+  " (10) phone_restore_host: Return to the MOBOT companion chat interface when your automation task is finished." +
+  " INVARIANT: EMPIRICAL VERIFICATION & HONESTY:" +
+  " - Never claim you completed an action (e.g. 'I tapped X', 'I launched Y', 'I changed Z') without calling the tool and checking the verified result." +
+  " - If an action requires user intervention (such as granting a missing permission, unlocking a secure lockscreen, or interacting with a biometric/banking dialog), state the exact boundary honestly." +
   GENERAL_AGENT_RELIABILITY_PROMPT;
 
 /** Core application identity prompt for MOBOT. */

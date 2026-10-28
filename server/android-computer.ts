@@ -37,7 +37,7 @@ import {
 import { RESOURCE_TOOLS } from "./android-resources.ts";
 import { placeAddonsIn } from "./android-native-addons.ts";
 import { APP_BUILDER_TOOLS, setProjectManager } from "./app-builder/app-builder-tools.ts";
-import { DEVICE_CAPABILITY_TOOLS } from "./capabilities/capability-registry.ts";
+import { defaultCapabilityRegistry, DEVICE_CAPABILITY_TOOLS } from "./capabilities/capability-registry.ts";
 import { COMPUTER_AGENT_TOOLS } from "./computer-agent/agent-tools.ts";
 import { ProjectManager } from "./app-builder/project-manager.ts";
 import { checkToolPermission, loadDiskPermissions } from "./permission-policy.ts";
@@ -1727,7 +1727,129 @@ interface ToolSpec {
   handler: ToolHandler;
 }
 
+const PHONE_CONTROL_TOOLS: Record<string, ToolSpec> = {
+  phone_status: {
+    description: "Check operational status of native Android phone automation, AccessibilityService readiness, active foreground package, and keyguard lock state.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "status", {});
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_read_screen: {
+    description: "Read active foreground package and semantic UI hierarchy (interactive buttons, labels, text fields, and bounds) on the phone screen.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "read_screen", {});
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_tap: {
+    description: "Tap an element on the Android phone screen by visible text/contentDescription, resource ID, or x,y coordinates.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Visible text or contentDescription to tap" },
+        id: { type: "string", description: "Resource view ID to tap" },
+        x: { type: "number", description: "Screen X coordinate" },
+        y: { type: "number", description: "Screen Y coordinate" },
+        exact: { type: "boolean", description: "Whether text matching is exact" },
+      },
+    },
+    handler: async (args) => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "tap", args);
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_type: {
+    description: "Type text into the active focused editable field on the phone screen.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to inject" },
+      },
+      required: ["text"],
+    },
+    handler: async (args) => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "type_text", args);
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_scroll: {
+    description: "Scroll the phone screen in a direction (up, down, left, right, forward, backward).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        direction: { type: "string", enum: ["up", "down", "left", "right", "forward", "backward"], default: "down" },
+      },
+      required: ["direction"],
+    },
+    handler: async (args) => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "scroll", args);
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_press_key: {
+    description: "Perform a global Android system navigation action: back, home, recents, notifications.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        key: { type: "string", enum: ["back", "home", "recents", "notifications"] },
+      },
+      required: ["key"],
+    },
+    handler: async (args) => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "press_key", args);
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_open_app: {
+    description: "Launch an installed application by common name (e.g. 'Settings', 'Chrome', 'Play Store') or package name, and verify it reaches foreground.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Common app name, e.g. 'Settings', 'Chrome', 'Play Store'" },
+        packageName: { type: "string", description: "Explicit Android package name" },
+      },
+    },
+    handler: async (args) => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "open_app", args);
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_take_screenshot: {
+    description: "Capture a fresh native screenshot of the Android screen without ADB, returning dimensions and base64 image data.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        includeBase64: { type: "boolean", default: true },
+      },
+    },
+    handler: async (args) => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "take_screenshot", { includeBase64: true, ...args });
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_list_apps: {
+    description: "List launchable applications installed on this phone directly from Android PackageManager.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "list_apps", {});
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+  phone_restore_host: {
+    description: "Restore the MOBOT companion host application to the foreground after interacting with other apps.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async () => {
+      const res = await defaultCapabilityRegistry.invoke("device.phone_control", "restore_host", {});
+      return res.success ? (res.data ?? { ok: true }) : { ok: false, error: res.error?.message, code: res.error?.code };
+    },
+  },
+};
+
 const TOOLS: Record<string, ToolSpec> = {
+  ...PHONE_CONTROL_TOOLS,
   workspace_list: {
     description: `List a workspace directory. ${WORKSPACE_DESC}`,
     inputSchema: { type: "object", properties: { path: { type: "string", description: "Directory to list" } } },
