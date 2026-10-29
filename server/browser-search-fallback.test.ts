@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createHash } from "node:crypto";
 import { join, basename } from "node:path";
+import { readFileSync } from "node:fs";
 import {
   executeBrowserSearchFallback,
   isBrowserFallbackAvailable,
@@ -11,6 +12,9 @@ import {
   selectCredibleSource,
   verifyScreenshotBuffer,
   synthesizeVerifiedAnswer,
+  queryMetric,
+  findMetricEvidence,
+  resetBrowserFallbackState,
 } from "./browser-search-fallback.ts";
 import { Store } from "./store.ts";
 import { saveImage, readAttachment, ATTACHMENTS_DIR } from "./attachments.ts";
@@ -25,16 +29,30 @@ describe("Browser Search Fallback & Screenshot Delivery", () => {
   let store: Store;
   const selection = () => ({ instanceId: "codex", model: "gpt-5.6-luna" });
 
-  // Valid 1080x1920 test JPEG fixture header
-  const createValidJpegBuffer = (payload = "jpeg-bytes-payload-sample") => {
-    const header = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01]);
+  /** A structurally complete JPEG: SOI, APP0, SOF0 with real dimensions, a
+   *  payload body, and the EOI trailer. It exercises the same header walk a
+   *  genuine WebView capture does (it is a fixture, not proof of capture). */
+  const createValidJpegBuffer = (payload = "jpeg-bytes-payload-sample", width = 1080, height = 1920) => {
+    const app0 = Buffer.from([
+      0xff, 0xd8,
+      0xff, 0xe0, 0x00, 0x10,
+      0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+    ]);
+    const sof = Buffer.from([
+      0xff, 0xc0, 0x00, 0x11, 0x08,
+      (height >> 8) & 0xff, height & 0xff,
+      (width >> 8) & 0xff, width & 0xff,
+      0x03, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+    ]);
     const body = Buffer.from(payload);
-    const padding = Buffer.alloc(800, 0x41); // Ensure > 500 bytes
-    return Buffer.concat([header, body, padding]);
+    const padding = Buffer.alloc(3_000, 0x41);
+    const eoi = Buffer.from([0xff, 0xd9]);
+    return Buffer.concat([app0, sof, body, padding, eoi]);
   };
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    resetBrowserFallbackState();
     store = new Store(selection as any);
     store.createBot();
   });
@@ -170,7 +188,8 @@ describe("Browser Search Fallback & Screenshot Delivery", () => {
       verbatimQuery: "how many fours did unknown player xyz hit in tournament",
     });
 
-    expect(synthesized.answerText).toContain("could not definitively verify");
+    expect(synthesized.verified).toBe(false);
+    expect(synthesized.answerText).toContain("none of the results I could open contained a credible answer");
     expect(synthesized.uncertaintyNotice).toContain("attached screenshot shows the search results");
   });
 
@@ -215,8 +234,19 @@ describe("Browser Search Fallback & Screenshot Delivery", () => {
     expect(tinyCheck.valid).toBe(false);
 
     // Corrupted non-image bytes
-    const corruptCheck = verifyScreenshotBuffer(Buffer.alloc(800, 0x00));
+    const corruptCheck = verifyScreenshotBuffer(Buffer.alloc(4_000, 0x00));
     expect(corruptCheck.valid).toBe(false);
+
+    // Magic bytes with no decodable frame header (a fabricated "screenshot")
+    const headerOnly = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff, 0xe0]), Buffer.alloc(3_000, 0x41)]);
+    expect(verifyScreenshotBuffer(headerOnly).valid).toBe(false);
+
+    // Truncated capture: valid header, no EOI trailer
+    const truncated = createValidJpegBuffer().subarray(0, 3_000);
+    expect(verifyScreenshotBuffer(truncated).valid).toBe(false);
+
+    // A 1x1 image cannot show a page
+    expect(verifyScreenshotBuffer(createValidJpegBuffer("tiny", 1, 1)).valid).toBe(false);
 
     // Valid JPEG buffer
     const validCheck = verifyScreenshotBuffer(createValidJpegBuffer());
@@ -466,5 +496,114 @@ describe("Browser Search Fallback & Screenshot Delivery", () => {
     const extracted = extractStructuredContent(rawScorecard, { threadId: TEST_THREAD });
     expect(extracted.structured?.components[0]?.type).toBe("match_scorecard");
     expect(extracted.structured?.components[0]?.data.outcomeHeadline).toContain("Rajasthan Royals won");
+  });
+
+  // Test 17: Answer extraction is generic, not tied to any person or sport
+  it("Test 17: Answer extraction is generic across subjects and metrics", () => {
+    const astronomyQuery = "how many moons does jupiter have";
+    expect(queryMetric(astronomyQuery)).toBe("moons");
+
+    const pageText =
+      "Jupiter is the largest planet in the Solar System. Jupiter has 95 moons with confirmed orbits as of 2024, though the count changes as new observations are confirmed.";
+    const evidence = findMetricEvidence(pageText, astronomyQuery);
+    expect(evidence?.value).toBe("95");
+    expect(evidence?.context).toContain("Jupiter has 95 moons");
+
+    const synthesized = synthesizeVerifiedAnswer({
+      userQuestion: astronomyQuery,
+      sourceItem: {
+        title: "Jupiter - NASA Science",
+        url: "https://science.nasa.gov/jupiter/",
+        snippet: "Jupiter has 95 moons with confirmed orbits.",
+      },
+      pageText,
+      verbatimQuery: astronomyQuery,
+    });
+    expect(synthesized.verified).toBe(true);
+    expect(synthesized.answerText).toContain("95");
+    expect(synthesized.answerText).toContain("[Science]");
+
+    // The same machinery works for a non-numeric subject mismatch
+    const mismatch = synthesizeVerifiedAnswer({
+      userQuestion: "how many moons does venus have",
+      sourceItem: {
+        title: "Jupiter - NASA Science",
+        url: "https://science.nasa.gov/jupiter/",
+        snippet: "Jupiter has 95 moons.",
+      },
+      pageText,
+      verbatimQuery: "how many moons does venus have",
+    });
+    expect(mismatch.verified).toBe(false);
+    expect(mismatch.answerText).toContain("does not mention what was asked");
+
+    // No cricket- or person-specific branch exists in the module
+    const source = readFileSync(join(process.cwd(), "server/browser-search-fallback.ts"), "utf8");
+    expect(source.toLowerCase()).not.toContain("sanju");
+    expect(source.toLowerCase()).not.toContain("kerala");
+  });
+
+  // Test 18: The Android driver reports failures as HTTP 200 { ok:false }
+  it("Test 18: Driver error envelopes are surfaced instead of treated as success", async () => {
+    const mockFetch = vi.fn().mockImplementation(async (urlStr: string) => {
+      if (urlStr.includes("/open")) {
+        return { ok: true, json: async () => ({ ok: false, error: "no such browser session: omb-deadbeef" }) };
+      }
+      return { ok: true, json: async () => ({ ok: true, text: "" }) };
+    });
+
+    const res = await executeBrowserSearchFallback({
+      botId: TEST_BOT,
+      threadId: TEST_THREAD,
+      userQuestion: "how many moons does jupiter have",
+      driverPort: DUMMY_PORT,
+      driverToken: DUMMY_TOKEN,
+      fetchFn: mockFetch as any,
+    });
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("no such browser session");
+    expect(res.attachment).toBeUndefined();
+  });
+
+  // Test 19: A byte-identical frame for a new question is re-captured and disclosed
+  it("Test 19: A repeated frame for a different question is re-captured and disclosed", async () => {
+    const fixed = createValidJpegBuffer("identical-frame");
+    let captures = 0;
+    const mockFetch = vi.fn().mockImplementation(async (urlStr: string) => {
+      if (urlStr.includes("/screenshot")) {
+        captures += 1;
+        return {
+          ok: true,
+          arrayBuffer: async () => fixed.buffer.slice(fixed.byteOffset, fixed.byteOffset + fixed.byteLength),
+        };
+      }
+      return { ok: true, json: async () => ({ ok: true, text: "Sample" }) };
+    });
+
+    const first = await executeBrowserSearchFallback({
+      botId: TEST_BOT,
+      threadId: TEST_THREAD,
+      userQuestion: "first question",
+      driverPort: DUMMY_PORT,
+      driverToken: DUMMY_TOKEN,
+      fetchFn: mockFetch as any,
+    });
+    expect(first.success).toBe(true);
+    expect(first.staleFrame).toBeUndefined();
+
+    const second = await executeBrowserSearchFallback({
+      botId: TEST_BOT,
+      threadId: TEST_THREAD,
+      userQuestion: "second question",
+      driverPort: DUMMY_PORT,
+      driverToken: DUMMY_TOKEN,
+      fetchFn: mockFetch as any,
+    });
+
+    // Re-capture was attempted, and the disclosure is present rather than hidden.
+    expect(captures).toBe(3);
+    expect(second.staleFrame).toBe(true);
+    expect(second.uncertaintyNotice).toContain("byte-identical frame");
   });
 });

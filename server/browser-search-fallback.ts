@@ -1,3 +1,24 @@
+// Automatic browser search fallback with genuine screenshot delivery.
+//
+// When a question cannot be answered by the normal retrieval path, this module
+// drives the *existing* per-bot Android WebView browser session
+// (`android/.../host/BrowserDriverServer.kt`) over its loopback HTTP API:
+//
+//   POST /session/<omb-hash>/open       { url }        → navigate
+//   POST /session/<omb-hash>/navigate   { url }
+//   POST /session/<omb-hash>/text       { maxChars }
+//   POST /session/<omb-hash>/eval       { expression }
+//   POST /session/<omb-hash>/screenshot                → image/jpeg bytes
+//
+// Design rules this file holds itself to:
+//   • The first search query is the user's question, verbatim (only URL-encoded).
+//   • Nothing here knows about any particular person, team or sport: source
+//     selection and answer extraction are generic over the question's own words.
+//   • A screenshot is only "delivered" after real bytes are captured, validated
+//     and stored through `saveImage`; the caller owns message association.
+//   • The driver reports failures as HTTP 200 `{ ok: false, error }`, so every
+//     call must inspect the envelope instead of trusting the status code.
+//   • One bounded fallback per thread at a time; every request has a timeout.
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { saveImage } from "./attachments.ts";
@@ -16,14 +37,20 @@ export interface BrowserSearchFallbackOptions {
   botId: string;
   threadId: string;
   turnId?: string;
-  userQuestion: string; // The verbatim original question
+  /** The user's original question, exactly as typed. */
+  userQuestion: string;
   driverPort?: number;
   driverToken?: string;
+  /** Per-request timeout for the loopback driver calls. */
   timeoutMs?: number;
-  searchEngineBaseUrl?: string; // Default: https://html.duckduckgo.com/html/?q=
-  fetchFn?: typeof fetch; // For clean mocking in unit tests
-  skipAttachmentStore?: boolean; // For isolated unit testing
-  storeInstance?: Store; // The active Store instance
+  /** Default: https://html.duckduckgo.com/html/?q= */
+  searchEngineBaseUrl?: string;
+  /** Injected in tests; production uses global fetch. */
+  fetchFn?: typeof fetch;
+  /** Unit tests skip the attachment store; production never does. */
+  skipAttachmentStore?: boolean;
+  /** The active Store instance, for binding the attachment to the turn. */
+  storeInstance?: Store;
 }
 
 export interface BrowserSearchFallbackResult {
@@ -36,6 +63,10 @@ export interface BrowserSearchFallbackResult {
   uncertaintyNotice?: string;
   screenshotBuffer?: Buffer;
   screenshotHash?: string;
+  /** True when the captured page genuinely supports the extracted answer. */
+  verified: boolean;
+  capturedAt?: number;
+  browserSession?: string;
   attachment?: {
     kind: "image";
     path: string;
@@ -46,13 +77,20 @@ export interface BrowserSearchFallbackResult {
   error?: string;
   credibleSourceFound: boolean;
   deliveryFailed?: boolean;
+  /** Set when the driver returned a byte-identical frame for a new question. */
+  staleFrame?: boolean;
 }
 
-// In-flight fallback lock per thread to bound retries and prevent concurrent loops
+/** One in-flight fallback per thread: one failed lookup cannot fan out into
+ *  several competing browser tasks. */
 const activeFallbacksByThread = new Map<string, Promise<BrowserSearchFallbackResult>>();
 
-// Cache of recently captured screenshot hashes per thread to prevent stale reuse
-const recentScreenshotHashesByThread = new Map<string, Set<string>>();
+/** Recent captures per thread, used to notice a driver replaying a frame. */
+const recentCapturesByThread = new Map<string, Array<{ hash: string; query: string; at: number }>>();
+const STALE_CAPTURE_WINDOW_MS = 10 * 60 * 1_000;
+
+const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_SEARCH_BASE = "https://html.duckduckgo.com/html/?q=";
 
 /**
  * Checks whether the app-side WebView browser driver is configured in the environment.
@@ -75,76 +113,49 @@ export function extractDomain(urlStr: string): string {
   }
 }
 
+const CONVERSATIONAL_ONLY =
+  /^(?:hi|hey|hello|yo|good\s+(?:morning|evening|afternoon)|howdy|sup|thanks|thank\s+you|ok|okay|cool|great|nice|bye|goodbye|see\s+ya)\b/i;
+
 /**
- * Determines whether a user query requires browser search fallback.
- * Checks for factual, sports, match, player, or recent news requests where specialized
- * data retrieval is not present or failed, while excluding ordinary conversational chit-chat.
+ * Determines whether a user query is the kind of factual question that can
+ * require live web verification. Ordinary conversation never qualifies.
+ * This is a cheap pre-check only; the model's own refusal remains the other
+ * trigger (`isUnverifiedRefusalText`).
  */
 export function shouldTriggerBrowserFallback(
   userQuery: string,
-  options?: { hasSportsContext?: boolean; retrievalFailed?: boolean }
+  options?: { hasSportsContext?: boolean; retrievalFailed?: boolean },
 ): boolean {
-  const q = userQuery.trim().toLowerCase();
-  if (!q) return false;
+  const raw = userQuery.trim();
+  if (!raw) return false;
+  const q = raw.toLowerCase();
 
-  // Exclude pure conversational chit-chat and greetings
-  if (/^(?:hi|hey|hello|yo|good\s+(?:morning|evening|afternoon)|howdy|sup)\b/i.test(q) && q.length < 25) {
-    return false;
-  }
-  if (/^(?:thanks|thank\s+you|ok|okay|cool|great|nice|bye|goodbye|see\s+ya)\b/i.test(q) && q.length < 20) {
-    return false;
-  }
+  if (CONVERSATIONAL_ONLY.test(q) && q.length < 25) return false;
 
-  // Explicit failure or missing sports context
+  // A retrieval tool already failed: the fallback is warranted regardless of wording.
   if (options?.retrievalFailed) return true;
 
-  // Player statistics or sports match questions
-  const sportsStatKeywords = [
-    "fours",
-    "four",
-    "4s",
-    "sixes",
-    "six",
-    "6s",
-    "runs",
-    "wickets",
-    "goals",
-    "assists",
-    "strike rate",
-    "run rate",
-    "scorecard",
-    "last game",
-    "last match",
-    "last innings",
-    "yesterday's match",
-    "who won",
-    "score of",
-    "match result",
-    "points table",
-    "standings",
-    "medal tally",
-  ];
-  if (sportsStatKeywords.some((kw) => q.includes(kw))) {
-    if (!options?.hasSportsContext) return true;
-  }
-
-  // General factual questions requiring external verification
+  // "how many <metric>" / "who won" / "when did ... release" style questions.
   const factualQueryPatterns = [
-    /\bhow many (?:fours|sixes|goals|runs|wickets|points|medals|games|matches|people|times)\b/i,
-    /\bwho (?:won|scored|hit|took|coached|leads|founded|created|invented|directed|acted in)\b/i,
-    /\bwhat (?:was the score|is the latest|is the current|was the result|is the price|is the weather)\b/i,
-    /\bwhen (?:did|is|was|will)\b.*\b(?:release|born|happen|premiere|launch|play|die)\b/i,
-    /\b(?:box office|nobel prize|world cup|olympics|champions league|ipl 20\d\d|premier league)\b/i,
-    /\b(?:latest version|release notes|current status)\b/i,
+    /\bhow (?:many|much)\b/i,
+    /\bwho (?:won|scored|hit|took|coached|leads|founded|created|invented|directed|acted in|is|are)\b/i,
+    /\bwhat (?:was|is|were|are) (?:the )?(?:score|result|price|revenue|box office|population|release date|latest|current|weather|winner)\b/i,
+    /\bwhen (?:did|is|was|will)\b/i,
+    /\b(?:latest version|release notes|current status|scorecard|standings|points table|medal tally)\b/i,
     /\bsearch (?:for|the web|google|duckduckgo)\b/i,
   ];
+  if (factualQueryPatterns.some((pat) => pat.test(q))) return true;
 
-  return factualQueryPatterns.some((pat) => pat.test(q));
+  // A sports question whose live context the local card path could not supply.
+  if (options?.hasSportsContext === false && /\b(?:match|game|innings|score|scorecard|fours|sixes|wickets|goals)\b/i.test(q)) {
+    return true;
+  }
+  return false;
 }
 
 /**
- * Checks whether an assistant's proposed response is an unverified refusal stating
- * that it cannot access real-time info or tools are unavailable.
+ * Checks whether an assistant's proposed response is an unverified refusal to
+ * look something up even though browser research is available.
  */
 export function isUnverifiedRefusalText(text: string): boolean {
   if (!text) return false;
@@ -160,76 +171,95 @@ export function isUnverifiedRefusalText(text: string): boolean {
 }
 
 /**
- * Safely constructs the search URL from the verbatim user question.
- * Preserves the exact user question without rewriting or lossy mutation.
+ * Builds the search URL from the verbatim question. User text never reaches the
+ * URL unencoded.
  */
 export function buildVerbatimSearchUrl(userQuestion: string, baseUrl?: string): string {
   const verbatim = userQuestion.trim();
-  const base = baseUrl || "https://html.duckduckgo.com/html/?q=";
+  const base = baseUrl || DEFAULT_SEARCH_BASE;
   return `${base}${encodeURIComponent(verbatim)}`;
 }
 
+/** Words that carry no subject identity in a question. */
+const QUERY_STOP_WORDS = new Set([
+  "how", "many", "much", "did", "does", "do", "the", "for", "and", "what", "who", "whom",
+  "when", "where", "which", "why", "was", "were", "is", "are", "has", "have", "had",
+  "in", "on", "at", "of", "to", "a", "an", "his", "her", "their", "its", "he", "she",
+  "they", "it", "last", "latest", "recent", "current", "today", "yesterday", "tonight",
+  "game", "games", "match", "matches", "inning", "innings", "hit", "hits", "score",
+  "scores", "scored", "make", "made", "get", "got", "give", "tell", "me", "about",
+  "there", "this", "that", "these", "those", "from", "with", "by", "as", "be", "been",
+]);
+
+/** Lowercased content words of a question, longest first. */
+export function queryTerms(userQuery: string): string[] {
+  return userQuery
+    .toLowerCase()
+    .replace(/[^a-z0-9\s']/g, " ")
+    .split(/\s+/)
+    .filter((word) => word.length > 2 && !QUERY_STOP_WORDS.has(word));
+}
+
 /**
- * Parses search results from page text or HTML snippet.
+ * The entity-ish words of a question (a name, team, place, product), used to
+ * confirm that a source is about what was actually asked. Generic by design:
+ * it derives everything from the question, and knows no particular subject.
+ */
+export function querySubjectTerms(userQuery: string, metric?: string): string[] {
+  const metricStem = metric ? metric.toLowerCase().replace(/(?:es|s)$/, "") : "";
+  return queryTerms(userQuery).filter(
+    (word) => !QUERY_STOP_WORDS.has(word) && (!metricStem || !word.startsWith(metricStem)),
+  );
+}
+
+/** The counted noun in a "how many X" question, if there is one. */
+export function queryMetric(userQuery: string): string | undefined {
+  const match = userQuery.match(/\bhow (?:many|much)\s+([a-z][a-z'-]+(?:\s+[a-z][a-z'-]+)?)/i);
+  if (!match) return undefined;
+  const phrase = match[1]!.trim().toLowerCase();
+  // Drop trailing glue that would make the metric unusable ("fours did", "runs in").
+  const [first] = phrase.split(/\s+/);
+  return first && !QUERY_STOP_WORDS.has(first) ? first : undefined;
+}
+
+/**
+ * Parses search results out of the rendered text of a results page.
+ * The WebView text view has no link structure, so result blocks are recovered
+ * from title / URL / snippet line shapes.
  */
 export function parseSearchResults(pageText: string): BrowserSearchResultItem[] {
   const results: BrowserSearchResultItem[] = [];
   if (!pageText) return results;
 
-  // Split on paragraph or lines
   const lines = pageText.split("\n").map((l) => l.trim()).filter(Boolean);
+  const isUrlLine = /^(?:https?:\/\/|www\.|\w[\w-]*\.(?:com|org|net|in|tv|co|gov|edu|ai|io|uk|au|info|news))\b\S*/i;
+  const isChrome = /^(?:DuckDuckGo|All Regions|Any Time|Settings|Privacy|Safe search|Images|Videos|News)/i;
 
   let currentTitle = "";
-  let currentUrl = "";
-  let currentSnippet = "";
-
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-
-    // Check if line looks like a title followed by URL or domain
-    const isUrlLine = /^(?:https?:\/\/|\w+\.(?:com|org|net|in|tv|co|gov|edu|ai|io))\S+/i.test(line);
-
-    if (isUrlLine) {
-      currentUrl = line.startsWith("http") ? line : `https://${line}`;
-      // Collect snippet from subsequent lines
+    if (isUrlLine.test(line)) {
+      const url = line.startsWith("http") ? line : `https://${line.replace(/^www\./, "")}`;
       const snippetParts: string[] = [];
       let j = i + 1;
       while (j < lines.length && j < i + 5) {
-        const nextLine = lines[j]!;
-        if (/^(?:https?:\/\/|\w+\.(?:com|org|net|in|tv|co|gov|edu|ai|io))\S+/i.test(nextLine)) {
-          break;
-        }
-        if (nextLine.length > 20 && !nextLine.startsWith("All Regions") && !nextLine.startsWith("Any Time")) {
-          snippetParts.push(nextLine);
-        }
+        const next = lines[j]!;
+        if (isUrlLine.test(next)) break;
+        if (next.length > 20 && !isChrome.test(next)) snippetParts.push(next);
         j++;
       }
-      currentSnippet = snippetParts.join(" ");
-
-      if (currentTitle && currentUrl) {
-        results.push({
-          title: currentTitle,
-          url: currentUrl,
-          snippet: currentSnippet,
-          domain: extractDomain(currentUrl),
-        });
+      if (currentTitle && url) {
+        results.push({ title: currentTitle, url, snippet: snippetParts.join(" "), domain: extractDomain(url) });
       }
       currentTitle = "";
-      currentUrl = "";
-      currentSnippet = "";
       i = j - 1;
-    } else if (line.length > 15 && line.length < 150 && !line.includes("DuckDuckGo") && !line.includes("All Regions")) {
+    } else if (line.length > 15 && line.length < 200 && !isChrome.test(line)) {
       currentTitle = line;
     }
   }
 
-  // Deduplicate by URL
   const seen = new Set<string>();
-  return results.filter((r) => {
-    if (seen.has(r.url)) return false;
-    seen.add(r.url);
-    return true;
-  });
+  return results.filter((r) => (seen.has(r.url) ? false : (seen.add(r.url), true)));
 }
 
 const TRUSTED_DOMAINS = [
@@ -237,50 +267,48 @@ const TRUSTED_DOMAINS = [
   "icc-cricket.com",
   "espncricinfo.com",
   "cricinfo.com",
-  "rajasthanroyals.com",
-  "sportstar.thehindu.com",
-  "thehindu.com",
-  "statz.ai",
-  "cricstats.in",
-  "wionews.com",
+  "iplt20.com",
   "premierleague.com",
   "fbref.com",
   "uefa.com",
   "fifa.com",
   "olympics.com",
+  "nobelprize.org",
   "wikipedia.org",
   "reuters.com",
   "apnews.com",
   "bbc.com",
+  "bbc.co.uk",
+  "thehindu.com",
+  "espn.com",
+  "boxofficemojo.com",
+  "the-numbers.com",
 ];
 
 /**
- * Scores and selects the most relevant credible source from candidate results.
- * Prefers official league/tournament scorecards, recognized sports stats databases,
- * and primary documentation over generic aggregators.
+ * Scores candidates and returns the most relevant credible one. Relevance comes
+ * from the question's own words; credibility comes from domain authority. The
+ * first result is never accepted by default.
  */
 export function selectCredibleSource(
   candidates: BrowserSearchResultItem[],
-  userQuery: string
+  userQuery: string,
 ): BrowserSearchResultItem | null {
   if (!candidates || candidates.length === 0) return null;
 
-  const queryTerms = userQuery
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter((w) => w.length > 2 && !["how", "many", "did", "the", "for", "and", "what", "who"].includes(w));
+  const terms = queryTerms(userQuery);
+  const metric = queryMetric(userQuery);
+  const subjects = querySubjectTerms(userQuery, metric);
 
-  let bestCandidate: BrowserSearchResultItem | null = null;
-  let highestScore = -1;
+  let best: BrowserSearchResultItem | null = null;
+  let highest = -1;
 
   for (const candidate of candidates) {
     let score = 0;
     const text = `${candidate.title} ${candidate.snippet} ${candidate.url}`.toLowerCase();
     const domain = candidate.domain || extractDomain(candidate.url);
 
-    // 1. Domain authority check
-    if (TRUSTED_DOMAINS.some((td) => domain.includes(td))) {
+    if (TRUSTED_DOMAINS.some((td) => domain === td || domain.endsWith(`.${td}`))) {
       score += 30;
       candidate.isCredible = true;
     } else if (domain.endsWith(".gov") || domain.endsWith(".edu") || domain.endsWith(".org")) {
@@ -290,169 +318,300 @@ export function selectCredibleSource(
       score += 5;
     }
 
-    // 2. Query terms relevance
-    for (const term of queryTerms) {
-      if (text.includes(term)) {
-        score += 10;
-      }
+    for (const term of terms) if (text.includes(term)) score += 10;
+    for (const subject of subjects) if (text.includes(subject)) score += 20;
+
+    // Evidence shape: a number attached to the asked metric ("14 fours").
+    if (metric) {
+      const stem = metric.replace(/(?:es|s)$/, "");
+      const evidence = new RegExp(`\\b\\d[\\d,]*\\s+${escapeRegExp(stem)}s?\\b`, "i");
+      if (evidence.test(text)) score += 25;
+      else if (text.includes(stem)) score += 8;
     }
-
-    // 3. Metric presence (e.g. "fours", "14 fours", "7 fours", "century", "runs")
-    if (/\b(?:fours?|4s?)\b/i.test(text)) score += 15;
-    if (/\b\d+\s+fours?\b/i.test(text)) score += 25;
-    if (/\b(?:runs?|wickets?|sixes?|goals?)\b/i.test(text)) score += 10;
-
-    // 4. Player/Subject match
-    if (text.includes("sanju") || text.includes("samson")) score += 20;
 
     candidate.score = score;
-    if (score > highestScore) {
-      highestScore = score;
-      bestCandidate = candidate;
+    if (score > highest) {
+      highest = score;
+      best = candidate;
     }
   }
 
-  return bestCandidate;
+  // A candidate backed by nothing but a bare domain match is not a source.
+  return best && highest > 0 ? best : null;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// ── screenshot validation ───────────────────────────────────────────────────
+
+/** Structural dimensions of a JPEG (first SOFn frame header). */
+function jpegDimensions(buf: Buffer): { width: number; height: number } | null {
+  let offset = 2;
+  while (offset + 9 < buf.length) {
+    if (buf[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buf[offset + 1]!;
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      const height = buf.readUInt16BE(offset + 5);
+      const width = buf.readUInt16BE(offset + 7);
+      return width && height ? { width, height } : null;
+    }
+    if (marker === 0xd8 || marker === 0xd9 || (marker >= 0xd0 && marker <= 0xd7)) {
+      offset += 2;
+      continue;
+    }
+    const length = buf.readUInt16BE(offset + 2);
+    if (length < 2) return null;
+    offset += 2 + length;
+  }
+  return null;
+}
+
+/** Structural dimensions of a PNG (IHDR) plus its terminating IEND chunk. */
+function pngDimensions(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 33 || buf.subarray(12, 16).toString("latin1") !== "IHDR") return null;
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  return width && height ? { width, height } : null;
+}
+
+export const SCREENSHOT_MIN_BYTES = 2_000;
+export const SCREENSHOT_MAX_BYTES = 24 * 1024 * 1024;
+
 /**
- * Validates whether the returned screenshot buffer is non-empty, decodable, and valid.
+ * Validates that captured bytes are a real, structurally complete screenshot:
+ * magic bytes, parsed frame dimensions, a sane size, and a proper trailer (EOI
+ * for JPEG, IEND for PNG). An empty, truncated or non-image body is rejected
+ * rather than stored as a screenshot.
  */
 export function verifyScreenshotBuffer(buf: Buffer): { valid: boolean; reason?: string; mime: string } {
-  if (!buf || !Buffer.isBuffer(buf)) {
-    return { valid: false, reason: "Buffer is empty or null", mime: "" };
+  if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
+    return { valid: false, reason: "screenshot body is empty", mime: "" };
   }
-  if (buf.byteLength < 500) {
-    return { valid: false, reason: `Screenshot byteLength ${buf.byteLength} is too small (<500 bytes)`, mime: "" };
+  if (buf.length < SCREENSHOT_MIN_BYTES) {
+    return { valid: false, reason: `screenshot is ${buf.length} bytes, below the ${SCREENSHOT_MIN_BYTES}-byte floor`, mime: "" };
   }
-
-  // Check magic bytes
-  const isJpeg = buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
-  const isPng = buf.length >= 4 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47;
-
-  if (!isJpeg && !isPng) {
-    return { valid: false, reason: "Invalid image magic bytes (not JPEG or PNG)", mime: "" };
+  if (buf.length > SCREENSHOT_MAX_BYTES) {
+    return { valid: false, reason: `screenshot is ${buf.length} bytes, above the ${SCREENSHOT_MAX_BYTES}-byte ceiling`, mime: "" };
   }
 
-  return { valid: true, mime: isJpeg ? "image/jpeg" : "image/png" };
+  const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
+  const isPng = buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+
+  if (isJpeg) {
+    const dims = jpegDimensions(buf);
+    if (!dims) return { valid: false, reason: "JPEG has no decodable frame header", mime: "" };
+    if (buf[buf.length - 2] !== 0xff || buf[buf.length - 1] !== 0xd9) {
+      return { valid: false, reason: "JPEG is truncated (missing EOI marker)", mime: "" };
+    }
+    if (dims.width < 120 || dims.height < 120) {
+      return { valid: false, reason: `screenshot is too small to show a page (${dims.width}x${dims.height})`, mime: "" };
+    }
+    return { valid: true, mime: "image/jpeg" };
+  }
+
+  if (isPng) {
+    const dims = pngDimensions(buf);
+    if (!dims) return { valid: false, reason: "PNG has no decodable IHDR frame header", mime: "" };
+    if (buf.subarray(buf.length - 12, buf.length - 8).toString("latin1") !== "IEND") {
+      return { valid: false, reason: "PNG is truncated (missing IEND chunk)", mime: "" };
+    }
+    if (dims.width < 120 || dims.height < 120) {
+      return { valid: false, reason: `screenshot is too small to show a page (${dims.width}x${dims.height})`, mime: "" };
+    }
+    return { valid: true, mime: "image/png" };
+  }
+
+  return { valid: false, reason: "body is not a JPEG or PNG image", mime: "" };
 }
 
-/**
- * Generates session identity for a bot.
- */
-function sessionNameForBot(botId: string): string {
+// ── answer synthesis ────────────────────────────────────────────────────────
+
+/** Stable per-bot browser profile name — same derivation as BrowserDriverServer. */
+export function sessionNameForBot(botId: string): string {
   const digest = createHash("sha256").update(botId).digest("hex");
   return `omb-${digest.slice(0, 32)}`;
 }
 
-/**
- * Extracts a clean display label for a site from its title and URL.
- */
+/** A short human label for a source, derived from its title and URL. */
 export function cleanSiteName(title: string, url?: string): string {
-  if (url) {
-    const domain = extractDomain(url);
-    if (domain.includes("sportstar")) return "Sportstar";
-    if (domain.includes("espncricinfo") || domain.includes("cricinfo")) return "ESPNcricinfo";
-    if (domain.includes("bcci")) return "BCCI Official";
-    if (domain.includes("rajasthanroyals")) return "Rajasthan Royals";
-    if (domain.includes("premierleague")) return "Premier League";
+  const domain = url ? extractDomain(url) : "";
+  if (domain) {
     if (domain.includes("wikipedia")) return "Wikipedia";
-    if (domain.includes("statz")) return "Statz.ai";
-    if (domain.includes("cricstats")) return "Cricstats";
+    // "sportstar.thehindu.com" → "Sportstar"
+    const label = domain.split(".")[0]!.replace(/^www$/, "");
+    if (label && label.length > 2) return label.charAt(0).toUpperCase() + label.slice(1);
   }
   if (!title) return "Official Source";
-  const parts = title.split(/\s*[-–|]\s*/);
-  if (parts.length > 1 && parts[parts.length - 1]!.length < 30) {
-    return parts[parts.length - 1]!;
-  }
-  return parts[0]!.slice(0, 40);
+  const parts = title.split(/\s*[-–|:]\s*/);
+  return (parts[0] || title).slice(0, 60);
 }
 
 /**
- * Formulates the verified answer text based on extracted scorecard/article evidence.
+ * Generic evidence lookup: does `pageText` state a number for the metric the
+ * question asked about, in a passage that also mentions the question's subject?
+ * No subject is hardcoded; both come from the question.
+ */
+export function findMetricEvidence(
+  pageText: string,
+  userQuery: string,
+): { metric: string; value: string; context: string } | null {
+  const metric = queryMetric(userQuery);
+  if (!metric) return null;
+  const stem = metric.replace(/(?:es|s)$/, "");
+  if (stem.length < 3) return null;
+  const pattern = new RegExp(`\\b(\\d[\\d,]*)\\s+${escapeRegExp(stem)}(?:es|s)?\\b`, "i");
+  const match = pattern.exec(pageText);
+  if (!match) return null;
+  const start = Math.max(0, match.index - 220);
+  const end = Math.min(pageText.length, match.index + match[0].length + 120);
+  const context = pageText.slice(start, end).replace(/\s+/g, " ").trim();
+  return { metric: stem, value: match[1]!, context };
+}
+
+/**
+ * Produces the assistant's factual line. It only asserts a value that the
+ * captured page actually states; otherwise it says so plainly.
  */
 export function synthesizeVerifiedAnswer(options: {
   userQuestion: string;
   sourceItem: BrowserSearchResultItem | null;
   pageText: string;
   verbatimQuery: string;
-}): { answerText: string; uncertaintyNotice?: string } {
-  const { userQuestion, sourceItem, pageText } = options;
-  const q = userQuestion.toLowerCase();
+}): { answerText: string; uncertaintyNotice?: string; verified: boolean } {
+  const { userQuestion, sourceItem, pageText, verbatimQuery } = options;
 
-  // Primary cricket scenario: Sanju Samson fours
-  if (q.includes("sanju") && (q.includes("four") || q.includes("4s"))) {
-    let sourceLink = "";
-    if (sourceItem?.url) {
-      const siteName = cleanSiteName(sourceItem.title, sourceItem.url);
-      sourceLink = ` [${siteName}](${sourceItem.url})`;
-    }
-
-    // Check if Kerala Cricket League match (14 fours, 121 off 51 balls)
-    const hasKeralaT20 = /kerala\s+(?:cricket\s+)?league|kochi\s+blue\s+tigers|14\s+fours/i.test(pageText);
-    // Check if South Africa T20I (7 fours, 107 off 50 balls)
-    const hasSaT20I = /south\s+africa|107\s+off\s+50|7\s+fours/i.test(pageText);
-
-    if (hasKeralaT20 && hasSaT20I) {
-      return {
-        answerText: `In Sanju Samson's recent domestic T20 match for Kochi Blue Tigers in the Kerala Cricket League, he hit 14 fours (and 7 sixes) scoring 121 off 51 balls. In his previous international T20I match for India against South Africa, he hit 7 fours (and 10 sixes) scoring 107 off 50 balls.${sourceLink}`,
-        uncertaintyNotice: "Both domestic and international innings details are shown in the attached scorecard screenshot.",
-      };
-    } else if (hasKeralaT20) {
-      return {
-        answerText: `In Sanju Samson's recent T20 match for Kochi Blue Tigers against Aries Kollam Sailors in the Kerala Cricket League, he hit 14 fours and 5 sixes during his 42-ball century (121 off 51 balls).${sourceLink}`,
-        uncertaintyNotice: "Scorecard verified from the attached browser capture.",
-      };
-    } else if (hasSaT20I) {
-      return {
-        answerText: `In Sanju Samson's last T20I match against South Africa, he hit 7 fours and 10 sixes, scoring 107 off 50 balls as Player of the Match.${sourceLink}`,
-        uncertaintyNotice: "Official match scorecard captured in the attached screenshot.",
-      };
-    } else if (sourceItem?.snippet) {
-      // Extract fours from snippet
-      const foursMatch = sourceItem.snippet.match(/(\d+)\s+fours/i);
-      const foursCount = foursMatch ? foursMatch[1] : undefined;
-      if (foursCount) {
-        return {
-          answerText: `According to recent match scorecards, Sanju Samson hit ${foursCount} fours in his recent innings.${sourceLink}`,
-          uncertaintyNotice: "Details verified from the attached source screenshot.",
-        };
-      }
-    }
-  }
-
-  // Generic answer synthesis from source title and snippet
-  if (sourceItem) {
-    const siteName = cleanSiteName(sourceItem.title, sourceItem.url);
-    const link = sourceItem.url ? ` [${siteName}](${sourceItem.url})` : "";
+  if (!sourceItem) {
     return {
-      answerText: `Based on verified results for "${options.verbatimQuery}", ${sourceItem.snippet || sourceItem.title}.${link}`,
-      uncertaintyNotice: "Verified via browser research with attached page screenshot.",
+      answerText: `I searched the web for "${verbatimQuery}", but none of the results I could open contained a credible answer to that question.`,
+      uncertaintyNotice: "The attached screenshot shows the search results page; it is not proof of any specific fact.",
+      verified: false,
     };
   }
 
+  const siteName = cleanSiteName(sourceItem.title, sourceItem.url);
+  const link = sourceItem.url ? ` [${siteName}](${sourceItem.url})` : "";
+  const haystack = `${sourceItem.title}\n${sourceItem.snippet}\n${pageText}`;
+  const subjects = querySubjectTerms(userQuestion, queryMetric(userQuestion));
+  const subjectMentioned = subjects.length === 0 || subjects.some((s) => haystack.toLowerCase().includes(s));
+
+  const evidence = findMetricEvidence(haystack, userQuestion);
+  if (evidence && subjectMentioned) {
+    const context = evidence.context.length > 320 ? `${evidence.context.slice(0, 317)}…` : evidence.context;
+    return {
+      answerText: `According to ${siteName}: ${context}${/[.!?]$/.test(context) ? "" : "."}${link}`,
+      uncertaintyNotice: `Read from the captured ${siteName} page in the attached screenshot.`,
+      verified: true,
+    };
+  }
+
+  if (!subjectMentioned) {
+    return {
+      answerText: `I opened the most relevant result I found (${siteName}), but that page does not mention what was asked in "${verbatimQuery}", so I cannot confirm an answer from it.${link}`,
+      uncertaintyNotice: `The attached screenshot shows the ${siteName} page I inspected; it does not establish the answer.`,
+      verified: false,
+    };
+  }
+
+  const excerpt = (sourceItem.snippet || sourceItem.title || "").slice(0, 300);
   return {
-    answerText: `I searched for "${options.verbatimQuery}" on the web, but the available sources could not definitively verify the exact information.`,
-    uncertaintyNotice: "The attached screenshot shows the search results page.",
+    answerText: excerpt
+      ? `The closest source I could open (${siteName}) reports: "${excerpt}"${link}`
+      : `I opened ${siteName} for "${verbatimQuery}", but the page did not state a value I can quote.${link}`,
+    uncertaintyNotice: `Taken from the search result and the captured ${siteName} page; I could not confirm a precise figure from the page text itself.`,
+    verified: false,
   };
 }
 
+// ── driver plumbing ─────────────────────────────────────────────────────────
+
+interface DriverCall {
+  port: number;
+  token: string;
+  session: string;
+  fetchFn: typeof fetch;
+  timeoutMs: number;
+}
+
+/** Calls a JSON driver route and refuses `{ ok: false }` envelopes, which the
+ *  Android driver returns with HTTP 200. */
+async function driverJson(call: DriverCall, action: string, body?: unknown): Promise<Record<string, unknown>> {
+  const res = await call.fetchFn(`http://127.0.0.1:${call.port}/session/${call.session}/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${call.token}` },
+    body: JSON.stringify(body ?? {}),
+    signal: AbortSignal.timeout(call.timeoutMs),
+  });
+  if (!res.ok) throw new Error(`browser driver ${action} failed (HTTP ${res.status})`);
+  const payload = (await res.json()) as Record<string, unknown>;
+  if (payload && payload.ok === false) {
+    throw new Error(`browser driver ${action} failed: ${String(payload.error ?? "unknown error")}`);
+  }
+  return payload;
+}
+
+/** Captures screenshot bytes, surfacing a JSON error body as an error rather
+ *  than storing it as an image. */
+async function driverScreenshot(call: DriverCall): Promise<Buffer> {
+  const res = await call.fetchFn(`http://127.0.0.1:${call.port}/session/${call.session}/screenshot`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${call.token}` },
+    signal: AbortSignal.timeout(call.timeoutMs),
+  });
+  if (!res.ok) throw new Error(`browser driver screenshot failed (HTTP ${res.status})`);
+  const bytes = Buffer.from(await res.arrayBuffer());
+  if (bytes.length && bytes[0] !== 0xff && bytes[0] !== 0x89) {
+    // The driver answers failures with a JSON envelope and status 200.
+    try {
+      const parsed = JSON.parse(bytes.toString("utf8")) as { ok?: boolean; error?: string };
+      if (parsed?.ok === false) throw new Error(`browser driver screenshot failed: ${String(parsed.error ?? "unknown error")}`);
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith("browser driver screenshot failed")) throw err;
+    }
+  }
+  return bytes;
+}
+
+/** Records a capture and reports whether it replays a frame from another question. */
+function recordCapture(threadId: string, hash: string, query: string): { stale: boolean } {
+  const now = Date.now();
+  const recent = (recentCapturesByThread.get(threadId) ?? []).filter((c) => now - c.at < STALE_CAPTURE_WINDOW_MS);
+  const stale = recent.some((c) => c.hash === hash && c.query !== query);
+  recent.push({ hash, query, at: now });
+  recentCapturesByThread.set(threadId, recent.slice(-8));
+  return { stale };
+}
+
+/** Test seam: forget capture history for a thread. */
+export function resetBrowserFallbackState(threadId?: string): void {
+  if (threadId) {
+    recentCapturesByThread.delete(threadId);
+    activeFallbacksByThread.delete(threadId);
+  } else {
+    recentCapturesByThread.clear();
+    activeFallbacksByThread.clear();
+  }
+}
+
 /**
- * Executes the complete Automatic Browser Search Fallback with Screenshot Delivery.
+ * Runs the complete fallback: verbatim search, source selection, page
+ * inspection, screenshot capture, validation, storage.
  */
 export async function executeBrowserSearchFallback(
-  options: BrowserSearchFallbackOptions
+  options: BrowserSearchFallbackOptions,
 ): Promise<BrowserSearchFallbackResult> {
   const { botId, threadId, turnId, userQuestion } = options;
   const verbatimQuery = userQuestion.trim();
 
-  // Bounded retry and concurrent execution guard
-  const existingActive = activeFallbacksByThread.get(threadId);
-  if (existingActive) {
-    return existingActive;
-  }
+  // Bounded concurrency: a second request for the same thread rides the first.
+  const inFlight = activeFallbacksByThread.get(threadId);
+  if (inFlight) return inFlight;
 
-  const fallbackPromise = (async (): Promise<BrowserSearchFallbackResult> => {
+  const run = (async (): Promise<BrowserSearchFallbackResult> => {
     const port = options.driverPort ?? Number(process.env.AB_DRIVER_PORT ?? "0");
     const token = options.driverToken ?? (process.env.AB_DRIVER_TOKEN ?? "");
 
@@ -462,210 +621,180 @@ export async function executeBrowserSearchFallback(
         verbatimQuery,
         searchUrl: "",
         credibleSourceFound: false,
-        error: "Browser driver is offline or unavailable on this device (AB_DRIVER_PORT/AB_DRIVER_TOKEN not set)",
+        verified: false,
+        error: "Browser driver is offline on this device (AB_DRIVER_PORT/AB_DRIVER_TOKEN not set)",
       };
     }
 
-    const session = sessionNameForBot(botId);
-    const fetcher = options.fetchFn ?? fetch;
+    const call: DriverCall = {
+      port,
+      token,
+      session: sessionNameForBot(botId),
+      fetchFn: options.fetchFn ?? fetch,
+      timeoutMs: Math.max(1_000, options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
+    };
     const searchUrl = buildVerbatimSearchUrl(verbatimQuery, options.searchEngineBaseUrl);
 
     try {
-      // Step 1: Open search page in the real browser with verbatim query
-      const openRes = await fetcher(`http://127.0.0.1:${port}/session/${session}/open`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ url: searchUrl }),
-      });
+      // 1. Open the search page with the question exactly as asked.
+      await driverJson(call, "open", { url: searchUrl });
 
-      if (!openRes.ok) {
-        throw new Error(`Browser failed to open search URL (HTTP ${openRes.status})`);
-      }
+      // 2. Read the rendered results and pick a source on relevance + authority.
+      const searchPage = await driverJson(call, "text", { maxChars: 30_000 });
+      const searchText = typeof searchPage.text === "string" ? searchPage.text : "";
+      const candidates = parseSearchResults(searchText);
+      const best = selectCredibleSource(candidates, verbatimQuery);
 
-      // Step 2: Extract page text and inspect candidate search results
-      const textRes = await fetcher(`http://127.0.0.1:${port}/session/${session}/text`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ maxChars: 30000 }),
-      });
+      let sourceUrl = searchUrl;
+      let sourceTitle = "Search results";
+      let pageText = searchText;
+      let pageOpened = false;
 
-      let pageText = "";
-      if (textRes.ok) {
-        const textData = (await textRes.json()) as { text?: string };
-        pageText = textData.text || "";
-      }
-
-      const candidates = parseSearchResults(pageText);
-      const bestCandidate = selectCredibleSource(candidates, verbatimQuery);
-
-      let finalPageText = pageText;
-      let finalTargetUrl = searchUrl;
-      let finalTargetTitle = "Search Results";
-
-      // Step 3: Open the most relevant source page when appropriate
-      if (bestCandidate && bestCandidate.url) {
-        finalTargetUrl = bestCandidate.url;
-        finalTargetTitle = bestCandidate.title;
-
+      // 3. Inspect the chosen source rather than trusting its snippet.
+      if (best) {
+        sourceUrl = best.url;
+        sourceTitle = best.title;
         try {
-          const navRes = await fetcher(`http://127.0.0.1:${port}/session/${session}/navigate`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-            body: JSON.stringify({ url: bestCandidate.url }),
-          });
-
-          if (navRes.ok) {
-            // Get source page text
-            const sourceTextRes = await fetcher(`http://127.0.0.1:${port}/session/${session}/text`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-              body: JSON.stringify({ maxChars: 20000 }),
-            });
-            if (sourceTextRes.ok) {
-              const srcTextData = (await sourceTextRes.json()) as { text?: string };
-              if (srcTextData.text && srcTextData.text.length > 100) {
-                finalPageText = srcTextData.text;
-              }
-            }
-
-            // Scroll relevant element into view if keyword exists
-            await fetcher(`http://127.0.0.1:${port}/session/${session}/eval`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-              body: JSON.stringify({
-                expression: `
-                  (function() {
-                    const el = Array.from(document.querySelectorAll('tr, p, div, td, h1, h2, h3')).find(e => /fours|samson|107|14|sanju/i.test(e.textContent || ''));
-                    if (el) el.scrollIntoView({ block: 'center' });
-                    return true;
-                  })()
-                `,
-              }),
-            }).catch(() => {});
+          const opened = await driverJson(call, "navigate", { url: best.url });
+          pageOpened = true;
+          const settled = opened.settled !== false;
+          if (!settled) {
+            // Give a slow page one bounded chance to finish before reading it.
+            await new Promise((resolve) => setTimeout(resolve, 1_500));
           }
-        } catch {
-          // If navigation to specific page fails, stay on search results page
-          finalTargetUrl = searchUrl;
+          const sourcePage = await driverJson(call, "text", { maxChars: 20_000 });
+          const sourceText = typeof sourcePage.text === "string" ? sourcePage.text : "";
+          if (sourceText.length > 100) pageText = sourceText;
+
+          // Bring the relevant passage into view so the capture shows it.
+          const subjects = querySubjectTerms(verbatimQuery, queryMetric(verbatimQuery));
+          const needles = [queryMetric(verbatimQuery), ...subjects].filter(Boolean).slice(0, 4);
+          if (needles.length) {
+            const expression = `(function(){try{var n=${JSON.stringify(needles)};var el=Array.prototype.slice.call(document.querySelectorAll('tr,p,li,td,div,h1,h2,h3')).filter(function(e){var t=(e.textContent||'');return n.some(function(k){return k&&t.toLowerCase().indexOf(String(k).toLowerCase())>=0;});})[0];if(el){el.scrollIntoView({block:'center'});return true;}return false;}catch(e){return false;}})()`;
+            await driverJson(call, "eval", { expression }).catch(() => undefined);
+          }
+        } catch (navError) {
+          // Stay on the results page; the answer is then reported as unverified.
+          pageOpened = false;
+          sourceUrl = searchUrl;
+          sourceTitle = "Search results";
+          pageText = searchText;
+          if (process.env.OMB_BROWSER_FALLBACK_DEBUG === "1") {
+            console.warn(`[BrowserFallback] source navigation failed: ${String(navError)}`);
+          }
         }
       }
 
-      // Step 4: Capture real screenshot of the page
-      const shotRes = await fetcher(`http://127.0.0.1:${port}/session/${session}/screenshot`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      if (!shotRes.ok) {
-        throw new Error(`Browser driver failed screenshot capture (HTTP ${shotRes.status})`);
-      }
-
-      const shotArrayBuf = await shotRes.arrayBuffer();
-      const shotBuf = Buffer.from(shotArrayBuf);
-
-      // Validate screenshot
-      const verification = verifyScreenshotBuffer(shotBuf);
+      // 4. Capture the live page.
+      let shotBuf = await driverScreenshot(call);
+      let verification = verifyScreenshotBuffer(shotBuf);
       if (!verification.valid) {
-        throw new Error(`Screenshot validation failed: ${verification.reason}`);
+        throw new Error(`screenshot rejected: ${verification.reason}`);
+      }
+      let screenshotHash = createHash("sha256").update(shotBuf).digest("hex");
+      let { stale } = recordCapture(threadId, screenshotHash, verbatimQuery);
+
+      // A byte-identical frame for a different question means the driver may
+      // have replayed a stale draw. Re-open the page once and capture again.
+      if (stale) {
+        await driverJson(call, "navigate", { url: sourceUrl }).catch(() => undefined);
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        shotBuf = await driverScreenshot(call);
+        verification = verifyScreenshotBuffer(shotBuf);
+        if (!verification.valid) throw new Error(`screenshot rejected on re-capture: ${verification.reason}`);
+        screenshotHash = createHash("sha256").update(shotBuf).digest("hex");
+        stale = recordCapture(threadId, screenshotHash, verbatimQuery).stale;
       }
 
-      const screenshotHash = createHash("sha256").update(shotBuf).digest("hex");
+      const capturedAt = Date.now();
+      const { answerText, uncertaintyNotice, verified } = synthesizeVerifiedAnswer({
+        userQuestion: verbatimQuery,
+        sourceItem: best,
+        pageText,
+        verbatimQuery,
+      });
+      const notice = stale
+        ? `${uncertaintyNotice ?? ""} The browser returned a byte-identical frame to an earlier question, so this capture may not reflect a fresh page render.`.trim()
+        : uncertaintyNotice;
 
-      // Check for accidental stale reuse
-      const recentHashes = recentScreenshotHashesByThread.get(threadId) ?? new Set<string>();
-      recentHashes.add(screenshotHash);
-      recentScreenshotHashesByThread.set(threadId, recentHashes);
-
-      // Step 5: Deliver screenshot as real chat attachment
-      let attachmentObj:
-        | {
-            kind: "image";
-            path: string;
-            mime: string;
-            name: string;
-            hash: string;
-          }
-        | undefined;
-
+      // 5. Store through the canonical attachment pipeline.
+      let attachment: BrowserSearchFallbackResult["attachment"];
       if (!options.skipAttachmentStore) {
         try {
           const saved = saveImage(shotBuf, verification.mime);
-          const fname = basename(saved.path);
-          const aPath = `/api/attachments/${fname}`;
-          attachmentObj = {
+          const name = basename(saved.path);
+          attachment = {
             kind: "image",
-            path: aPath,
+            path: `/api/attachments/${name}`,
             mime: verification.mime,
-            name: fname,
+            name,
             hash: screenshotHash,
           };
-
-          // Attach to target assistant message in store if turnId and storeInstance are provided
-          if (turnId && options.storeInstance) {
-            const target = [...options.storeInstance.messagesFor(threadId)].reverse().find(
-              (m) => m.role === "bot" && (m.turnId === turnId || !m.turnId)
-            );
-            if (target) {
-              const existingAttachments = target.attachments ?? [];
-              if (!existingAttachments.some((a) => a.path === aPath)) {
-                options.storeInstance.patchMessage(threadId, target.id, {
-                  attachments: [...existingAttachments, attachmentObj],
-                });
-              }
-            }
-          }
-        } catch (saveErr) {
-          console.warn("[BrowserFallback] Attachment delivery error:", saveErr);
+        } catch (saveError) {
           return {
             success: false,
             verbatimQuery,
             searchUrl,
-            sourceUrl: finalTargetUrl,
-            sourceTitle: finalTargetTitle,
+            sourceUrl,
+            sourceTitle,
             screenshotBuffer: shotBuf,
             screenshotHash,
-            credibleSourceFound: Boolean(bestCandidate),
+            verified,
+            capturedAt,
+            browserSession: call.session,
+            credibleSourceFound: Boolean(best),
             deliveryFailed: true,
-            error: "Screenshot was captured but attachment delivery failed to store.",
+            error: `screenshot captured but attachment storage failed: ${saveError instanceof Error ? saveError.message : String(saveError)}`,
           };
         }
-      }
 
-      // Step 6: Formulate direct answer with source link and disclosure
-      const { answerText, uncertaintyNotice } = synthesizeVerifiedAnswer({
-        userQuestion: verbatimQuery,
-        sourceItem: bestCandidate,
-        pageText: finalPageText,
-        verbatimQuery,
-      });
+        if (attachment && turnId && options.storeInstance) {
+          // Bind to this turn's assistant message when one already exists; the
+          // turn-settle path in server/index.ts binds it otherwise.
+          const target = [...options.storeInstance.messagesFor(threadId)]
+            .reverse()
+            .find((m) => m.role === "bot" && m.kind === "text" && m.turnId === turnId);
+          if (target && !(target.attachments ?? []).some((a) => a.path === attachment!.path)) {
+            options.storeInstance.patchMessage(threadId, target.id, {
+              attachments: [...(target.attachments ?? []), attachment],
+            });
+          }
+        }
+      }
 
       return {
         success: true,
         verbatimQuery,
         searchUrl,
-        sourceUrl: finalTargetUrl,
-        sourceTitle: finalTargetTitle,
+        sourceUrl,
+        sourceTitle,
         extractedAnswer: answerText,
-        uncertaintyNotice,
+        uncertaintyNotice: notice,
         screenshotBuffer: shotBuf,
         screenshotHash,
-        attachment: attachmentObj,
-        credibleSourceFound: Boolean(bestCandidate),
+        verified: verified && pageOpened,
+        capturedAt,
+        browserSession: call.session,
+        attachment,
+        credibleSourceFound: Boolean(best),
+        staleFrame: stale || undefined,
       };
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const message = err instanceof Error ? err.message : String(err);
       return {
         success: false,
         verbatimQuery,
         searchUrl,
         credibleSourceFound: false,
-        error: `Browser fallback failed: ${msg}`,
+        verified: false,
+        error: `browser research failed: ${message}`,
       };
     }
   })();
 
-  activeFallbacksByThread.set(threadId, fallbackPromise);
+  activeFallbacksByThread.set(threadId, run);
   try {
-    return await fallbackPromise;
+    return await run;
   } finally {
     activeFallbacksByThread.delete(threadId);
   }

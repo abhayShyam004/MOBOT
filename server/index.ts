@@ -7221,8 +7221,43 @@ async function startTurn(
 
   let capabilityGroundingContext = "";
   if (capabilityResolution.chosenModality === "web_search" || shouldTriggerBrowserFallback(userTurnText)) {
-    // Official Roadmap: Automatic Browser Search Fallback with Screenshot Delivery
-    if (capabilityResolution.primaryCapabilityId === "device.browser" || isBrowserFallbackAvailable()) {
+    // Normal retrieval always runs first: a working specialized search
+    // capability is preferred over driving the browser, and only an empty or
+    // failed result escalates to the browser fallback below.
+    let retrievalAnswered = false;
+    if (capabilityResolution.primaryCapabilityId !== "device.browser") {
+      const query = userTurnText
+        .replace(/^(?:what|tell me|who|find|lookup|show|search)\s+(?:were|was|is|are|for)?\s*/i, "")
+        .replace(/[?!.]+$/, "")
+        .trim() || userTurnText;
+      const searchToolId = defaultCapabilityRegistry.has("web.scraper")
+        ? "web.scraper"
+        : (capabilityResolution.primaryCapabilityId || "web.scraper");
+      try {
+        const searchRes = await defaultCapabilityRegistry.invoke(
+          defaultCapabilityRegistry.has(searchToolId) ? searchToolId : "web.scraper",
+          "search",
+          { query },
+        );
+        const data = (searchRes.success ? searchRes.data : null) as any;
+        const results = Array.isArray(data?.results) ? data.results : [];
+        if (results.length > 0) {
+          retrievalAnswered = true;
+          capabilityGroundingContext =
+            `\n\n[Verified Real-Time Search Results via ${searchToolId} for "${query}"]:\n` +
+            results
+              .slice(0, 5)
+              .map((r: any, idx: number) => `${idx + 1}. ${r.title} — ${r.url}\n   ${r.snippet || r.text || ""}`)
+              .join("\n");
+        }
+      } catch (err: any) {
+        capabilityGroundingContext =
+          `\n\n[Real-Time Search Notice]: Search error (${err?.message || String(err)}). Inform the user truthfully that live search could not be executed.`;
+      }
+    }
+
+    // Automatic Browser Search Fallback with Screenshot Delivery.
+    if (!retrievalAnswered && (capabilityResolution.primaryCapabilityId === "device.browser" || isBrowserFallbackAvailable())) {
       try {
         const fallbackRes = await executeBrowserSearchFallback({
           botId: bot.id,
@@ -7234,7 +7269,7 @@ async function startTurn(
 
         if (fallbackRes.success) {
           if (fallbackRes.attachment) {
-            attachArtifactsToTurn(threadId, undefined, [fallbackRes.attachment]);
+            // Scoped to this dispatch claim, never a thread-global staging key.
             attachArtifactsToTurn(threadId, dispatchClaimId, [fallbackRes.attachment]);
             const targetAttachment = fallbackRes.attachment;
             const originalSettler = directFollowupSettlers.get(dispatchClaimId);
@@ -7279,19 +7314,24 @@ async function startTurn(
                 extractedAnswer: fallbackRes.extractedAnswer,
                 screenshotHash: fallbackRes.screenshotHash,
                 attachmentPath: fallbackRes.attachment?.path,
+                verified: fallbackRes.verified,
+                capturedAt: fallbackRes.capturedAt,
+                browserSession: fallbackRes.browserSession,
               },
             },
             attemptedAt: Date.now(),
           });
 
           capabilityGroundingContext =
-            `\n\n[Verified Real-Time Browser Research via Android WebView]:\n` +
+            `\n\n[Real-Time Browser Research via Android WebView]:\n` +
             `Query (Verbatim): "${fallbackRes.verbatimQuery}"\n` +
-            `Source: ${fallbackRes.sourceTitle || "Verified Web Source"} (${fallbackRes.sourceUrl})\n` +
+            `Source: ${fallbackRes.sourceTitle || "Web Source"} (${fallbackRes.sourceUrl})\n` +
             `Verified Answer: ${fallbackRes.extractedAnswer}\n` +
             (fallbackRes.uncertaintyNotice ? `Uncertainty / Calibration: ${fallbackRes.uncertaintyNotice}\n` : "") +
             (fallbackRes.attachment ? `Screenshot Delivered: Attached as ${fallbackRes.attachment.path} (SHA-256: ${fallbackRes.attachment.hash})\n` : "") +
-            `Instructions: Present this verified factual information directly to the user in a concise response (<100 words), include the markdown link to ${fallbackRes.sourceUrl}, and cite the attached screenshot. Do NOT claim the information is unavailable.`;
+            (fallbackRes.verified
+              ? `Instructions: Present this verified information in a concise response, include the markdown link to ${fallbackRes.sourceUrl}, and refer to the attached screenshot as the source capture.`
+              : `Instructions: The page was captured but did NOT establish the exact answer. Say what the source does and does not show, link ${fallbackRes.sourceUrl}, refer to the attached screenshot, and do not assert an unverified figure.`);
         } else if (fallbackRes.deliveryFailed) {
           recordActionReceipt({
             operationId: dispatchClaimId,
@@ -7323,43 +7363,9 @@ async function startTurn(
         capabilityGroundingContext =
           `\n\n[Browser Research Error]: ${err?.message || String(err)}. Inform user truthfully.`;
       }
-    } else {
-      // Fallback to web.scraper if browser is not available
-      const query = userTurnText
-        .replace(/^(?:what|tell me|who|find|lookup|show|search)\s+(?:were|was|is|are|for)?\s*/i, "")
-        .replace(/[?!.]+$/, "")
-        .trim() || userTurnText;
-      const searchToolId = defaultCapabilityRegistry.has("web.scraper")
-        ? "web.scraper"
-        : (capabilityResolution.primaryCapabilityId || "web.scraper");
-      try {
-        const searchRes = await defaultCapabilityRegistry.invoke(
-          defaultCapabilityRegistry.has(searchToolId) ? searchToolId : "web.scraper",
-          "search",
-          { query }
-        );
-        if (searchRes.success && searchRes.data) {
-          const data = searchRes.data as any;
-          const results = Array.isArray(data.results) ? data.results : [];
-          if (results.length > 0) {
-            capabilityGroundingContext =
-              `\n\n[Verified Real-Time Search Results via ${searchToolId} for "${query}"]:\n` +
-              results
-                .slice(0, 5)
-                .map((r: any, idx: number) => `${idx + 1}. ${r.title} — ${r.url}\n   ${r.snippet || r.text || ""}`)
-                .join("\n");
-          } else {
-            capabilityGroundingContext =
-              `\n\n[Real-Time Search Attempted via ${searchToolId}]: No search results returned for "${query}". You must truthfully inform the user that live search returned no results rather than generating unverified headlines.`;
-          }
-        } else {
-          capabilityGroundingContext =
-            `\n\n[Real-Time Search Notice]: Search retrieval failed (${searchRes.error?.message || "unavailable"}). You must truthfully inform the user of the retrieval limitation rather than hallucinating search results.`;
-        }
-      } catch (err: any) {
-        capabilityGroundingContext =
-          `\n\n[Real-Time Search Notice]: Search error (${err?.message || String(err)}). Inform the user truthfully that live search could not be executed.`;
-      }
+    } else if (!retrievalAnswered) {
+      capabilityGroundingContext =
+        `\n\n[Browser Research Unavailable]: Live research was needed for "${userTurnText}", but no browser session is available on this device and normal retrieval returned nothing usable. Truthfully tell the user the information could not be retrieved; do not guess or invent a source.`;
     }
   } else if (capabilityResolution.chosenModality === "composio_service") {
     // SaaS service integration: determine required service (gmail, github, googlecalendar, slack, linear, whatsapp)
