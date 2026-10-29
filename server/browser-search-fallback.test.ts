@@ -6,6 +6,7 @@ import {
   executeBrowserSearchFallback,
   shouldTriggerBrowserFallback,
   buildVerbatimSearchUrl,
+  parseSearchResults,
   selectCredibleSource,
   verifyScreenshotBuffer,
   synthesizeVerifiedAnswer,
@@ -540,7 +541,43 @@ describe("Browser Search Fallback & Screenshot Delivery", () => {
     expect(source.toLowerCase()).not.toContain("kerala");
   });
 
-  // Test 18: The Android driver reports failures as HTTP 200 { ok:false }
+  // Test 21: A snippet alone never counts as verification of the captured page
+  it("Test 21: Snippet-only evidence is reported as unconfirmed", () => {
+    const synthesized = synthesizeVerifiedAnswer({
+      userQuestion: "how many fours did sanju hit in last game",
+      sourceItem: {
+        title: "Sanju Samson profile - ESPNcricinfo",
+        url: "https://cricinfo.com/cricketers/sanju-samson-425943/matches",
+        snippet: "Sanju Samson struck 14 fours in the Kerala T20 league.",
+      },
+      pageText:
+        "Sanju Samson India Wicketkeeper Batter. Debut/Last Matches - Player. ODI MATCHES. T20I MATCHES. FC MATCHES. LIST A MATCHES.",
+      verbatimQuery: "how many fours did sanju hit in last game",
+    });
+
+    expect(synthesized.verified).toBe(false);
+    expect(synthesized.answerText).toContain("did not show that figure");
+    expect(synthesized.uncertaintyNotice).toContain("treat it as unconfirmed");
+  });
+
+  // Test 18: The search engine's own ad slots are never treated as sources
+  it("Test 18: Engine ad and redirect rows are not sources", () => {
+    const page = [
+      "ESPNcricinfo - Sanju Samson profile",
+      "cricinfo.com",
+      "Sanju Samson batting records and match listing.",
+      "Duck.ai",
+      "duck.ai",
+      "Chat with an AI assistant instead.",
+      "Ad",
+      "duckduckgo.com",
+      "Sponsored result.",
+    ].join("\n");
+    const results = parseSearchResults(page);
+    expect(results.map((r) => r.url)).toEqual(["https://cricinfo.com"]);
+  });
+
+  // Test 19: The Android driver reports failures as HTTP 200 { ok:false }
   it("Test 18: Driver error envelopes are surfaced instead of treated as success", async () => {
     const mockFetch = vi.fn().mockImplementation(async (urlStr: string) => {
       if (urlStr.includes("/open")) {
@@ -563,8 +600,8 @@ describe("Browser Search Fallback & Screenshot Delivery", () => {
     expect(res.attachment).toBeUndefined();
   });
 
-  // Test 19: A byte-identical frame for a new question is re-captured and disclosed
-  it("Test 19: A repeated frame for a different question is re-captured and disclosed", async () => {
+  // Test 20: A byte-identical frame for a new question is re-captured and disclosed
+  it("Test 20: A repeated frame for a different question is re-captured and disclosed", async () => {
     const fixed = createValidJpegBuffer("identical-frame");
     let captures = 0;
     const mockFetch = vi.fn().mockImplementation(async (urlStr: string) => {

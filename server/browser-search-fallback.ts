@@ -233,6 +233,9 @@ export function parseSearchResults(pageText: string): BrowserSearchResultItem[] 
 
   const lines = pageText.split("\n").map((l) => l.trim()).filter(Boolean);
   const isUrlLine = /^(?:https?:\/\/|www\.|\w[\w-]*\.(?:com|org|net|in|tv|co|gov|edu|ai|io|uk|au|info|news))\b\S*/i;
+  // The engine's own ad slots and redirects are never a source.
+  const isEngineChrome = (url: string) =>
+    /(?:^|\.)duckduckgo\.com|(?:^|\.)duck\.ai|ad_domain=|\/y\.js\?/i.test(url);
   const isChrome = /^(?:DuckDuckGo|All Regions|Any Time|Settings|Privacy|Safe search|Images|Videos|News)/i;
 
   let currentTitle = "";
@@ -248,7 +251,7 @@ export function parseSearchResults(pageText: string): BrowserSearchResultItem[] 
         if (next.length > 20 && !isChrome.test(next)) snippetParts.push(next);
         j++;
       }
-      if (currentTitle && url) {
+      if (currentTitle && url && !isEngineChrome(url)) {
         results.push({ title: currentTitle, url, snippet: snippetParts.join(" "), domain: extractDomain(url) });
       }
       currentTitle = "";
@@ -495,11 +498,16 @@ export function synthesizeVerifiedAnswer(options: {
 
   const siteName = cleanSiteName(sourceItem.title, sourceItem.url);
   const link = sourceItem.url ? ` [${siteName}](${sourceItem.url})` : "";
-  const haystack = `${sourceItem.title}\n${sourceItem.snippet}\n${pageText}`;
   const subjects = querySubjectTerms(userQuestion, queryMetric(userQuestion));
-  const subjectMentioned = subjects.length === 0 || subjects.some((s) => haystack.toLowerCase().includes(s));
+  const subjectMentioned =
+    subjects.length === 0 ||
+    subjects.some((s) => `${sourceItem.title}\n${pageText}`.toLowerCase().includes(s));
 
-  const evidence = findMetricEvidence(haystack, userQuestion);
+  // Only the page counts as verification. A search snippet is the engine's
+  // summary of a page, not the page: asserting a figure from it while the
+  // attached capture shows something else is exactly the false confidence this
+  // fallback exists to avoid.
+  const evidence = findMetricEvidence(`${sourceItem.title}\n${pageText}`, userQuestion);
   if (evidence && subjectMentioned) {
     const context = evidence.context.length > 320 ? `${evidence.context.slice(0, 317)}…` : evidence.context;
     return {
@@ -517,12 +525,12 @@ export function synthesizeVerifiedAnswer(options: {
     };
   }
 
-  const excerpt = (sourceItem.snippet || sourceItem.title || "").slice(0, 300);
+  const excerpt = (sourceItem.snippet || "").slice(0, 300);
   return {
     answerText: excerpt
-      ? `The closest source I could open (${siteName}) reports: "${excerpt}"${link}`
+      ? `I opened ${siteName} for "${verbatimQuery}". The search result summary says "${excerpt}", but the page I captured did not show that figure.${link}`
       : `I opened ${siteName} for "${verbatimQuery}", but the page did not state a value I can quote.${link}`,
-    uncertaintyNotice: `Taken from the search result and the captured ${siteName} page; I could not confirm a precise figure from the page text itself.`,
+    uncertaintyNotice: `The attached screenshot is the ${siteName} page as captured; it does not itself show the figure, so treat it as unconfirmed.`,
     verified: false,
   };
 }
@@ -574,6 +582,28 @@ async function driverScreenshot(call: DriverCall): Promise<Buffer> {
     }
   }
   return bytes;
+}
+
+/** Reads the current page's visible text through the driver. */
+async function readPageText(call: DriverCall): Promise<string> {
+  const page = await driverJson(call, "text", { maxChars: 20_000 });
+  return typeof page.text === "string" ? page.text : "";
+}
+
+/**
+ * One best-effort attempt to clear a cookie/consent wall so the capture shows
+ * the content instead of the dialog. Only a button whose own label asks for
+ * consent is pressed; nothing is submitted, and a page without an overlay is
+ * left untouched.
+ */
+async function dismissConsentOverlay(call: DriverCall, pageText: string): Promise<string> {
+  if (!/\b(?:your privacy choices|manage preferences|we use cookies|cookie (?:settings|policy)|consent)\b/i.test(pageText)) {
+    return pageText;
+  }
+  const expression = `(function(){try{var want=/^(?:accept all|accept|agree|i agree|allow all|got it|ok)$/i;var els=Array.prototype.slice.call(document.querySelectorAll('button,a,[role=button]'));var hit=els.filter(function(e){var t=(e.textContent||'').trim();return want.test(t);})[0];if(hit){hit.click();return true;}return false;}catch(e){return false;}})()`;
+  await driverJson(call, "eval", { expression }).catch(() => undefined);
+  await new Promise((resolve) => setTimeout(resolve, 700));
+  return pageText;
 }
 
 /** Records a capture and reports whether it replays a frame from another question. */
@@ -639,49 +669,95 @@ export async function executeBrowserSearchFallback(
       // 1. Open the search page with the question exactly as asked.
       await driverJson(call, "open", { url: searchUrl });
 
-      // 2. Read the rendered results and pick a source on relevance + authority.
+      // 2. Read the rendered results and rank them on relevance + authority.
       const searchPage = await driverJson(call, "text", { maxChars: 30_000 });
       const searchText = typeof searchPage.text === "string" ? searchPage.text : "";
       const candidates = parseSearchResults(searchText);
       const best = selectCredibleSource(candidates, verbatimQuery);
+      // At most two pages are opened: the strongest result, then one alternative
+      // when the first turns out not to state the answer.
+      const shortlist = candidates
+        .filter((candidate) => (candidate.score ?? 0) > 0)
+        .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+        .slice(0, 2);
 
       let sourceUrl = searchUrl;
       let sourceTitle = "Search results";
       let pageText = searchText;
       let pageOpened = false;
+      let chosen: BrowserSearchResultItem | null = null;
+      let consentOverlay = false;
 
-      // 3. Inspect the chosen source rather than trusting its snippet.
-      if (best) {
-        sourceUrl = best.url;
-        sourceTitle = best.title;
+      // 3. Inspect candidates rather than trusting a snippet: the page must
+      //    actually state a value for the asked metric to be preferred.
+      for (const candidate of shortlist) {
         try {
-          const opened = await driverJson(call, "navigate", { url: best.url });
-          pageOpened = true;
-          const settled = opened.settled !== false;
-          if (!settled) {
+          const opened = await driverJson(call, "navigate", { url: candidate.url });
+          if (opened.settled === false) {
             // Give a slow page one bounded chance to finish before reading it.
             await new Promise((resolve) => setTimeout(resolve, 1_500));
           }
-          const sourcePage = await driverJson(call, "text", { maxChars: 20_000 });
-          const sourceText = typeof sourcePage.text === "string" ? sourcePage.text : "";
-          if (sourceText.length > 100) pageText = sourceText;
+          const sourceText = await readPageText(call);
+          const dismissed = await dismissConsentOverlay(call, sourceText);
+          const text = dismissed === sourceText ? sourceText : await readPageText(call);
 
-          // Bring the relevant passage into view so the capture shows it.
-          const subjects = querySubjectTerms(verbatimQuery, queryMetric(verbatimQuery));
-          const needles = [queryMetric(verbatimQuery), ...subjects].filter(Boolean).slice(0, 4);
-          if (needles.length) {
-            const expression = `(function(){try{var n=${JSON.stringify(needles)};var el=Array.prototype.slice.call(document.querySelectorAll('tr,p,li,td,div,h1,h2,h3')).filter(function(e){var t=(e.textContent||'');return n.some(function(k){return k&&t.toLowerCase().indexOf(String(k).toLowerCase())>=0;});})[0];if(el){el.scrollIntoView({block:'center'});return true;}return false;}catch(e){return false;}})()`;
-            await driverJson(call, "eval", { expression }).catch(() => undefined);
-          }
+          chosen = candidate;
+          sourceUrl = candidate.url;
+          sourceTitle = candidate.title;
+          pageText = text.length > 100 ? text : sourceText;
+          pageOpened = true;
+          consentOverlay = /\b(?:your privacy choices|manage preferences|accept all|we use cookies)\b/i.test(pageText);
+
+          // Prefer a page whose own text states the answer; a snippet alone is
+          // not enough to stop looking.
+          if (findMetricEvidence(`${candidate.title}\n${pageText}`, verbatimQuery)) break;
         } catch (navError) {
-          // Stay on the results page; the answer is then reported as unverified.
-          pageOpened = false;
-          sourceUrl = searchUrl;
-          sourceTitle = "Search results";
-          pageText = searchText;
           if (process.env.OMB_BROWSER_FALLBACK_DEBUG === "1") {
-            console.warn(`[BrowserFallback] source navigation failed: ${String(navError)}`);
+            console.warn(`[BrowserFallback] navigating ${candidate.url} failed: ${String(navError)}`);
           }
+        }
+      }
+
+      if (!pageOpened) {
+        // Nothing could be opened: stay on the results page and say so.
+        chosen = best;
+        sourceUrl = searchUrl;
+        sourceTitle = "Search results";
+        pageText = searchText;
+      }
+
+      // Bring the relevant passage into view so the capture shows the answer.
+      // The exact evidence phrase ("14 fours") is the first thing scrolled to;
+      // the subject and metric alone can land on a headline instead.
+      if (pageOpened) {
+        const evidence = findMetricEvidence(pageText, verbatimQuery);
+        const subjects = querySubjectTerms(verbatimQuery, queryMetric(verbatimQuery));
+        const needles = [
+          evidence ? `${evidence.value} ${evidence.metric}` : undefined,
+          queryMetric(verbatimQuery),
+          ...subjects,
+        ]
+          .filter((needle): needle is string => Boolean(needle))
+          .slice(0, 4);
+        if (needles.length) {
+          // Pick the *innermost* element holding the evidence phrase: scrolling a
+          // big wrapper centers the whole article instead of the statistic.
+          const expression = `(function(){try{
+            var n=${JSON.stringify(needles)};
+            var els=document.querySelectorAll('p,li,td,tr,div,span,section,article,h1,h2,h3');
+            var found=null,best=1e9;
+            for(var i=0;i<els.length;i++){
+              var t=(els[i].textContent||'');
+              if(t.length>4000) continue;
+              for(var k=0;k<n.length;k++){
+                if(n[k] && t.toLowerCase().indexOf(String(n[k]).toLowerCase())>=0 && t.length<best){best=t.length;found=els[i];break;}
+              }
+            }
+            if(found){found.scrollIntoView({block:'start'});window.scrollBy(0,-160);return true;}
+            return false;
+          }catch(e){return false;}})()`;
+          await driverJson(call, "eval", { expression }).catch(() => undefined);
+          await new Promise((resolve) => setTimeout(resolve, 400));
         }
       }
 
@@ -709,13 +785,29 @@ export async function executeBrowserSearchFallback(
       const capturedAt = Date.now();
       const { answerText, uncertaintyNotice, verified } = synthesizeVerifiedAnswer({
         userQuestion: verbatimQuery,
-        sourceItem: best,
+        sourceItem: chosen,
         pageText,
         verbatimQuery,
       });
-      const notice = stale
-        ? `${uncertaintyNotice ?? ""} The browser returned a byte-identical frame to an earlier question, so this capture may not reflect a fresh page render.`.trim()
-        : uncertaintyNotice;
+      const notice = [
+        uncertaintyNotice,
+        consentOverlay
+          ? "A cookie/consent notice is covering part of the captured page, so some content may be obscured in the screenshot."
+          : undefined,
+        stale
+          ? "The browser returned a byte-identical frame to an earlier question, so this capture may not reflect a fresh page render."
+          : undefined,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .trim();
+
+      console.info(
+        `[BrowserFallback] query=${JSON.stringify(verbatimQuery)} source=${sourceUrl} ` +
+          `verified=${verified && pageOpened} bytes=${shotBuf.length} hash=${screenshotHash.slice(0, 12)}` +
+          (consentOverlay ? " consent-overlay=yes" : "") +
+          (stale ? " stale-frame=yes" : ""),
+      );
 
       // 5. Store through the canonical attachment pipeline.
       let attachment: BrowserSearchFallbackResult["attachment"];
@@ -742,7 +834,7 @@ export async function executeBrowserSearchFallback(
             verified,
             capturedAt,
             browserSession: call.session,
-            credibleSourceFound: Boolean(best),
+            credibleSourceFound: Boolean(chosen),
             deliveryFailed: true,
             error: `screenshot captured but attachment storage failed: ${saveError instanceof Error ? saveError.message : String(saveError)}`,
           };
@@ -776,7 +868,7 @@ export async function executeBrowserSearchFallback(
         capturedAt,
         browserSession: call.session,
         attachment,
-        credibleSourceFound: Boolean(best),
+        credibleSourceFound: Boolean(chosen),
         staleFrame: stale || undefined,
       };
     } catch (err: unknown) {

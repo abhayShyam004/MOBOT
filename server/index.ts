@@ -7219,8 +7219,18 @@ async function startTurn(
     justification: capabilityResolution.justification,
   });
 
+  // The browser fallback must search what the person typed, not the prompt the
+  // provider receives: userTurnText can carry reply quoting, setup/learn
+  // rewrites and an injected visual-context block, none of which belongs in a
+  // search query. Attachment tags are stripped for the same reason.
+  const originalQuestion =
+    (opts?.userMessage?.text ?? text ?? "")
+      .replace(/<attached-(?:image|file)[^>]*\/>/g, " ")
+      .replace(/\s+/g, " ")
+      .trim() || userTurnText;
+
   let capabilityGroundingContext = "";
-  if (capabilityResolution.chosenModality === "web_search" || shouldTriggerBrowserFallback(userTurnText)) {
+  if (capabilityResolution.chosenModality === "web_search" || shouldTriggerBrowserFallback(originalQuestion)) {
     // Normal retrieval always runs first: a working specialized search
     // capability is preferred over driving the browser, and only an empty or
     // failed result escalates to the browser fallback below.
@@ -7263,7 +7273,7 @@ async function startTurn(
           botId: bot.id,
           threadId,
           turnId: dispatchClaimId,
-          userQuestion: userTurnText, // Search original question verbatim!
+          userQuestion: originalQuestion, // the person's own words, verbatim
           storeInstance: store,
         });
 
@@ -7330,8 +7340,8 @@ async function startTurn(
             (fallbackRes.uncertaintyNotice ? `Uncertainty / Calibration: ${fallbackRes.uncertaintyNotice}\n` : "") +
             (fallbackRes.attachment ? `Screenshot Delivered: Attached as ${fallbackRes.attachment.path} (SHA-256: ${fallbackRes.attachment.hash})\n` : "") +
             (fallbackRes.verified
-              ? `Instructions: Present this verified information in a concise response, include the markdown link to ${fallbackRes.sourceUrl}, and refer to the attached screenshot as the source capture.`
-              : `Instructions: The page was captured but did NOT establish the exact answer. Say what the source does and does not show, link ${fallbackRes.sourceUrl}, refer to the attached screenshot, and do not assert an unverified figure.`);
+              ? `Instructions: State the answer exactly as given above. Do not add figures that sentence does not contain, do not cite any other website, and use ${fallbackRes.sourceUrl} as the only link. Refer to the attached screenshot as the capture you read it from.`
+              : `Instructions: The page was captured but did NOT establish the exact answer. Say what the source does and does not show, link ${fallbackRes.sourceUrl}, refer to the attached screenshot, and do not state any figure, do not cite another website, and do not present a guess as a fact.`);
         } else if (fallbackRes.deliveryFailed) {
           recordActionReceipt({
             operationId: dispatchClaimId,
@@ -7365,7 +7375,7 @@ async function startTurn(
       }
     } else if (!retrievalAnswered) {
       capabilityGroundingContext =
-        `\n\n[Browser Research Unavailable]: Live research was needed for "${userTurnText}", but no browser session is available on this device and normal retrieval returned nothing usable. Truthfully tell the user the information could not be retrieved; do not guess or invent a source.`;
+        `\n\n[Browser Research Unavailable]: Live research was needed for "${originalQuestion}", but no browser session is available on this device and normal retrieval returned nothing usable. Truthfully tell the user the information could not be retrieved; do not guess or invent a source.`;
     }
   } else if (capabilityResolution.chosenModality === "composio_service") {
     // SaaS service integration: determine required service (gmail, github, googlecalendar, slack, linear, whatsapp)
