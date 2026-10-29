@@ -4,11 +4,8 @@ import { join, basename } from "node:path";
 import { readFileSync } from "node:fs";
 import {
   executeBrowserSearchFallback,
-  isBrowserFallbackAvailable,
   shouldTriggerBrowserFallback,
-  isUnverifiedRefusalText,
   buildVerbatimSearchUrl,
-  parseSearchResults,
   selectCredibleSource,
   verifyScreenshotBuffer,
   synthesizeVerifiedAnswer,
@@ -17,7 +14,7 @@ import {
   resetBrowserFallbackState,
 } from "./browser-search-fallback.ts";
 import { Store } from "./store.ts";
-import { saveImage, readAttachment, ATTACHMENTS_DIR } from "./attachments.ts";
+import { saveImage, readAttachment } from "./attachments.ts";
 import { verifyAndEnforceTurnTruthfulness, recordActionReceipt } from "./capabilities/action-truthfulness.ts";
 import { extractStructuredContent } from "./structured-extract.ts";
 

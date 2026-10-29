@@ -3,6 +3,7 @@ import {
   structuredResponseToFallbackText,
   type StandingsTableComponentData,
   type MatchScorecardComponentData,
+  type MedalTallyComponentData,
 } from "../shared/structured-response.ts";
 import { extractStructuredContent } from "./structured-extract.ts";
 import {
