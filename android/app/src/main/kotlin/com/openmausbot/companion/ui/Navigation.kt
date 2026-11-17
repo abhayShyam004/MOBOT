@@ -71,7 +71,12 @@ sealed interface Destination {
     /**
      * In-app browser surface with native navigation and exit controls.
      */
-    data class Browser(val url: String, val title: String? = null, val botId: String? = null) : Destination
+    data class Browser(
+        val url: String,
+        val title: String? = null,
+        val botId: String? = null,
+        val isPreview: Boolean = false,
+    ) : Destination
 
     /**
      * A conversation, in one of the two ways something can name one.
@@ -195,7 +200,7 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
                 is Destination.Computer -> COMPUTER + it.botId
                 is Destination.Overview -> OVERVIEW + it.botId
                 is Destination.Memory -> MEMORY + it.botId
-                is Destination.Browser -> BROWSER + joinBrowser(it.url, it.title, it.botId)
+                is Destination.Browser -> BROWSER + joinBrowser(it.url, it.title, it.botId, it.isPreview)
                 is Destination.Chat -> when (val target = it.target) {
                     is ChatTarget.Bot -> BOT_CHAT + join(target.botId, target.threadId)
                     is ChatTarget.Room -> ROOM_CHAT + join(target.roomId, target.threadId)
@@ -219,7 +224,7 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
                 it.startsWith(OVERVIEW) -> Destination.Overview(it.removePrefix(OVERVIEW))
                 it.startsWith(MEMORY) -> Destination.Memory(it.removePrefix(MEMORY))
                 it.startsWith(BROWSER) -> splitBrowser(it.removePrefix(BROWSER))
-                    ?.let { (url, title, botId) -> Destination.Browser(url, title, botId) }
+                    ?.let { b -> Destination.Browser(b.url, b.title, b.botId, b.isPreview) }
                 it.startsWith(BOT_CHAT) -> split(it.removePrefix(BOT_CHAT))
                     ?.let { (owner, thread) -> Destination.Chat(ChatTarget.Bot(owner, thread)) }
                 it.startsWith(ROOM_CHAT) -> split(it.removePrefix(ROOM_CHAT))
@@ -228,21 +233,35 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
             }
         }
 
-        private fun joinBrowser(url: String, title: String?, botId: String?): String {
+        private data class DecodedBrowser(
+            val url: String,
+            val title: String?,
+            val botId: String?,
+            val isPreview: Boolean,
+        )
+
+        private fun joinBrowser(url: String, title: String?, botId: String?, isPreview: Boolean = false): String {
             val t = title.orEmpty()
             val b = botId.orEmpty()
-            return "${url.length}:$url${t.length}:$t$b"
+            val p = if (isPreview) "1" else "0"
+            return "$p:${url.length}:$url${t.length}:$t$b"
         }
 
-        private fun splitBrowser(raw: String): Triple<String, String?, String?>? {
-            val firstMark = raw.indexOf(':')
+        private fun splitBrowser(raw: String): DecodedBrowser? {
+            var isPreview = false
+            var content = raw
+            if (raw.length >= 2 && (raw.startsWith("0:") || raw.startsWith("1:"))) {
+                isPreview = raw[0] == '1'
+                content = raw.substring(2)
+            }
+            val firstMark = content.indexOf(':')
             if (firstMark <= 0) return null
-            val urlLen = raw.substring(0, firstMark).toIntOrNull() ?: return null
+            val urlLen = content.substring(0, firstMark).toIntOrNull() ?: return null
             val urlStart = firstMark + 1
-            if (urlLen < 0 || urlStart + urlLen > raw.length) return null
-            val url = raw.substring(urlStart, urlStart + urlLen)
+            if (urlLen < 0 || urlStart + urlLen > content.length) return null
+            val url = content.substring(urlStart, urlStart + urlLen)
 
-            val rest = raw.substring(urlStart + urlLen)
+            val rest = content.substring(urlStart + urlLen)
             val secondMark = rest.indexOf(':')
             if (secondMark <= 0) return null
             val titleLen = rest.substring(0, secondMark).toIntOrNull() ?: return null
@@ -251,7 +270,7 @@ class CompanionNavigator(initial: List<Destination> = listOf(Destination.Roster)
             val title = rest.substring(titleStart, titleStart + titleLen).ifEmpty { null }
             val botId = rest.substring(titleStart + titleLen).ifEmpty { null }
 
-            return Triple(url, title, botId)
+            return DecodedBrowser(url, title, botId, isPreview)
         }
 
         /**

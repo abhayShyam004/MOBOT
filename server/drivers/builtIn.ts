@@ -19,6 +19,7 @@ import { OpenAICompatDriver } from "./openai-compat.ts";
 import { AnthropicCompatDriver } from "./anthropic-compat.ts";
 import { PiDriver } from "./pi.ts";
 import { MinimaxDriver } from "./minimax.ts";
+import { RespanGatewayDriver } from "./respan-gateway.ts";
 
 export const BUILT_IN_DRIVERS: readonly AnyProviderDriver[] = [
   GrokDriver,
@@ -39,4 +40,5 @@ export const BUILT_IN_DRIVERS: readonly AnyProviderDriver[] = [
   AntigravityDriver,
   BoxAgentDriver,
   MinimaxDriver,
+  RespanGatewayDriver,
 ];

@@ -6,6 +6,7 @@
 // stand-in enterprise layer that grants `budgets` and `billing`, with the
 // coordinator's decision reply scripted; no real licence, engine, or
 // provider is involved; the fixture's home is disposable.
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,7 +76,7 @@ describe("spend cap inside a team goal run", () => {
     const sent = await api(`/api/groups/${encodeURIComponent(room.group.id)}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: "ship the plan", mode: "goal" }),
+      body: JSON.stringify({ text: "ship the plan", mode: "goal", sendId: randomUUID() }),
     });
     expect(sent.status).toBe(202);
 

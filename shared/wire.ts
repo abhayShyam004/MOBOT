@@ -25,6 +25,7 @@ import type { Routine, RoutineRun } from "./routines.ts";
 import type { WebhookAttempt, WebhookTrigger } from "./webhooks.ts";
 import type { StructuredResponseData } from "./structured-response.ts";
 import type { AgentContract } from "./agent-contract.ts";
+import type { SpecializationProfile } from "./specialization.ts";
 
 /** Reasoning-effort levels, ascending. A union of everything any engine
  * accepts; each driver declares the subset its CLI will take. Lives here
@@ -265,7 +266,33 @@ export interface WireBot {
   activity?: BotActivity;
   /** Authoritative Agent Contract specifying role, stance, tool affinity and verification policy. */
   contract?: AgentContract;
+  /** Authoritative Phase 31 Specialization Profile specifying role, heuristics, and prompt injections. */
+  specialization?: SpecializationProfile;
   createdAt: number;
+}
+
+/** Who supplied an attachment. Stamped by the server when the attachment is
+ * bound to a message; never accepted from a client. */
+export type AttachmentAuthor = "user" | "assistant" | "tool";
+
+/** One durable artifact attached to a transcript line. `author` and
+ * `ownerThreadId` are the provenance record the provider context is built
+ * from: a picture the bot generated must never be described as user-supplied,
+ * and an attachment bound in another conversation must never enter this one. */
+export interface WireAttachment {
+  kind: "image" | "file" | "document" | "pdf" | "code" | "archive" | "dataset" | string;
+  path: string;
+  mime?: string;
+  name?: string;
+  /** Who produced the attachment. Absent on rows stored before provenance was
+   * recorded; those fall back to the owning message's role/tool. */
+  author?: AttachmentAuthor;
+  /** Tool name when `author` is "tool". */
+  tool?: string;
+  /** The conversation that first bound this attachment, server-stamped. */
+  ownerThreadId?: string;
+  /** The message that first bound this attachment, server-stamped. */
+  boundMessageId?: string;
 }
 
 /** One transcript line. Serialized as stored — the durable delivery
@@ -278,7 +305,7 @@ export interface WireMessage {
   text?: string;
   /** Durable provider output stored by the harness; renderers receive only
    * the allowlisted /api/attachments URL. */
-  attachments?: Array<{ kind: "image" | "file" | "document" | "pdf" | "code" | "archive" | "dataset" | string; path: string; mime?: string; name?: string }>;
+  attachments?: WireAttachment[];
   /** Native structured response payload carrying versioned components (Phase J). */
   structured?: StructuredResponseData;
   card?: OptionCardData;
@@ -288,8 +315,30 @@ export interface WireMessage {
   routineRun?: RoutineRunCardData;
   /** Terminal receipt for a bounded multi-bot channel goal. */
   goalRun?: GroupGoalRunCardData;
-  /** activity messages: tool name + outcome. */
-  tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean; terminal?: boolean; summary?: string; input?: string; output?: string; error?: string };
+  /** Completion contract evaluating execution, validation, and delivery. */
+  completionContract?: any;
+  /** activity messages: tool name + outcome. `name` stays the provider's raw
+   * identifier so the details sheet remains diagnostic; `label` is the
+   * canonical human phrase every summary surface should show. `state`
+   * disambiguates the historical `ok` tri-state (running/cancelled both leave
+   * `ok` undefined). `operationId` lets a client reconcile repeated events for
+   * the same tool call without duplicating a step. */
+  tool?: {
+    name: string;
+    label?: string;
+    state?: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "retrying";
+    operationId?: string;
+    ok?: boolean;
+    spoken?: string;
+    setup?: boolean;
+    terminal?: boolean;
+    summary?: string;
+    input?: string;
+    output?: string;
+    error?: string;
+    /** Measured from the matching item.started event, when both arrived. */
+    durationMs?: number;
+  };
   /** A turn that failed, reduced to the four things a person needs: what
    * went wrong, which engine and model it happened to, and what to do about
    * it. Never the provider's own payload — see [FailureCardData]. */
@@ -390,6 +439,7 @@ export type FailureKind =
   | "timeout"
   | "tooling"
   | "safety"
+  | "output_limit"
   | "setup"
   | "aborted"
   | "unknown";
@@ -429,6 +479,33 @@ export interface OptionCardData {
   /** A bot's own mid-task question (the ask_user tool): the harness owns the
    * answer, no provider request is waiting behind it. */
   askUserRequest?: AskUserRequestCardData;
+  /** Chief of Staff native structured email composer proposal and lifecycle state. */
+  emailComposer?: EmailComposerCardData;
+}
+
+export interface EmailComposerAttachmentData {
+  name: string;
+  fileId?: string;
+  mimeType?: string;
+  size?: string | number;
+  driveUrl?: string;
+  verified?: boolean;
+}
+
+export interface EmailComposerCardData {
+  composerId: string;
+  status: "proposed" | "editing" | "awaiting_approval" | "awaiting_confirmation" | "approved" | "executing" | "saved_draft" | "sending" | "sent" | "failed" | "cancelled" | string;
+  from: string;
+  to: string;
+  cc?: string;
+  subject: string;
+  body: string;
+  attachments?: EmailComposerAttachmentData[];
+  relatedMeetingTitle?: string;
+  relatedMeetingTime?: string;
+  draftId?: string;
+  messageId?: string;
+  error?: string;
 }
 
 /** The durable payload behind an ask_user card. The questions ride in

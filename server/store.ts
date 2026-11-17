@@ -19,12 +19,16 @@ import { pickBotName } from "./names.ts";
 import { redactSecretsInText } from "./redact.ts";
 import { enforceResponseLength } from "./response-length.ts";
 import { isProhibitedScreenFrame } from "./screen-frame-gate.ts";
+import { stampAttachment, stampMessageAttachments } from "./attachment-provenance.ts";
 import { canonicalizeAssistantResponse } from "./canonical-response.ts";
 import { removeDocumentsForThread } from "./turn-files.ts";
 import { botAvatarProfile } from "../shared/bot-avatar.ts";
 import { approvalModeFor, isApprovalMode } from "../shared/approval-mode.ts";
 import { isAgentContract, resolveAgentContract } from "../shared/agent-contract.ts";
 export type { AgentContract } from "../shared/agent-contract.ts";
+import { resolveSpecializationProfile } from "./specialization.ts";
+export type { SpecializationProfile } from "./specialization.ts";
+import { resolveBotIdentity } from "../shared/bot-identity.ts";
 import type { ProfileRequestChanges } from "../shared/profile-request.ts";
 import type { TeamSetupRequest, TeamSetupResult } from "../shared/team-setup.ts";
 import type { GroupGoalRunCardData } from "../shared/group-goal-run.ts";
@@ -563,9 +567,26 @@ export class Store {
         b.soulHash = soulHash(b.soul);
         botsMigrated = true;
       }
-      if (!b.contract || !isAgentContract(b.contract)) {
-        b.contract = resolveAgentContract(b);
+      const resolvedContract = resolveAgentContract({ ...b, contract: undefined });
+      if (
+        !b.contract ||
+        !isAgentContract(b.contract) ||
+        b.contract.roleTitle !== resolvedContract.roleTitle ||
+        b.contract.identity.purpose !== resolvedContract.identity.purpose ||
+        b.contract.outputDelivery?.toneProfile !== resolvedContract.outputDelivery?.toneProfile
+      ) {
+        b.contract = resolvedContract;
         botsMigrated = true;
+      }
+      if (!b.specialization) {
+        b.specialization = resolveSpecializationProfile(null);
+        botsMigrated = true;
+      } else {
+        const resolved = resolveSpecializationProfile(b.specialization);
+        if (JSON.stringify(resolved) !== JSON.stringify(b.specialization)) {
+          b.specialization = resolved;
+          botsMigrated = true;
+        }
       }
       // Existing bots predate their folders. Create missing mirrors before
       // their first history write, but preserve any edits already on disk.
@@ -1261,7 +1282,8 @@ export class Store {
       // ERR_CHAT_POLLUTION_BLOCKED: Drops prohibited screen frame from chat storage
       return { id: newId(), at: Date.now(), role: "bot", kind: "screen", turnTerminal: false } as Message;
     }
-    const full: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message, lastUserPrompt) };
+    const created: Message = { id: newId(), at: Date.now(), parentId: t.activeLeafId, ...redactBotAuthored(message, lastUserPrompt) };
+    const full = stampMessageAttachments(created, threadId, created.id);
     t.messages.push(full);
     t.activeLeafId = full.id;
     mdb.appendMessage(threadId, full);
@@ -1296,7 +1318,8 @@ export class Store {
     }
     const anchorExists = anchorId !== undefined && t.messages.some((m) => m.id === anchorId);
     if (!anchorExists || t.activeLeafId === anchorId) return this.appendMessage(threadId, message);
-    const full: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message, lastUserPrompt), parentId: anchorId };
+    const created: Message = { id: newId(), at: Date.now(), ...redactBotAuthored(message, lastUserPrompt), parentId: anchorId };
+    const full = stampMessageAttachments(created, threadId, created.id);
     const children = t.messages.filter((m) => m.parentId === anchorId);
     t.messages.push(full);
     mdb.appendMessage(threadId, full);
@@ -1397,6 +1420,17 @@ export class Store {
     const idx = t.messages.findIndex((m) => m.id === messageId);
     if (idx === -1) return null;
     const next = { ...t.messages[idx], ...patch, card: patch.card ?? t.messages[idx].card };
+    if (patch.attachments) {
+      const durable = t.messages[idx].attachments ?? [];
+      next.attachments = patch.attachments.map((attachment) =>
+        stampAttachment(
+          attachment,
+          next,
+          threadId,
+          messageId,
+          durable.find((existing) => existing.path === attachment.path),
+        ));
+    }
     // SQLite is the durable source of truth. Persist before changing memory so
     // a failed write cannot make this process believe a card was answered
     // while a restart would still show it as pending.
@@ -1426,7 +1460,7 @@ export class Store {
     profile: Partial<
       Pick<
         BotRecord,
-        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "contract"
+        "name" | "title" | "description" | "soul" | "color" | "mascotExpression" | "mascotBody" | "modelSelection" | "section" | "contract" | "specialization"
       >
     > = {},
     opts: {
@@ -1441,6 +1475,7 @@ export class Store {
     const contract = profile.contract && isAgentContract(profile.contract)
       ? resolveAgentContract({ ...profile, contract: profile.contract, name })
       : resolveAgentContract({ ...profile, name, title: profile.title ?? "" });
+    const specialization = resolveSpecializationProfile(profile.specialization);
     const bot: BotRecord = {
       id: newId(),
       threadId: newId(),
@@ -1457,6 +1492,7 @@ export class Store {
       modelSelection: profile.modelSelection ?? this.defaultSelection(),
       resumeCursors: {},
       contract,
+      specialization,
       createdAt: Date.now(),
     };
     if (section) bot.section = section;
@@ -1483,12 +1519,13 @@ export class Store {
     // Announce the owner before its onboarding transcript. SSE clients need
     // the bot/thread mapping before they can place either message.
     this.emit({ type: "bot", botId: bot.id });
-    // Keep the greeting valid for configured bots and every engine.
+    // Seed initial greeting derived from the bot's configured identity
     if (opts.seedMessages !== false) {
+      const identity = resolveBotIdentity(bot);
       this.appendMessage(bot.threadId, {
         role: "bot",
         kind: "text",
-        text: `Hi, I'm ${name}. What would you like me to do?`,
+        text: identity.firstMessageGreeting,
       });
     }
     return bot;
@@ -1610,6 +1647,9 @@ export class Store {
     if (patch.contract !== undefined) {
       patch.contract = resolveAgentContract({ ...bot, ...patch, contract: patch.contract });
     }
+    if (patch.specialization !== undefined) {
+      patch.specialization = resolveSpecializationProfile(patch.specialization);
+    }
     // Runtime revocations must become effective in memory even when disk is
     // unavailable. Profile edits use the separate atomic path below.
     Object.assign(bot, patch);
@@ -1650,7 +1690,10 @@ export class Store {
     if (!bot) return null;
     const next = { ...bot, ...patch };
     if (patch.title !== undefined || patch.description !== undefined) {
-      next.contract = resolveAgentContract({ ...next, contract: next.contract });
+      next.contract = resolveAgentContract({ ...next, contract: undefined });
+    }
+    if (patch.specialization !== undefined) {
+      next.specialization = resolveSpecializationProfile(patch.specialization);
     }
     if (patch.soul !== undefined) {
       next.soulHash = soulHash(patch.soul);

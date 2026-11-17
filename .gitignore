@@ -1,4 +1,8 @@
 node_modules
+# The Respan Gateway sidecar's Python environment (`uv sync --directory gateway`).
+# Pinned in gateway/pyproject.toml; never committed.
+gateway/.venv/
+__pycache__/
 .worktrees/
 dist
 dist-electron

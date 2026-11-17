@@ -12,6 +12,11 @@ import { redactSecretsInText } from "./redact.ts";
 import { stripRawBase64DataUris, determineResponseFormattingPlan, type ResponseFormattingPlan } from "./screen-frame-gate.ts";
 import { verifyAndEnforceTurnTruthfulness } from "./capabilities/action-truthfulness.ts";
 import {
+  evaluateDirectTurnCompletion,
+  type TaskCompletionContract,
+  type RequirementCheckRecord,
+} from "./completion-contract.ts";
+import {
   classifyRecommendationRequest,
   detectExcessiveHedging,
   recoverFromExcessiveHedging,
@@ -25,6 +30,7 @@ import {
 import { enforceResponseLength } from "./response-length.ts";
 import { extractStructuredContent } from "./structured-extract.ts";
 import type { StructuredResponseData } from "../shared/structured-response.ts";
+import type { ResolvedBotIdentity } from "../shared/bot-identity.ts";
 
 export interface CanonicalizeOptions {
   userPrompt?: string | null;
@@ -32,6 +38,18 @@ export interface CanonicalizeOptions {
   turnId?: string | null;
   taskTitle?: string | null;
   taskDescription?: string | null;
+  botIdentity?: ResolvedBotIdentity | null;
+  toolActivities?: Array<{
+    name: string;
+    ok?: boolean;
+    output?: unknown;
+    error?: unknown;
+    durationMs?: number;
+    input?: unknown;
+  }>;
+  requirements?: RequirementCheckRecord[];
+  requiredAccessiblePreview?: boolean;
+  workspacePath?: string;
 }
 
 export interface CanonicalResponseResult {
@@ -42,6 +60,7 @@ export interface CanonicalResponseResult {
   recoveredHedging: boolean;
   correctedTruthfulness: boolean;
   strippedBase64: boolean;
+  completionContract?: TaskCompletionContract;
 }
 
 export function stripEmojis(text: string): string {
@@ -60,7 +79,7 @@ export function cleanUserFacingText(text: string): string {
   let cleaned = text;
   cleaned = cleaned.replace(/\[(?:image|file)\s+attached\]/gi, "");
   cleaned = cleaned.replace(/\[image:\s*[^\]]+\]/gi, "");
-  cleaned = cleaned.replace(/\[(?:download\s+the\s+[^\]]+|download\s+[^\]]+)\]\((?:attachment:[^)]+|\/api\/attachments\/[^)]+)\)/gi, "");
+  cleaned = cleaned.replace(/\[(?:download\s+the\s+[^\]]+|download\s+[^\]]+)\]\(attachment:[^)]+\)/gi, "");
   cleaned = cleaned.replace(/!\[[^\]]*\]\(attachment:[a-f0-9-]+\.[a-z0-9]+\)/gi, "");
   cleaned = cleaned.replace(/\s*\*\([^)]*peeking at the filename[^)]*\)\*\s*/gi, "\n");
   cleaned = stripEmojis(cleaned);
@@ -149,6 +168,28 @@ export function canonicalizeAssistantResponse(
     }
   }
 
+  // Shared authoritative completion evaluation across execution paths
+  let completionContract: TaskCompletionContract | undefined;
+  if (threadId) {
+    const turnEval = evaluateDirectTurnCompletion({
+      threadId,
+      turnId,
+      userPrompt,
+      assistantText: text,
+      toolActivities: options.toolActivities,
+      requirements: options.requirements,
+      requiredAccessiblePreview: options.requiredAccessiblePreview,
+      workspacePath: options.workspacePath,
+    });
+    if (turnEval.contract) {
+      completionContract = turnEval.contract;
+      if (turnEval.corrected) {
+        text = turnEval.text;
+        correctedTruthfulness = true;
+      }
+    }
+  }
+
   // Recommendation & hedging evaluation
   let recoveredHedging = false;
   if (userPrompt) {
@@ -165,9 +206,9 @@ export function canonicalizeAssistantResponse(
   // Conversational cadence & verbosity evaluation
   let recoveredVerbosity = false;
   if (userPrompt) {
-    const verbosity = detectUnnaturalVerbosity(text, { userPrompt });
+    const verbosity = detectUnnaturalVerbosity(text, { userPrompt, botIdentity: options.botIdentity ?? undefined });
     if (verbosity.hasUnnaturalVerbosity) {
-      text = recoverFromUnnaturalVerbosity(text, { userPrompt });
+      text = recoverFromUnnaturalVerbosity(text, { userPrompt, botIdentity: options.botIdentity ?? undefined });
       recoveredVerbosity = true;
     }
   }
@@ -191,5 +232,6 @@ export function canonicalizeAssistantResponse(
     recoveredHedging,
     correctedTruthfulness,
     strippedBase64,
+    completionContract,
   };
 }

@@ -78,7 +78,19 @@ fun InAppBrowserSurface(
     val colors = AppTheme.colors
 
     var webViewInstance by remember { mutableStateOf<WebView?>(null) }
-    val isUrlSafe = remember(destination.url) { BrowserSecurity.isSafeWebUrl(destination.url) }
+    val isPreviewTarget = destination.isPreview || BrowserSecurity.isLocalPreviewUrl(destination.url)
+    val targetPort = remember(destination.url) {
+        runCatching {
+            val p = URI(destination.url).port
+            if (p != -1) p else if (destination.url.startsWith("https://", ignoreCase = true)) 443 else 80
+        }.getOrNull()?.takeIf { it in 1..65535 }
+    }
+    val allowedPorts = remember(destination.url) {
+        BrowserSecurity.allowedPreviewPorts
+    }
+    val isUrlSafe = remember(destination.url, allowedPorts) {
+        BrowserSecurity.isSafeWebUrl(destination.url, allowedLoopbackPorts = allowedPorts)
+    }
     var currentUrl by remember(destination.url) { mutableStateOf(destination.url) }
     var pageTitle by remember(destination.title) { mutableStateOf(destination.title.orEmpty()) }
     var canGoBack by remember { mutableStateOf(false) }
@@ -339,15 +351,21 @@ fun InAppBrowserSurface(
 
                         view.webViewClient = object : WebViewClient() {
                             override fun shouldOverrideUrlLoading(v: WebView?, request: WebResourceRequest?): Boolean {
-                                val nextUrl = request?.url?.toString() ?: return false
-                                if (!BrowserSecurity.isSafeWebUrl(nextUrl)) {
-                                    errorMessage = "Access to private or restricted network addresses is not allowed."
+                                val nextUrl = request?.url?.toString() ?: return true
+                                if (!BrowserSecurity.isSafeWebUrl(nextUrl, allowedLoopbackPorts = allowedPorts)) {
+                                    errorMessage = "Navigation to unauthorized or restricted address blocked: $nextUrl"
                                     return true
                                 }
                                 return false
                             }
 
                             override fun onPageStarted(v: WebView?, url: String?, favicon: Bitmap?) {
+                                if (url != null && !BrowserSecurity.isSafeWebUrl(url, allowedLoopbackPorts = allowedPorts)) {
+                                    v?.stopLoading()
+                                    errorMessage = "Navigation to unauthorized or restricted address blocked: $url"
+                                    isLoading = false
+                                    return
+                                }
                                 isLoading = true
                                 errorMessage = null
                                 url?.let { currentUrl = it }
@@ -384,7 +402,11 @@ fun InAppBrowserSurface(
                             }
                         }
 
-                        if (!BrowserSecurity.isSafeWebUrl(destination.url)) {
+                        if (context.applicationInfo.flags and android.content.pm.ApplicationInfo.FLAG_DEBUGGABLE != 0) {
+                            WebView.setWebContentsDebuggingEnabled(true)
+                        }
+
+                        if (!BrowserSecurity.isSafeWebUrl(destination.url, allowedLoopbackPorts = allowedPorts)) {
                             errorMessage = "Invalid or restricted URL: ${destination.url}"
                         } else if (borrowed == null || view.url.isNullOrBlank() || view.url != destination.url) {
                             view.loadUrl(destination.url)
@@ -401,6 +423,9 @@ fun InAppBrowserSurface(
                     },
                     update = { view ->
                         view.visibility = if (errorMessage != null) View.GONE else View.VISIBLE
+                        if (isUrlSafe && view.url != destination.url) {
+                            view.loadUrl(destination.url)
+                        }
                     },
                     modifier = Modifier.fillMaxSize(),
                 )

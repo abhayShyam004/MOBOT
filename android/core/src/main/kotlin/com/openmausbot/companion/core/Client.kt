@@ -892,6 +892,23 @@ class CompanionClient(
         return raw.data
     }
 
+    /**
+     * Metadata for a link written in a chat message. The server fetches and
+     * validates the page; a failure returns null so the renderer keeps the
+     * plain link instead of showing a fabricated card.
+     */
+    suspend fun linkPreview(url: String): LinkPreview? =
+        send<LinkPreviewResponse>(makeRequest("GET", "/api/link-preview", listOf("url" to url)))
+            .takeIf { it.ok }
+            ?.preview
+
+    /** A preview thumbnail, fetched through the server's validated proxy. */
+    suspend fun linkPreviewImage(url: String): ByteArray {
+        val raw = perform(makeRequest("GET", "/api/link-preview/image", listOf("url" to url)))
+        check(raw)
+        return raw.data
+    }
+
     suspend fun voices(): List<Voice> = send<VoiceListResponse>(
         makeRequest("GET", "/api/tts/voices"),
     ).voices
@@ -1086,15 +1103,37 @@ class CompanionClient(
         return send<CreatedRoom>(makeRequest("POST", "/api/groups", body = body)).group
     }
 
-    suspend fun sendToBot(botId: String, text: String, threadId: String? = null): SendReceipt =
-        sendForReceipt(
-            makeRequest("POST", "/api/bots/${segment(botId)}/messages", body = jsonBody("text" to text, "threadId" to threadId)),
-        )
+    suspend fun sendToBot(
+        botId: String,
+        text: String,
+        threadId: String? = null,
+        sendId: String? = null,
+    ): SendReceipt {
+        val body = buildJsonObject {
+            put("text", text)
+            threadId?.let { put("threadId", it) }
+            // The harness replays a retried sendId with the original receipt;
+            // absent on a computer too old to know the field, which ignores it.
+            sendId?.let { put("sendId", it) }
+        }
+        return sendForReceipt(makeRequest("POST", "/api/bots/${segment(botId)}/messages", body = body))
+    }
 
-    suspend fun sendToRoom(groupId: String, text: String, threadId: String? = null): SendReceipt =
-        sendForReceipt(
-            makeRequest("POST", "/api/groups/${segment(groupId)}/messages", body = jsonBody("text" to text, "threadId" to threadId)),
+    suspend fun sendToRoom(
+        groupId: String,
+        text: String,
+        threadId: String? = null,
+        sendId: String = UUID.randomUUID().toString(),
+    ): SendReceipt {
+        if (!isSafeSendId(sendId)) throw APIError.BadUrl
+        return sendForReceipt(
+            makeRequest(
+                "POST",
+                "/api/groups/${segment(groupId)}/messages",
+                body = jsonBody("text" to text, "threadId" to threadId, "sendId" to sendId),
+            ),
         )
+    }
 
     /**
      * Drop a message the harness is still holding, before the turn it is

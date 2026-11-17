@@ -20,6 +20,19 @@ export interface ModelVariantState {
   currentValue?: string;
 }
 
+/** One integration's mount row for a turn. `stage` is where the handshake
+ * stopped: a failed server never contributes tools to that turn. */
+export interface ToolReadinessServer {
+  server: string;
+  ok: boolean;
+  stage: "startup" | "initialize" | "tools/list" | "schema" | "ready";
+  durationMs: number;
+  timeoutMs: number;
+  toolCount: number;
+  code?: string;
+  error?: string;
+}
+
 // Subset of upstream's 49-member ProviderRuntimeEvent union — the ~12 types
 // the recipe says to start with, sharing one base. `raw` carries the
 // native protocol message when a consumer needs to see behind the
@@ -83,7 +96,7 @@ export type RuntimeEvent = RuntimeEventBase &
         input?: string;
       }
     | { type: "item.updated"; itemType: "tool" | "reasoning"; tokens?: number | null }
-    | { type: "item.completed"; itemType: "tool"; ok: boolean; output?: string }
+    | { type: "item.completed"; itemType: "tool"; ok: boolean; output?: string; rawOutput?: string; title?: string }
     | { type: "item.completed"; itemType: "assistant_text"; text: string; structured?: StructuredResponseData }
     /** Provider-generated raster bytes. This event is folded into the
      * private attachment store and is never forwarded to renderer SSE: a
@@ -128,6 +141,18 @@ export type RuntimeEvent = RuntimeEventBase &
         approvalScope?: "local-computer";
       }
     | {
+        type: "tool.readiness";
+        /** Every configured MCP integration, in configuration order. A failed
+         * optional integration is excluded from the turn's tool catalog; the
+         * row is how its stage, code and duration stay inspectable. */
+        servers: ToolReadinessServer[];
+        /** Tools actually advertised to the provider, harness tools included. */
+        toolCount: number;
+        /** Emitted at the last point before the provider request, so a
+         * pre-provider failure leaves no event claiming the provider started. */
+        providerStarted: boolean;
+      }
+    | {
         type: "thread.token-usage.updated"; input: number; output: number; cachedInput?: number;
         /** What the model's window held on the most recent model call — the
          * whole prompt, cache reads included — and the window's size when the
@@ -138,7 +163,15 @@ export type RuntimeEvent = RuntimeEventBase &
     // configuring something, not by retrying — the UI offers setup instead.
     // `terminal: true` records failure of the complete turn, rather than a
     // transient error or a legacy provider's diagnostic during cancellation.
-    | { type: "runtime.error"; message: string; setup?: boolean; terminal?: boolean }
+    | {
+        type: "runtime.error";
+        message: string;
+        setup?: boolean;
+        terminal?: boolean;
+        /** How many provider requests this turn actually made, so the card can
+         *  say "3 attempts" only when there were three. */
+        attempts?: number;
+      }
   );
 
 export type RuntimeEventListener = (event: RuntimeEvent) => void;

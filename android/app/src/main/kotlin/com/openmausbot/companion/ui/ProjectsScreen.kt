@@ -185,7 +185,15 @@ fun ProjectsScreen(
                 val res = session.startAppProjectPreview(item.id)
                 val url = res?.preview?.url ?: item.previewUrl
                 if (url != null) {
-                    launchExternalBrowser(context, url)
+                    runCatching {
+                        val uri = java.net.URI(url)
+                        val port = uri.port.takeIf { it in 1024..65535 }
+                        val host = uri.host.orEmpty()
+                        if (port != null && com.openmausbot.companion.browser.BrowserSecurity.isLoopbackHost(host)) {
+                            com.openmausbot.companion.browser.BrowserSecurity.addAllowedPreviewPort(port)
+                        }
+                    }
+                    navigator.push(Destination.Browser(url = url, title = item.name, isPreview = true))
                 }
                 refreshProjects()
             }
@@ -477,7 +485,7 @@ fun ProjectCard(
                 // Localhost row
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    modifier = if (item.previewUrl != null) Modifier.clickable { launchExternalBrowser(context, item.previewUrl) } else Modifier,
+                    modifier = if (item.previewUrl != null) Modifier.clickable { onOpenPreview() } else Modifier,
                 ) {
                     Text(
                         text = "Localhost: ",

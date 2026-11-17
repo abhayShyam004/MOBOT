@@ -1,6 +1,21 @@
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentPermissionsConfig, AgentPermissionState } from "./config.ts";
+import {
+  checkSpecialistToolBoundary,
+  ERR_SPECIALIST_BOUNDARY_OVERSTEP,
+  type SpecialistBoundaryViolation,
+  type SpecializationProfile,
+  type SpecializationRoleId,
+} from "./specialization.ts";
+
+export {
+  checkSpecialistToolBoundary,
+  ERR_SPECIALIST_BOUNDARY_OVERSTEP,
+  type SpecialistBoundaryViolation,
+  type SpecializationProfile,
+  type SpecializationRoleId,
+};
 
 export const ERR_CROSS_BOT_MEMORY_LEAK = "ERR_CROSS_BOT_MEMORY_LEAK";
 
@@ -108,6 +123,8 @@ export interface PermissionCheckResult {
   reason: string;
   domain?: PermissionDomain;
   state?: AgentPermissionState;
+  errorCode?: string;
+  boundaryViolation?: SpecialistBoundaryViolation;
 }
 
 export interface DomainMetadata {
@@ -178,6 +195,8 @@ const PHONE_TOOL_NAMES = new Set([
   "type_text",
   "clear_text",
   "press",
+  "restore_host",
+  "open_accessibility_settings",
 ]);
 
 const FILESYSTEM_TOOL_NAMES = new Set([
@@ -206,6 +225,11 @@ const FILESYSTEM_TOOL_NAMES = new Set([
   "artifact_delete",
   "artifact_list",
   "project_create",
+  "project_start",
+  "project_lifecycle_status",
+  "project_step_complete",
+  "project_criterion_verify",
+  "project_finish",
   "resource_extract_pdf_text",
   "resource_extract_pdf",
   "resource_artifact_info",
@@ -363,7 +387,7 @@ export function classifyTool(
     }
     if (
       FILESYSTEM_TOOL_NAMES.has(stripped) ||
-      /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list)|verify_file|verify_artifact|verify_image)/i.test(stripped)
+      /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list|start|lifecycle_status|step_complete|criterion_verify|finish)|verify_file|verify_artifact|verify_image)/i.test(stripped)
     ) {
       return { domain: "filesystem", label: PERMISSION_DOMAINS.filesystem.title };
     }
@@ -388,8 +412,8 @@ export function classifyTool(
   if (
     FILESYSTEM_TOOL_NAMES.has(normalized) ||
     FILESYSTEM_TOOL_NAMES.has(stripped) ||
-    /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list)|verify_file|verify_artifact|verify_image)/i.test(normalized) ||
-    /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list)|verify_file|verify_artifact|verify_image)/i.test(stripped)
+    /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list|start|lifecycle_status|step_complete|criterion_verify|finish)|verify_file|verify_artifact|verify_image)/i.test(normalized) ||
+    /^(fs_|file_|workspace_|artifact_|project_(create|open|read|write|patch|delete|rename|list|start|lifecycle_status|step_complete|criterion_verify|finish)|verify_file|verify_artifact|verify_image)/i.test(stripped)
   ) {
     return { domain: "filesystem", label: PERMISSION_DOMAINS.filesystem.title };
   }
@@ -414,8 +438,32 @@ export function checkToolPermission(
   toolName: string,
   permissions?: AgentPermissionsConfig,
   args?: Record<string, unknown>,
-  extra?: { composioConfigured?: boolean; botId?: string; requestingBotId?: string },
+  extra?: {
+    composioConfigured?: boolean;
+    botId?: string;
+    requestingBotId?: string;
+    /** The caller has already proved this name was advertised by a server the
+     *  user configured for this turn (a mounted MCP session). Such a tool is
+     *  not "unclassified by an attacker"; it is the user's own server, and the
+     *  approval layer — not a silent denial — decides whether it runs. */
+    mountedTool?: boolean;
+    specialization?: SpecializationProfile;
+    roleId?: SpecializationRoleId;
+  },
 ): PermissionCheckResult {
+  const roleId = extra?.roleId ?? extra?.specialization?.roleId;
+  if (roleId) {
+    const boundaryCheck = checkSpecialistToolBoundary(roleId, toolName, args);
+    if (!boundaryCheck.allowed && boundaryCheck.error) {
+      return {
+        allowed: false,
+        reason: boundaryCheck.error.message,
+        errorCode: ERR_SPECIALIST_BOUNDARY_OVERSTEP,
+        boundaryViolation: boundaryCheck.error.toJSON(),
+      };
+    }
+  }
+
   const classification = classifyTool(toolName, args);
 
   if (classification.domain === "system") {
@@ -423,7 +471,15 @@ export function checkToolPermission(
   }
 
   if (classification.domain === "unknown") {
-    // Fail closed on unclassified tools
+    // A configured server's own tool names are arbitrary (`github_create_issue`
+    // classifies as nothing), so denying them made every custom MCP server
+    // unusable: the call was refused before anyone could be asked. Those calls
+    // reach the approval layer, which treats an unknown tool as elevated — a
+    // card on Ask, the person's standing grant on Full. Everything that has not
+    // proved it was mounted still fails closed.
+    if (extra?.mountedTool) {
+      return { allowed: true, reason: "", domain: undefined };
+    }
     return {
       allowed: false,
       reason: `Unclassified tool "${toolName}" is blocked by security policy.`,

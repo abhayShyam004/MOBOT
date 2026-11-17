@@ -1370,7 +1370,7 @@ describe("harness HTTP API", () => {
     const group = created.body.group;
     try {
       expect(group).toMatchObject({ setupCompletedAt: null, setupSkippedAt: null, messages: [], setupPending: true });
-      const blocked = await api("POST", `/api/groups/${group.id}/messages`, { text: "before setup" });
+      const blocked = await api("POST", `/api/groups/${group.id}/messages`, {sendId: "test_room_send_0001",  text: "before setup" });
       expect(blocked.status).toBe(409);
       expect((await api("GET", "/api/bots")).body.groups.find((candidate: { id: string }) => candidate.id === group.id).messages).toHaveLength(0);
 
@@ -1555,7 +1555,7 @@ describe("harness HTTP API", () => {
         setupSkippedAt: null,
       });
       expect(group.setupCompletedAt).toEqual(expect.any(Number));
-      expect((await api("POST", `/api/groups/${group.id}/messages`, { text: "A quiet update" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${group.id}/messages`, {sendId: "test_room_send_0002",  text: "A quiet update" })).status).toBe(202);
     } finally {
       await api("POST", `/api/groups/${group.id}/interrupt`, {});
       await api("DELETE", `/api/groups/${group.id}`);
@@ -1601,7 +1601,7 @@ describe("harness HTTP API", () => {
         memberIds: [bot.id],
         setup: { bulletin: "", defaultResponder: { kind: "mentions" } },
       })).body.group;
-      const channel = await api("POST", `/api/groups/${room.id}/messages`, { text: "canonical channel" });
+      const channel = await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0003",  text: "canonical channel" });
       expect(channel.status).toBe(202);
       expect(channel.body).toMatchObject({
         ok: true,
@@ -1773,6 +1773,7 @@ describe("harness HTTP API", () => {
     })).body.group;
     try {
       const sent = await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0001",
         text: "every login hangs after the session expires",
       });
       expect(sent.status).toBe(202);
@@ -1820,7 +1821,7 @@ describe("harness HTTP API", () => {
       const { path: imagePath } = await uploaded.json() as { path: string };
       const text = `${firstMessage}\n\n<attached-image path="${imagePath}" name="tiny.png" />`;
       rmSync(oneShotTextDump, { force: true });
-      const sent = await api("POST", `/api/groups/${room.id}/messages`, { text });
+      const sent = await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0004",  text });
       expect(sent.status).toBe(202);
       // the member's one-shot ran and failed; the snippet stays
       await expect.poll(() => existsSync(oneShotTextDump), { timeout: 5_000 }).toBe(true);
@@ -2099,7 +2100,7 @@ describe("harness HTTP API", () => {
       expect((await api("GET", "/api/bots?messages=0")).body.bots.find((bot: { id: string }) => bot.id === foreign.id).section).toBe(`${section} foreign`);
       expect((await api("PATCH", `/api/bots/${chief.id}`, { modelSelection: { instanceId: "claude", model: "claude-sonnet-5" } })).status).toBe(200);
       const busyToken = await mintTestCapability(BASE, chief.id, chief.threadId);
-      expect((await api("POST", `/api/groups/${roomId}/messages`, { text: "Hold this room turn" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${roomId}/messages`, {sendId: "test_room_send_0005",  text: "Hold this room turn" })).status).toBe(202);
       await expect.poll(async () => (await readRoom()).working).toBe(true);
       for (const mutation of [{ action: "set_members", memberIds: [chief.id] }, { action: "set_bulletin", bulletin: "Changed mid-turn" }]) {
         const blocked = await chiefRoomRequest(BASE, busyToken, "manage-room", { roomId, ...mutation });
@@ -2409,12 +2410,13 @@ describe("harness HTTP API", () => {
     try {
       await api("PATCH", `/api/groups/${room.id}/setup`, { action: "skip" });
       await api("PATCH", `/api/groups/${room.id}`, { defaultResponder: { kind: "mentions" } });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "First thought" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0006",  text: "First thought" })).status).toBe(202);
       let current = (await api("GET", "/api/bots?messages=20")).body.groups.find(
         (candidate: { id: string }) => candidate.id === room.id,
       );
       const original = current.messages.at(-1);
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0002",
         text: "Following up",
         replyToId: original.id,
       })).status).toBe(202);
@@ -2423,6 +2425,7 @@ describe("harness HTTP API", () => {
       );
       expect(current.messages.at(-1)).toMatchObject({ text: "Following up", replyToId: original.id });
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0003",
         text: "Wrong conversation",
         replyToId: foreign.messages[0].id,
       })).status).toBe(404);
@@ -2833,7 +2836,7 @@ describe("harness HTTP API", () => {
       expect((await api("PATCH", `/api/bots/${botIds[0]}`, { computer: "off" })).status).toBe(409);
 
       // The room waits rather than failing or concurrently driving the Box.
-      expect((await api("POST", `/api/groups/${roomId}/messages`, { text: "use the occupied shared desktop" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${roomId}/messages`, {sendId: "test_room_send_0007",  text: "use the occupied shared desktop" })).status).toBe(202);
       await expect.poll(async () => JSON.stringify((await api("GET", "/api/bots?messages=30")).body.groups.find(
         (group: { id: string }) => group.id === roomId,
       )), { timeout: 5_000 }).toMatch(/Waiting for its turn on this computer/);
@@ -2960,7 +2963,7 @@ describe("harness HTTP API", () => {
       expect((await api("PATCH", `/api/groups/${room.id}/setup`, { action: "skip" })).status).toBe(200);
 
       rmSync(fakeClaudeDump, { force: true });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "hold the room turn" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0008",  text: "hold the room turn" })).status).toBe(202);
       await readJsonFileWhenReady(fakeClaudeDump);
       await expect.poll(async () => {
         const group = (await api("GET", "/api/bots?messages=0")).body.groups.find(
@@ -3364,7 +3367,7 @@ describe("harness HTTP API", () => {
       const racedLocalVm = await api("POST", `/api/bots/${bot.id}/local-computer/run`, {});
       expect(racedLocalVm.status).toBe(409);
       expect(racedLocalVm.body.error).toMatch(/computer is being changed or deleted/i);
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "@Target do not race deletion" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0009",  text: "@Target do not race deletion" })).status).toBe(202);
       await expect.poll(async () => {
         const snapshot = (await api("GET", "/api/bots?messages=30")).body;
         const currentRoom = snapshot.groups.find((candidate: { id: string }) => candidate.id === room.id);
@@ -3678,7 +3681,7 @@ describe("harness HTTP API", () => {
       });
       await api("PATCH", `/api/groups/${room.id}`, { defaultResponder: { kind: "mentions" } });
 
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "@Quill take this" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0010",  text: "@Quill take this" })).status).toBe(202);
       let state = (await api("GET", "/api/bots?messages=20")).body;
       let messages = state.groups.find((group: { id: string }) => group.id === room.id).messages;
       expect(messages.at(-1)).toMatchObject({
@@ -3693,7 +3696,7 @@ describe("harness HTTP API", () => {
       const beforeMixedMention = messages.filter((message: { tool?: { name?: string } }) =>
         message.tool?.name === archivedError
       ).length;
-      await api("POST", `/api/groups/${room.id}/messages`, { text: "@Quill and @Atlas take this" });
+      await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0011",  text: "@Quill and @Atlas take this" });
       await expect.poll(async () => {
         state = (await api("GET", "/api/bots?messages=20")).body;
         messages = state.groups.find((group: { id: string }) => group.id === room.id).messages;
@@ -3710,7 +3713,7 @@ describe("harness HTTP API", () => {
       await api("PATCH", `/api/groups/${room.id}`, {
         defaultResponder: { kind: "member", botId: archived.id },
       });
-      await api("POST", `/api/groups/${room.id}/messages`, { text: "use the default responder" });
+      await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0012",  text: "use the default responder" });
       state = (await api("GET", "/api/bots?messages=20")).body;
       messages = state.groups.find((group: { id: string }) => group.id === room.id).messages;
       expect(messages.at(-1)?.tool).toEqual({ name: archivedError, ok: false });
@@ -3718,14 +3721,14 @@ describe("harness HTTP API", () => {
       await api("PATCH", `/api/groups/${room.id}`, { defaultResponder: { kind: "mentions" } });
 
       const beforeUnmentioned = messages.length;
-      await api("POST", `/api/groups/${room.id}/messages`, { text: "no mention" });
+      await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0013",  text: "no mention" });
       state = (await api("GET", "/api/bots?messages=20")).body;
       messages = state.groups.find((group: { id: string }) => group.id === room.id).messages;
       expect(messages).toHaveLength(beforeUnmentioned + 1);
       expect(messages.at(-1)).toMatchObject({ kind: "text", role: "user", text: "no mention" });
 
       await api("PATCH", `/api/bots/${active.id}`, { hidden: true });
-      await api("POST", `/api/groups/${room.id}/messages`, { text: "hello everyone" });
+      await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0014",  text: "hello everyone" });
       state = (await api("GET", "/api/bots?messages=20")).body;
       messages = state.groups.find((group: { id: string }) => group.id === room.id).messages;
       expect(messages.at(-1)).toMatchObject({
@@ -3848,7 +3851,7 @@ describe("harness HTTP API", () => {
       const text = `Describe this image\n\n<attached-image path="${imagePath}" name="tiny.png" />`;
 
       rmSync(fakeClaudeDump, { force: true });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0015",  text })).status).toBe(202);
       const dump = await readJsonFileWhenReady<{
         prompt: { message: { content: Array<{ type: string; text?: string; source?: { data?: string } }> } };
       }>(fakeClaudeDump);
@@ -5601,7 +5604,7 @@ describe("harness HTTP API", () => {
       `/api/groups/${room.id}/tasks${method === "PATCH" ? `/${room.threadId}` : ""}`,
       { title: "Delayed task" });
     try {
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "keep running" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0016",  text: "keep running" })).status).toBe(202);
       await expect.poll(async () => (await api("GET", "/api/bots?messages=0")).body.groups.find(
         (candidate: { id: string }) => candidate.id === room.id,
       )?.working).toBe(true);
@@ -5667,6 +5670,7 @@ describe("harness HTTP API", () => {
       expect(wrongBot.body.error).toMatch(/switched tasks/i);
 
       const wrongRoom = await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0004",
         text: "Do not reroute me",
         threadId: "old-task",
       });
@@ -6362,6 +6366,14 @@ describe("harness HTTP API", () => {
     }
   });
 
+  // Every boot seeds the `project_tools` built-in into the same registry, so a
+  // listing carries it alongside whatever the person added. These cases are
+  // about the custom entries the API manages: they are selected by name, and
+  // the built-in is asserted separately rather than silently ignored.
+  const customServers = (body: { servers?: unknown }): Array<Record<string, unknown>> =>
+    (Array.isArray(body.servers) ? body.servers as Array<Record<string, unknown>> : [])
+      .filter((server) => server.name !== "project_tools");
+
   it("manages and probes custom MCP servers without returning secret values", async () => {
     const secret = "mcp-secret-that-must-never-render";
     const created = await api("POST", "/api/mcp/servers", {
@@ -6371,11 +6383,12 @@ describe("harness HTTP API", () => {
       env: { FIXTURE_TOKEN: secret, REMOVE_ME: "old" },
     });
     expect(created.status).toBe(201);
-    expect(created.body.servers).toEqual([expect.objectContaining({
+    expect(customServers(created.body)).toEqual([expect.objectContaining({
       name: "fixture",
       enabled: false,
       envKeys: ["FIXTURE_TOKEN", "REMOVE_ME"],
     })]);
+    expect((created.body.servers as Array<{ name: string }>).map((server) => server.name)).toContain("project_tools");
     expect(JSON.stringify(created.body)).not.toContain(secret);
 
     const tested = await api("POST", "/api/mcp/servers/fixture/test");
@@ -6391,11 +6404,11 @@ describe("harness HTTP API", () => {
       enabled: false,
     });
     expect(updated.status).toBe(200);
-    expect(updated.body.servers[0].envKeys).toEqual(["FIXTURE_TOKEN", "NEXT"]);
+    expect(customServers(updated.body)[0]?.envKeys).toEqual(["FIXTURE_TOKEN", "NEXT"]);
     expect(JSON.stringify(updated.body)).not.toContain(secret);
 
     const enabled = await api("PATCH", "/api/mcp/servers/fixture", { enabled: true });
-    expect(enabled.body.servers[0].enabled).toBe(true);
+    expect(customServers(enabled.body)[0]?.enabled).toBe(true);
     const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
     expect(disk.mcpServers.fixture.env).toEqual({ FIXTURE_TOKEN: secret, NEXT: "fresh" });
 
@@ -6403,9 +6416,11 @@ describe("harness HTTP API", () => {
     expect(reserved.status).toBe(400);
 
     const removed = await api("DELETE", "/api/mcp/servers/fixture");
-    expect(removed).toEqual({ status: 200, body: { servers: [] } });
+    expect(removed.status).toBe(200);
+    expect(customServers(removed.body)).toEqual([]);
     const after = await api("GET", "/api/mcp/servers");
-    expect(after).toEqual({ status: 200, body: { servers: [] } });
+    expect(after.status).toBe(200);
+    expect(customServers(after.body)).toEqual([]);
   });
 
   it("manages and probes a url MCP server, and the Claude Code servers switch", async () => {
@@ -6414,7 +6429,7 @@ describe("harness HTTP API", () => {
     try {
       const created = await api("POST", "/api/mcp/servers", { name: "docs", url: fake.url, headers: { Authorization: secret } });
       expect(created.status).toBe(201);
-      expect(created.body.servers).toEqual([{ name: "docs", type: "http", url: fake.url, headerKeys: ["Authorization"], enabled: false }]);
+      expect(customServers(created.body)).toEqual([{ name: "docs", type: "http", url: fake.url, headerKeys: ["Authorization"], enabled: false }]);
       expect(JSON.stringify(created.body)).not.toContain(secret);
 
       const tested = await api("POST", "/api/mcp/servers/docs/test");
@@ -6430,7 +6445,7 @@ describe("harness HTTP API", () => {
         enabled: true,
       });
       expect(updated.status).toBe(200);
-      expect(updated.body.servers[0]).toMatchObject({ type: "sse", headerKeys: ["Authorization", "X-Org"], enabled: true });
+      expect(customServers(updated.body)[0]).toMatchObject({ type: "sse", headerKeys: ["Authorization", "X-Org"], enabled: true });
       expect(JSON.stringify(updated.body)).not.toContain(secret);
       const disk = JSON.parse(readFileSync(join(home, ".openmausbot", "config.json"), "utf8"));
       expect(disk.mcpServers.docs).toEqual({ type: "sse", url: fake.url, headers: { Authorization: secret, "X-Org": "acme" }, enabled: true });
@@ -6794,6 +6809,7 @@ describe("harness HTTP API", () => {
 
       rmSync(fakeClaudeDump, { force: true });
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0005",
         text: "/create-verification-skill for my mobile app",
       })).status).toBe(202);
       let seen = await readJsonFileWhenReady<{ systemPrompt?: string }>(fakeClaudeDump);
@@ -6808,6 +6824,7 @@ describe("harness HTTP API", () => {
 
       rmSync(fakeClaudeDump, { force: true });
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0006",
         text: "now give me a short status update",
       })).status).toBe(202);
       seen = await readJsonFileWhenReady<{ systemPrompt?: string }>(fakeClaudeDump);
@@ -6889,7 +6906,7 @@ describe("harness HTTP API", () => {
     })).body.group;
     try {
       rmSync(fakeClaudeDump, { force: true });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "keep working" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0017",  text: "keep working" })).status).toBe(202);
       await expect.poll(() => existsSync(fakeClaudeDump), { timeout: 5_000 }).toBe(true);
 
       const deletion = await api("DELETE", `/api/bots/${bot.id}`);
@@ -7086,7 +7103,7 @@ describe("harness HTTP API", () => {
     let runId = "";
     try {
       rmSync(fakeClaudeDump, { force: true });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "work in this channel" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0018",  text: "work in this channel" })).status).toBe(202);
       await expect.poll(() => existsSync(fakeClaudeDump), { timeout: 5_000 }).toBe(true);
       expect((await api("PATCH", `/api/bots/${bot.id}`, { computer: "local" })).status).toBe(200);
       expect((await api("POST", "/api/local-computer/interrupt", {})).status).toBe(200);
@@ -7150,7 +7167,7 @@ describe("harness HTTP API", () => {
       })).body.group;
       writeFileSync(failureMarker, "fail only this fixture's browser close");
       rmSync(fakeClaudeDump, { force: true });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Check the website" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0019",  text: "Check the website" })).status).toBe(202);
       await expect.poll(() => readFileSync(join(home, "browser-calls.jsonl"), "utf8").includes('"session":"prep-failure"')).toBe(true);
       await expect.poll(async () => {
         const current = (await api("GET", "/api/bots?messages=20")).body;
@@ -7162,7 +7179,7 @@ describe("harness HTTP API", () => {
       }, { timeout: 5_000 }).toEqual({ busy: false, working: false, failed: true });
       expect(existsSync(fakeClaudeDump)).toBe(false);
       rmSync(failureMarker, { force: true });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Retry the website" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0020",  text: "Retry the website" })).status).toBe(202);
       await expect.poll(async () => existsSync(fakeClaudeDump) ? "dispatched" : (await api("GET", "/api/bots?messages=20")).body.groups
         .find((candidate: { id: string }) => candidate.id === room.id)?.messages
         .filter((message: { tool?: unknown }) => message.tool).map((message: { tool: { name: string } }) => message.tool.name),
@@ -7201,7 +7218,10 @@ describe("harness HTTP API", () => {
 
       rmSync(fakeClaudeDump, { force: true });
       const messagesPath = room ? `/api/groups/${room.id}/messages` : `/api/bots/${bot.id}/messages`;
-      expect((await api("POST", messagesPath, { text: "Use my authorized test account to check the website." })).status).toBe(202);
+      expect((await api("POST", messagesPath, {
+        text: "Use my authorized test account to check the website.",
+        sendId: "browser_safety_room_send_1",
+      })).status).toBe(202);
       const dump = z.object({
         env: z.record(z.string(), z.string()),
         systemPrompt: z.string(),
@@ -7627,7 +7647,7 @@ describe("harness HTTP API", () => {
       expect(selected.status).toBe(200);
 
       rmSync(fakeClaudeDump, { force: true });
-      const sent = await api("POST", `/api/groups/${room.id}/messages`, { text: "stay active" });
+      const sent = await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0021",  text: "stay active" });
       expect(sent.status).toBe(202);
       await expect.poll(() => existsSync(fakeClaudeDump), { timeout: 5_000 }).toBe(true);
 
@@ -7677,6 +7697,7 @@ describe("harness HTTP API", () => {
       }
 
       const sent = await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0007",
         text: "both bots should answer",
         threadId: room.threadId,
       });
@@ -7740,7 +7761,7 @@ describe("harness HTTP API", () => {
       }
 
       rmSync(fakeClaudeDump, { force: true });
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "start the lead" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0022",  text: "start the lead" })).status).toBe(202);
       const firstDump = await readJsonFileWhenReady<{
         pid: number;
         mcpConfig: { mcpServers: { agents: { env: { OMB_COMMS_TOKEN: string } } } };
@@ -9319,7 +9340,7 @@ describe("bot memory API", () => {
       expect(created.status).toBe(201);
       groupId = created.body.group.id as string;
       const roomThreadId = created.body.group.threadId as string;
-      expect((await api("POST", `/api/groups/${groupId}/messages`, { text: "Standup: what did everyone do yesterday?" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${groupId}/messages`, {sendId: "test_room_send_0023",  text: "Standup: what did everyone do yesterday?" })).status).toBe(202);
       await expect.poll(async () => {
         const state = (await api("GET", "/api/bots?messages=0")).body;
         return state.bots.some((candidate: { id: string; busy?: boolean }) => [bot.id, other.id].includes(candidate.id) && candidate.busy);
@@ -9812,7 +9833,10 @@ describe("message pages", () => {
     expect(quiet.status).toBe(200);
 
     for (let i = 0; i < count; i++) {
-      const posted = await api("POST", `/api/groups/${groupId}/messages`, { text: `page probe ${i}` });
+      const posted = await api("POST", `/api/groups/${groupId}/messages`, {
+        text: `page probe ${i}`,
+        sendId: `page_probe_send_${String(i).padStart(4, "0")}`,
+      });
       expect(posted.status).toBe(202);
     }
     const after = await api("GET", "/api/bots");
@@ -10052,7 +10076,15 @@ describe("resumable event stream", () => {
       expect(await first.until((frame) => frame.kind === "ping")).toEqual({ kind: "ping" });
       await nudge(botId);
       const next = await first.until((frame) => frame.kind === "bot" && frame.bot?.id === botId);
-      expect(next.seq).toBe(Number(hello.cursor.split(":")[1]) + 1);
+      // A heartbeat is connection health, not application state: it must never
+      // claim a cursor position. Other activity can still land between the
+      // hello and this frame, so the cursor advances by exactly one for every
+      // frame that carries a seq — and the ping is not one of them.
+      const between = first.frames
+        .slice(first.frames.indexOf(hello) + 1, first.frames.indexOf(next))
+        .filter((frame) => typeof frame?.seq === "number");
+      expect(next.seq).toBe(Number(hello.cursor.split(":")[1]) + between.length + 1);
+      expect(first.frames.filter((frame) => frame?.kind === "ping").every((frame) => frame.seq === undefined)).toBe(true);
     } finally {
       first.close();
     }

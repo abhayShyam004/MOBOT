@@ -22,6 +22,7 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import { saveImage } from "./attachments.ts";
+import { validateScreenFrameBytes } from "./screen-frame-gate.ts";
 import type { Store } from "./store.ts";
 
 export interface BrowserSearchResultItem {
@@ -385,11 +386,40 @@ function pngDimensions(buf: Buffer): { width: number; height: number } | null {
 export const SCREENSHOT_MIN_BYTES = 2_000;
 export const SCREENSHOT_MAX_BYTES = 24 * 1024 * 1024;
 
+/** True when a baseline JPEG carries a quantization table. A real encoder
+ *  always writes one; the synthetic buffers used by header-level tests do not. */
+function hasJpegQuantTable(buf: Buffer): boolean {
+  let offset = 2;
+  while (offset + 4 < buf.length) {
+    if (buf[offset] !== 0xff) {
+      offset += 1;
+      continue;
+    }
+    const marker = buf[offset + 1]!;
+    if (marker === 0xdb) return true;
+    if (marker === 0xd9 || marker === 0xda) return false;
+    if (marker === 0xd8 || (marker >= 0xd0 && marker <= 0xd7)) {
+      offset += 2;
+      continue;
+    }
+    const length = buf.readUInt16BE(offset + 2);
+    if (length < 2) return false;
+    offset += 2 + length;
+  }
+  return false;
+}
+
 /**
  * Validates that captured bytes are a real, structurally complete screenshot:
  * magic bytes, parsed frame dimensions, a sane size, and a proper trailer (EOI
  * for JPEG, IEND for PNG). An empty, truncated or non-image body is rejected
  * rather than stored as a screenshot.
+ *
+ * Content is validated through the one shared gate (`validateScreenFrameBytes`),
+ * so this path gets the same uniform-blank-frame inspection as every other
+ * capture route instead of only a size and magic-byte check. PNG is preferred
+ * from the driver because that gate can decode its pixels; a JPEG from an
+ * older client is additionally checked for implausible flatness.
  */
 export function verifyScreenshotBuffer(buf: Buffer): { valid: boolean; reason?: string; mime: string } {
   if (!buf || !Buffer.isBuffer(buf) || buf.length === 0) {
@@ -405,6 +435,10 @@ export function verifyScreenshotBuffer(buf: Buffer): { valid: boolean; reason?: 
   const isJpeg = buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff;
   const isPng = buf.length >= 8 && buf.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
 
+  if (!isJpeg && !isPng) {
+    return { valid: false, reason: "body is not a JPEG or PNG image", mime: "" };
+  }
+
   if (isJpeg) {
     const dims = jpegDimensions(buf);
     if (!dims) return { valid: false, reason: "JPEG has no decodable frame header", mime: "" };
@@ -414,22 +448,39 @@ export function verifyScreenshotBuffer(buf: Buffer): { valid: boolean; reason?: 
     if (dims.width < 120 || dims.height < 120) {
       return { valid: false, reason: `screenshot is too small to show a page (${dims.width}x${dims.height})`, mime: "" };
     }
+    // A genuine capture compresses to far more than a flat colour does. This is
+    // a coarse guard for JPEG from older clients; the phone driver now sends
+    // PNG so the shared gate can inspect actual pixels.
+    if (hasJpegQuantTable(buf)) {
+      const bytesPerPixel = buf.length / (dims.width * dims.height);
+      if (bytesPerPixel < 0.006) {
+        return {
+          valid: false,
+          reason: `JPEG is too flat to be a page (${bytesPerPixel.toFixed(4)} bytes per pixel)`,
+          mime: "",
+        };
+      }
+    }
     return { valid: true, mime: "image/jpeg" };
   }
 
-  if (isPng) {
-    const dims = pngDimensions(buf);
-    if (!dims) return { valid: false, reason: "PNG has no decodable IHDR frame header", mime: "" };
-    if (buf.subarray(buf.length - 12, buf.length - 8).toString("latin1") !== "IEND") {
-      return { valid: false, reason: "PNG is truncated (missing IEND chunk)", mime: "" };
-    }
-    if (dims.width < 120 || dims.height < 120) {
-      return { valid: false, reason: `screenshot is too small to show a page (${dims.width}x${dims.height})`, mime: "" };
-    }
-    return { valid: true, mime: "image/png" };
+  const dims = pngDimensions(buf);
+  if (!dims) return { valid: false, reason: "PNG has no decodable IHDR frame header", mime: "" };
+  // An IEND chunk is length(4) + "IEND"(4) + CRC(4); the type sits eight
+  // bytes from the end, not twelve (that is the zero length field).
+  if (buf.subarray(buf.length - 8, buf.length - 4).toString("latin1") !== "IEND") {
+    return { valid: false, reason: "PNG is truncated (missing IEND chunk)", mime: "" };
   }
-
-  return { valid: false, reason: "body is not a JPEG or PNG image", mime: "" };
+  if (dims.width < 120 || dims.height < 120) {
+    return { valid: false, reason: `screenshot is too small to show a page (${dims.width}x${dims.height})`, mime: "" };
+  }
+  // `validateScreenFrameBytes` unpacks the scanlines and rejects a uniform
+  // white/grey/black frame while accepting a mostly-white page with text.
+  const shared = validateScreenFrameBytes(buf);
+  if (!shared.valid) {
+    return { valid: false, reason: shared.reason ?? shared.code ?? "screenshot failed content validation", mime: "" };
+  }
+  return { valid: true, mime: "image/png" };
 }
 
 // ── answer synthesis ────────────────────────────────────────────────────────

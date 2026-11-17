@@ -18,6 +18,7 @@ import {
   isProhibitedScreenFrame,
   sanitizeMessageForChatStorage,
   validateScreenFrameBytes,
+  screenFrameFailureMessage,
   ERR_CHAT_POLLUTION_BLOCKED,
   ChatPollutionBlockedError,
   type ResponseFormattingPlan,
@@ -682,7 +683,7 @@ describe("Official Roadmap Phase 16: Response Intelligence & Visual Telemetry Is
 
   // Bug A Remediation: Screenshot Integrity & Black Image Elimination
   describe("Bug A Remediation: Screenshot Integrity & Black Image Elimination", () => {
-    function generateTestPng(w: number, h: number, pixelLuminance: number = 0): Buffer {
+    function generateTestPng(w: number, h: number, pixelLuminance: number = 0, withContent = false): Buffer {
       const bpp = 4;
       const stride = 1 + w * bpp;
       const raw = Buffer.alloc(stride * h, 0);
@@ -691,10 +692,16 @@ describe("Official Roadmap Phase 16: Response Intelligence & Visual Telemetry Is
         raw[rowOffset] = 0; // Filter None
         for (let col = 0; col < w; col++) {
           const px = rowOffset + 1 + col * bpp;
-          raw[px] = pixelLuminance;     // R
-          raw[px + 1] = pixelLuminance; // G
-          raw[px + 2] = pixelLuminance; // B
-          raw[px + 3] = 255;            // A
+          // A rendered frame has structure. A uniform field — even a bright
+          // one — is a failed capture, so the "valid" fixture carries a block
+          // of darker pixels the way real UI text would.
+          const value = withContent && col >= 4 && col < 12 && row >= 4 && row < 12
+            ? Math.max(0, pixelLuminance - 170)
+            : pixelLuminance;
+          raw[px] = value;     // R
+          raw[px + 1] = value; // G
+          raw[px + 2] = value; // B
+          raw[px + 3] = 255;   // A
         }
       }
       const idat = zlib.deflateSync(raw);
@@ -723,7 +730,7 @@ describe("Official Roadmap Phase 16: Response Intelligence & Visual Telemetry Is
     }
 
     it("accepts valid rendered PNG image buffers with luminance", () => {
-      const validPng = generateTestPng(32, 32, 200);
+      const validPng = generateTestPng(32, 32, 200, true);
       const res = validateScreenFrameBytes(validPng);
       expect(res.valid).toBe(true);
       expect(res.format).toBe("png");
@@ -761,6 +768,211 @@ describe("Official Roadmap Phase 16: Response Intelligence & Visual Telemetry Is
       expect(validateScreenFrameBytes("").valid).toBe(false);
       expect(validateScreenFrameBytes(Buffer.from([0, 1, 2])).valid).toBe(false);
     });
+  });
+});
+
+describe("blank frame validation", () => {
+  const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+  function chunk(type: string, data: Buffer): Buffer {
+    const out = Buffer.alloc(12 + data.length);
+    out.writeUInt32BE(data.length, 0);
+    out.write(type, 4, "ascii");
+    data.copy(out, 8);
+    // The validator deliberately does not authenticate CRCs; zeroes keep the
+    // fixture readable and still exercise every structural check.
+    return out;
+  }
+
+  function paeth(left: number, up: number, upLeft: number): number {
+    const estimate = left + up - upLeft;
+    const dl = Math.abs(estimate - left);
+    const du = Math.abs(estimate - up);
+    const dul = Math.abs(estimate - upLeft);
+    if (dl <= du && dl <= dul) return left;
+    if (du <= dul) return up;
+    return upLeft;
+  }
+
+  function buildPng(options: {
+    width: number;
+    height: number;
+    colorType?: number;
+    pixel: (x: number, y: number) => number[];
+    palette?: number[];
+    filterForRow?: (row: number) => number;
+  }): Buffer {
+    const width = options.width;
+    const height = options.height;
+    const colorType = options.colorType ?? 6;
+    const channels = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 4 ? 2 : 1;
+    const rowBytes = width * channels;
+    const raw = Buffer.alloc(rowBytes * height);
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const values = options.pixel(x, y);
+        for (let channel = 0; channel < channels; channel++) {
+          raw[y * rowBytes + x * channels + channel] = (values[channel] ?? 0) & 0xff;
+        }
+      }
+    }
+
+    const filtered: Buffer[] = [];
+    const bytesPerPixel = Math.max(1, channels);
+    for (let y = 0; y < height; y++) {
+      const row = raw.subarray(y * rowBytes, (y + 1) * rowBytes);
+      const previous = y > 0 ? raw.subarray((y - 1) * rowBytes, y * rowBytes) : undefined;
+      const filter = (options.filterForRow?.(y) ?? 0) & 0xff;
+      const out = Buffer.alloc(rowBytes + 1);
+      out[0] = filter;
+      for (let index = 0; index < rowBytes; index++) {
+        const left = index >= bytesPerPixel ? row[index - bytesPerPixel]! : 0;
+        const up = previous ? previous[index]! : 0;
+        const upLeft = previous && index >= bytesPerPixel ? previous[index - bytesPerPixel]! : 0;
+        let predictor = 0;
+        if (filter === 1) predictor = left;
+        else if (filter === 2) predictor = up;
+        else if (filter === 3) predictor = Math.floor((left + up) / 2);
+        else if (filter === 4) predictor = paeth(left, up, upLeft);
+        out[index + 1] = (row[index]! - predictor) & 0xff;
+      }
+      filtered.push(out);
+    }
+
+    const header = Buffer.alloc(13);
+    header.writeUInt32BE(width, 0);
+    header.writeUInt32BE(height, 4);
+    header[8] = 8; // bit depth
+    header[9] = colorType;
+    header[10] = 0;
+    header[11] = 0;
+    header[12] = 0;
+
+    const parts = [PNG_SIGNATURE, chunk("IHDR", header)];
+    if (options.palette) {
+      const palette = Buffer.alloc(options.palette.length);
+      options.palette.forEach((value, index) => { palette[index] = value & 0xff; });
+      parts.push(chunk("PLTE", palette));
+    }
+    parts.push(chunk("IDAT", zlib.deflateSync(Buffer.concat(filtered))));
+    parts.push(chunk("IEND", Buffer.alloc(0)));
+    return Buffer.concat(parts);
+  }
+
+  function headerOnlyPng(width: number, height: number): Buffer {
+    const header = Buffer.alloc(13);
+    header.writeUInt32BE(width, 0);
+    header.writeUInt32BE(height, 4);
+    header[8] = 8;
+    header[9] = 6;
+    return Buffer.concat([
+      PNG_SIGNATURE,
+      chunk("IHDR", header),
+      chunk("IDAT", Buffer.from([0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01])),
+      chunk("IEND", Buffer.alloc(0)),
+    ]);
+  }
+
+  it("accepts a real RGBA frame and reports its dimensions", () => {
+    const png = buildPng({ width: 64, height: 48, pixel: (x, y) => [x * 4, y * 5, 128, 255] });
+    expect(validateScreenFrameBytes(png)).toMatchObject({ valid: true, format: "png", width: 64, height: 48 });
+  });
+
+  it.each([0, 1, 2, 3, 4])("reconstructs scanlines for PNG filter %i", (filter) => {
+    const png = buildPng({
+      width: 32,
+      height: 9,
+      filterForRow: () => filter,
+      pixel: (x, y) => [(x * 17 + y) % 256, (x * 3 + y * 29) % 256, 90, 255],
+    });
+    expect(validateScreenFrameBytes(png).valid).toBe(true);
+  });
+
+  it("rejects a uniform white frame instead of attaching a blank image", () => {
+    const png = buildPng({ width: 64, height: 64, pixel: () => [255, 255, 255, 255] });
+    const result = validateScreenFrameBytes(png);
+    expect(result.valid).toBe(false);
+    expect(result.code).toBe("ERR_SCREEN_CAPTURE_BLANK");
+    expect(result.reason).toContain("uniform white");
+  });
+
+  it("rejects uniform mid-grey and fully transparent coloured frames", () => {
+    const grey = buildPng({ width: 40, height: 40, pixel: () => [128, 128, 128, 255] });
+    expect(validateScreenFrameBytes(grey).code).toBe("ERR_SCREEN_CAPTURE_BLANK");
+
+    const transparent = buildPng({ width: 40, height: 40, pixel: () => [220, 40, 10, 0] });
+    const result = validateScreenFrameBytes(transparent);
+    expect(result.code).toBe("ERR_SCREEN_CAPTURE_BLANK");
+    expect(result.reason).toContain("uniform white");
+  });
+
+  it("rejects almost-uniform frames whose only difference is a few stray pixels", () => {
+    const png = buildPng({
+      width: 64,
+      height: 64,
+      pixel: (x, y) => (x === 10 && y === 10) || (x === 11 && y === 10) ? [0, 0, 0, 255] : [255, 255, 255, 255],
+    });
+    const result = validateScreenFrameBytes(png);
+    expect(result.valid).toBe(false);
+    expect(result.code).toBe("ERR_SCREEN_CAPTURE_BLANK");
+    expect(result.reason).toContain("almost uniform");
+  });
+
+  it("preserves a mostly-white frame that contains real content", () => {
+    const png = buildPng({
+      width: 64,
+      height: 64,
+      pixel: (x, y) => x >= 10 && x < 26 && y >= 10 && y < 26 ? [0, 0, 0, 255] : [255, 255, 255, 255],
+    });
+    expect(validateScreenFrameBytes(png).valid).toBe(true);
+  });
+
+  it("rejects a uniform white indexed-palette frame", () => {
+    const palette = [255, 255, 255, 0, 0, 0];
+    const blank = buildPng({ width: 32, height: 32, colorType: 3, palette, pixel: () => [0] });
+    expect(validateScreenFrameBytes(blank).code).toBe("ERR_SCREEN_CAPTURE_BLANK");
+
+    const content = buildPng({
+      width: 32,
+      height: 32,
+      colorType: 3,
+      palette,
+      pixel: (x, y) => x < 10 && y < 10 ? [1] : [0],
+    });
+    expect(validateScreenFrameBytes(content).valid).toBe(true);
+  });
+
+  it("rejects truncated, corrupt, and unfilterable PNG data", () => {
+    const valid = buildPng({ width: 24, height: 24, pixel: (x, y) => [x * 8, y * 8, 200, 255] });
+
+    expect(validateScreenFrameBytes(valid.subarray(0, valid.length - 12)).code).toBe("ERR_SCREEN_CAPTURE_CORRUPT");
+
+    const corrupted = Buffer.from(valid);
+    const idat = corrupted.indexOf("IDAT");
+    corrupted.fill(0xff, idat + 4, idat + 10);
+    expect(validateScreenFrameBytes(corrupted).code).toBe("ERR_SCREEN_CAPTURE_CORRUPT");
+
+    const unknownFilter = buildPng({
+      width: 8,
+      height: 8,
+      filterForRow: () => 5,
+      pixel: () => [10, 20, 30, 255],
+    });
+    expect(validateScreenFrameBytes(unknownFilter).code).toBe("ERR_SCREEN_CAPTURE_CORRUPT");
+  });
+
+  it("rejects oversized dimensions before decoding pixels", () => {
+    const result = validateScreenFrameBytes(headerOnlyPng(100_000, 100_000));
+    expect(result.valid).toBe(false);
+    expect(result.code).toBe("ERR_SCREEN_CAPTURE_TOO_LARGE");
+  });
+
+  it("describes a rejected frame in human language for the activity row", () => {
+    const message = screenFrameFailureMessage({ valid: false, code: "ERR_SCREEN_CAPTURE_BLANK" });
+    expect(message).toContain("Screenshot not attached");
+    expect(message).toContain("blank");
+    expect(message).not.toContain("ERR_SCREEN_CAPTURE");
   });
 });
 

@@ -3,6 +3,7 @@
 // `budgets` and `billing`, the shared control surface for sends and waits,
 // and the cap read back from /api/usage. No real licence, engine, or
 // provider is involved; the fixture's home is disposable.
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,7 +97,7 @@ describe("spend cap and prices through real turns", () => {
     const { group } = await created.json() as any;
     expect((await api(`/api/groups/${group.id}/messages`, {
       method: "POST", headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: "Check the draft and report back", mode: "goal" }),
+      body: JSON.stringify({ text: "Check the draft and report back", mode: "goal", sendId: randomUUID() }),
     })).status).toBe(202);
     await control(["wait", "--channel", group.id, "--timeout", "30"]);
 
@@ -144,7 +145,7 @@ describe("spend cap and prices through real turns", () => {
     const sent = await api(`/api/groups/${encodeURIComponent(room.group.id)}/messages`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: "hello team" }),
+      body: JSON.stringify({ text: "hello team", sendId: randomUUID() }),
     });
     expect(sent.status).toBe(202);
 

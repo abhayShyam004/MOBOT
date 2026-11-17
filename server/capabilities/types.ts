@@ -182,6 +182,9 @@ export interface CapabilityMatchRequest {
   requiredDataFreshness: 'realtime' | 'static' | 'historical';
   targetDevice: 'android_local' | 'cloud_vps' | 'external_saas';
   activeBotId: string;
+  /** The active bot's display name, used only to recognize a named greeting
+   *  ("yo Panko") without accepting arbitrary trailing words as greetings. */
+  activeBotName?: string;
 }
 
 export interface CapabilityMatchResolution {

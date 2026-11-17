@@ -217,6 +217,16 @@ export function extractStructuredContent(rawText: string, options?: ExtractOptio
  * while stripping the raw link wall from the conversational prose.
  */
 function synthesizeMarkdownResearchResults(text: string): { cleanText: string; components: StructuredComponent[] } | null {
+  // Never synthesize research/job/hotel cards from email composer texts or delegation messages
+  if (
+    text.includes("Email Composer") ||
+    text.includes("chief_of_staff") ||
+    text.includes("✉️") ||
+    /To:\s*`?[a-zA-Z0-9._%+-]+@/i.test(text) ||
+    /Subject:\s*[^\n]+/i.test(text)
+  ) {
+    return null;
+  }
   const linkRegex = /\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/;
   // Match items like "1. **Title** ..." or "### Title ..." or "- **Title** ..."
   const itemRegex = /(?:^|\n)(?:(?:\d+\.|\*|-)\s+)?\*\*([^*]{3,120})\*\*([\s\S]*?)(?=(?:\n(?:\d+\.|\*|-)\s+\*\*[^*]{3,120}\*\*|\n###|\n##|$))/g;
@@ -477,6 +487,42 @@ function findMarkdownTables(text: string): ParsedTableInfo[] {
   }
 
   return tables;
+}
+
+/** A bold line is what every scorecard pattern keys on: "**MI vs CSK**",
+ * "**Alcaraz def. Djokovic**", "**Arsenal 2-1 Chelsea**". */
+const FIXTURE_LINE = /\*\*[^*\n]{1,160}?\*\*/g;
+const SCORECARD_WINDOW_BEFORE = 400;
+const SCORECARD_WINDOW_AFTER = 800;
+
+/** Bounded windows to scan for a match scorecard.
+ *
+ * The scorecard patterns are quadratic in the length of the block they scan,
+ * so handing them a whole reply is a denial of service: a reply that merely
+ * *mentions* a competition name — the system prompt lists every name the
+ * alternations contain — used to spend minutes of a blocked event loop
+ * before failing to match. Scoping each attempt to a short window around a
+ * bold fixture line keeps a real fixture working while a reply with no
+ * fixture line costs one linear scan. */
+function scorecardWindows(text: string): string[] {
+  if (!text.includes("**")) return [];
+  const windows: string[] = [];
+  for (const match of text.matchAll(FIXTURE_LINE)) {
+    const at = match.index ?? 0;
+    windows.push(text.slice(
+      Math.max(0, at - SCORECARD_WINDOW_BEFORE),
+      Math.min(text.length, at + match[0].length + SCORECARD_WINDOW_AFTER),
+    ));
+  }
+  return windows;
+}
+
+function firstFixtureMatch(windows: string[], pattern: RegExp): RegExpMatchArray | null {
+  for (const window of windows) {
+    const match = window.match(pattern);
+    if (match) return match;
+  }
+  return null;
 }
 
 function synthesizeMarkdownSportsAndTables(
@@ -759,9 +805,21 @@ function inferMatchStatus(text: string, sport: string): { status: string; status
   return { status: "unknown", statusLabel: "STATUS" };
 }
 
+  // Every scorecard pattern below needs a bold fixture line, so they only ever
+  // see a short window around one — never the whole reply.
+  const fixtureWindows = scorecardWindows(text);
+
   // Check 3: Markdown Match Scorecard (Cricket / Football / Tennis)
-  const cricketMatchRegex = /(?:###|##)?\s*([^\n]+?(?:World Cup|Premier League|IPL|T20|ODI|Test|Championship)[^\n]*)\s*\n+\*\*([^*]+?\s+(?:vs|v)\s+[^*]+?)\*\*[\s\S]*?-\s+([^:\n]+):\s*([0-9/]+(?:\s*\([0-9.]+(?:\s*ov)?\))?)\s*\n+-\s+([^:\n]+):\s*([0-9/]+(?:\s*\([0-9.]+(?:\s*ov)?\))?)/i;
-  const cricketMatch = text.match(cricketMatchRegex);
+  //
+  // These three patterns must stay linear on long replies. Nested lazy
+  // quantifiers over the same characters (`[^\n]+?` … `[^\n]*` … `[\s\S]*?`)
+  // backtrack combinatorially when the tail fails, and a reply that merely
+  // *mentions* a competition name (the system prompt lists them) then costs
+  // minutes of a blocked event loop instead of microseconds. One greedy
+  // character class per run, no `\s*` glued to `\n+` (they overlap), and a
+  // bounded span between the fixture line and its score lines.
+  const cricketMatchRegex = /(?:###|##)?\s*([^\n]*(?:World Cup|Premier League|IPL|T20|ODI|Test|Championship)[^\n]*)\n+\*\*([^*\n]+?\s+(?:vs|v)\s+[^*\n]+?)\*\*[\s\S]{0,600}?-\s+([^:\n]+):\s*([0-9/]+(?:\s*\([0-9.]+(?:\s*ov)?\))?)\n+-\s+([^:\n]+):\s*([0-9/]+(?:\s*\([0-9.]+(?:\s*ov)?\))?)/i;
+  const cricketMatch = firstFixtureMatch(fixtureWindows, cricketMatchRegex);
   if (cricketMatch) {
     const competition = cricketMatch[1]!.trim();
     const fixtureTitle = cricketMatch[2]!.trim();
@@ -815,8 +873,8 @@ function inferMatchStatus(text: string, sport: string): { status: string; status
   }
 
   // Football Match Check: e.g. **Arsenal 3 - 1 Chelsea**
-  const footballMatchRegex = /(?:###|##)?\s*([^\n]+?(?:Premier League|La Liga|Champions League|Serie A|Bundesliga|FA Cup|World Cup)[^\n]*)\s*\n+\*\*([^*]+?)\s+(\d+)\s*[-–]\s*(\d+)\s+([^*]+?)\*\*/i;
-  const footballMatch = text.match(footballMatchRegex);
+  const footballMatchRegex = /(?:###|##)?\s*([^\n]*(?:Premier League|La Liga|Champions League|Serie A|Bundesliga|FA Cup|World Cup)[^\n]*)\n+\*\*([^*\n]+?)\s+(\d+)\s*[-–]\s*(\d+)\s+([^*\n]+?)\*\*/i;
+  const footballMatch = firstFixtureMatch(fixtureWindows, footballMatchRegex);
   if (footballMatch) {
     const competition = footballMatch[1]!.trim();
     const team1Name = footballMatch[2]!.trim();
@@ -867,8 +925,8 @@ function inferMatchStatus(text: string, sport: string): { status: string; status
   }
 
   // Tennis Match Check: e.g. **Wimbledon 2024 - Men's Singles Final** ... **Carlos Alcaraz vs Novak Djokovic**
-  const tennisMatchRegex = /(?:###|##)?\s*([^\n]+?(?:Wimbledon|US Open|French Open|Roland Garros|Australian Open|ATP|WTA)[^\n]*)\s*\n+\*\*([^*]+?)\s+(?:def\.|defeated|d\.|vs)\s+([^*]+?)\*\*(?:\s*\n+([^\n]+?(?:\d+[-–]\d+)[^\n]*))?/i;
-  const tennisMatch = text.match(tennisMatchRegex);
+  const tennisMatchRegex = /(?:###|##)?\s*([^\n]*(?:Wimbledon|US Open|French Open|Roland Garros|Australian Open|ATP|WTA)[^\n]*)\n+\*\*([^*\n]+?)\s+(?:def\.|defeated|d\.|vs)\s+([^*\n]+?)\*\*(?:\n+([^\n]*(?:\d+[-–]\d+)[^\n]*))?/i;
+  const tennisMatch = firstFixtureMatch(fixtureWindows, tennisMatchRegex);
   if (tennisMatch) {
     const competition = tennisMatch[1]!.trim();
     const player1Name = tennisMatch[2]!.trim();

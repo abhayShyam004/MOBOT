@@ -1157,6 +1157,22 @@ function injectedEnvironment(cfg: AppConfig, driver: string): Map<string, string
     environment.set("OPENAI_COMPAT_API_KEY", cfg.openaiCompat.key);
   if (driver === "openai-compat" && cfg.openaiCompat?.url)
     environment.set("OPENAI_COMPAT_URL", cfg.openaiCompat.url);
+  // The local Respan Gateway routes by model name across vendors, so it is the
+  // one driver that needs several providers' keys at once; each goes to the
+  // sidecar under the variable the gateway reads for that vendor. The gateway
+  // config's `RESPAN_<VENDOR>_BASE_URL` is what makes a key that belongs to a
+  // non-public endpoint safe to hand over: MOBOT's OpenAI-compatible URL is
+  // only forwarded when the person configured one, so an OpenRouter (or
+  // llama.cpp) key is never sent to api.openai.com by guesswork.
+  if (driver === "respanGateway") {
+    if (cfg.anthropic?.key) environment.set("ANTHROPIC_API_KEY", cfg.anthropic.key);
+    if (cfg.anthropic?.key && cfg.anthropic.url) environment.set("RESPAN_ANTHROPIC_BASE_URL", cfg.anthropic.url);
+    if (cfg.xai?.key) environment.set("XAI_API_KEY", cfg.xai.key);
+    if (cfg.openaiCompat?.key && cfg.openaiCompat.url) {
+      environment.set("OPENAI_API_KEY", cfg.openaiCompat.key);
+      environment.set("RESPAN_OPENAI_BASE_URL", cfg.openaiCompat.url);
+    }
+  }
   if (driver === "boxAgent" && cfg.box?.token) environment.set("BOX_TOKEN", cfg.box.token);
   if (driver === "opencodeGo" && cfg.opencodeGo?.apiKey) environment.set("OPENCODE_API_KEY", cfg.opencodeGo.apiKey);
   return environment;

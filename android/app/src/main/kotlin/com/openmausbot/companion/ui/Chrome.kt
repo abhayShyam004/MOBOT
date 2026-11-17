@@ -64,12 +64,8 @@ internal fun Modifier.chromeSheet(cornerRadius: Dp = AppRadii.sheet): Modifier =
 
 @Composable
 internal fun Modifier.chrome(shape: Shape): Modifier = this
-    // White, not a grey well: the reference draws its controls as light tiles on a
-    // warm page, separated by a hairline rather than by being darker than what is
-    // behind them. On a page whose cards are also white that reads as a control
-    // sitting *on* the page, which is the point.
-    .background(AppTheme.colors.surface, shape)
-    .border(1.dp, AppTheme.colors.hairline, shape)
+    .background(MaterialTheme.colorScheme.surfaceContainerHigh, shape)
+    .border(1.dp, MaterialTheme.colorScheme.outlineVariant, shape)
 
 /**
  * A round chrome button with one glyph — the shape of every action in the chrome

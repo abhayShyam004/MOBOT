@@ -92,6 +92,17 @@ export function summarizeRuntime(e: RuntimeEvent): { summary: string; tone: Insp
       return { summary: `${e.requestType}: ${e.tool} — ${clip(oneLine(e.summary))}`, tone: "plain" };
     case "request.resolved":
       return { summary: `resolved ${e.behavior} · ${e.source}`, tone: "plain" };
+    case "tool.readiness": {
+      const failed = e.servers.filter((server) => !server.ok);
+      const ready = e.servers.length - failed.length;
+      const names = failed.slice(0, 3).map((server) => server.server).join(", ");
+      return {
+        summary: `tools ${e.toolCount} · ${ready}/${e.servers.length} integrations ready` +
+          `${failed.length ? ` · unavailable: ${names}${failed.length > 3 ? "…" : ""}` : ""}` +
+          `${e.providerStarted ? " · provider started" : ""}`,
+        tone: failed.length ? "error" : "plain",
+      };
+    }
     case "thread.token-usage.updated":
       return { summary: `tokens in ${e.input} · out ${e.output}`, tone: "plain" };
     case "runtime.error":

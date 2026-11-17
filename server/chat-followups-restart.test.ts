@@ -124,7 +124,9 @@ it("survives a real server crash: queued sends keep receipts, cancellation and u
     await expect.poll(() => journal().some((row) => row.id === stoppedReceipt.queueId), { timeout: 5_000 }).toBe(false);
     expect((await api("POST", `/api/bots/${stopped.id}/messages`, stoppedBody, 202)).message.queueId).toBe(stoppedReceipt.queueId);
 
-    const initial = await api("POST", `/api/groups/${channel.id}/messages`, { text: "Working channel" }, 202);
+    const initial = await api("POST", `/api/groups/${channel.id}/messages`, {
+      text: "Working channel", sendId: "channel_initial_send_123456",
+    }, 202);
     const channelBody = { text: "Channel follow-up after restart", threadId: channel.threadId,
       replyToId: initial.message.id, sendId: "durable_channel_send_123456", mode: "chat" };
     const channelQueued = await api("POST", `/api/groups/${channel.id}/messages`, channelBody, 202);

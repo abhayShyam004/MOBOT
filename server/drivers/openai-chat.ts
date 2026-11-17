@@ -10,13 +10,34 @@ import { newEventId, newId } from "../contracts.ts";
 import { redactSecretsInText } from "../redact.ts";
 import { askQuestionSummary, normalizeAskUserInput } from "../../shared/ask-question.ts";
 import { toolDetailPreview } from "../tool-summary.ts";
-import { ChatToolSessionError, mountChatTools, type ChatToolDefinition, type ChatToolSession } from "./chat-mcp-tools.ts";
+import {
+  ChatToolSessionError,
+  capabilityEnableDefinition,
+  capabilityRetireDefinition,
+  chatToolAvailabilityNotice,
+  deferredCapabilityNotice,
+  loadCapabilities,
+  retireCapabilities,
+  mountChatTools,
+  type ChatToolDefinition,
+  type ChatToolSession,
+} from "./chat-mcp-tools.ts";
+import {
+  AuthoritativeToolStore,
+  artifactReadDefinition,
+  ARTIFACT_READ_TOOL_NAME,
+  classifySideEffect,
+  compactOpenAIMessages,
+  createStructuredExecutionMemory,
+} from "../execution-memory.ts";
 import { checkToolPermission, loadDiskPermissions } from "../permission-policy.ts";
+import { KNOWN_SURFACES } from "../tool-exposure.ts";
 import { createChatToolApproval } from "./chat-tool-approval.ts";
 import { ChatProtocolError, ChatReasoningDetails, ChatToolCalls, MAX_CHAT_TOOL_CALLS, object, type ChatToolCall } from "./openai-chat-protocol.ts";
 import { appendNative } from "./native.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
 import { isMassDeletionCommand } from "../capabilities/safety-policy.ts";
+import { approvalSummary, assessToolCall, needsApproval } from "../tool-approval.ts";
 
 export interface OpenAIChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -30,6 +51,7 @@ export interface OpenAIChatMessage {
 interface Usage {
   input: number;
   output: number;
+  cachedInput?: number;
 }
 
 interface Completion {
@@ -97,10 +119,17 @@ interface RuntimeOptions<Config> {
   tools?: boolean;
 }
 
-const usageFrom = (usage: CompletionJson["usage"]): Usage | null =>
-  usage
-    ? { input: usage.prompt_tokens ?? 0, output: usage.completion_tokens ?? 0 }
-    : null;
+const usageFrom = (usage: CompletionJson["usage"]): Usage | null => {
+  if (!usage) return null;
+  const input = usage.prompt_tokens ?? 0;
+  const output = usage.completion_tokens ?? 0;
+  const cached = (usage as Record<string, any>).prompt_tokens_details?.cached_tokens;
+  return {
+    input,
+    output,
+    ...(typeof cached === "number" ? { cachedInput: cached } : {}),
+  };
+};
 
 const asError = (value: unknown): Error =>
   value instanceof Error ? value : new Error(String(value));
@@ -303,6 +332,16 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
     { role: "user", content: turn.text },
   ];
 
+  /** A turn whose integration failed still reaches the provider. Tell the
+   * model what is missing in the system channel so it can work around the gap
+   * instead of promising a tool that this turn did not advertise. */
+  const appendToolNotice = (messages: OpenAIChatMessage[], notice: string) => {
+    if (!notice) return;
+    const system = messages.find((message) => message.role === "system");
+    if (system) system.content = system.content ? `${system.content}\n\n${notice}` : notice;
+    else messages.unshift({ role: "system", content: notice });
+  };
+
   const sendTurn = async (turn: SendTurnInput) => {
     if (!options.apiKey) throw new Error(options.missingKeyError);
     if (active.has(turn.threadId)) throw new Error("a turn is already running on this thread");
@@ -371,7 +410,7 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
       const denials: string[] = [];
       const seenCalls = new Set<string>();
       try {
-        tools = await mountChatTools(options.tools === false ? undefined : turn.integrations, abort.signal);
+        tools = await mountChatTools(options.tools === false ? undefined : turn.integrations, abort.signal, { expose: turn.toolExposure });
         // Harness-run tools (document page reads, ask_user) ride beside the
         // MCP tools in the model's catalog — but only when this endpoint
         // accepts tools at all: a text-only endpoint must see no tools key.
@@ -380,8 +419,36 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
           function: { name: tool.name, description: tool.description, parameters: tool.inputSchema },
         }));
         const allDefinitions = tools.definitions.concat(harnessDefinitions);
-        for (let round = 0; round < 64; round++) {
+        const hasAdvertisedIntegrations = tools.exposure.advertised.length > 0;
+        if (options.tools !== false && hasAdvertisedIntegrations) {
+          allDefinitions.push(artifactReadDefinition());
+        }
+        // Deferred integrations are mounted and verified but withheld from the
+        // first request; capability_enable loads one inside this same turn.
+        if (tools.exposure.deferred.length) {
+          allDefinitions.push(capabilityEnableDefinition(tools.exposure.deferred));
+          appendToolNotice(messages, deferredCapabilityNotice(tools.exposure.deferred));
+        }
+        if (tools.exposure.advertised.some((s) => KNOWN_SURFACES.has(s))) {
+          allDefinitions.push(capabilityRetireDefinition(tools.exposure.advertised));
+        }
+        const authoritativeStore = new AuthoritativeToolStore();
+        const executionMemory = createStructuredExecutionMemory({
+          objective: turn.text,
+          currentStage: turn.stage,
+        });
+        // Emitted at the last point before the first provider request. A
+        // failure in mounting that actually stops the turn (cancellation)
+        // never reaches this line, so absence of the event means the provider
+        // was never asked.
+        emit({
+          ...base(turn.threadId, turnId), type: "tool.readiness",
+          servers: tools.readiness.servers, toolCount: allDefinitions.length, providerStarted: true,
+        });
+        appendToolNotice(messages, chatToolAvailabilityNotice(tools.readiness));
+        for (let round = 0; round < 16; round++) {
           abort.signal.throwIfAborted();
+          compactOpenAIMessages(messages as unknown as Record<string, unknown>[], { store: authoritativeStore, threadId: turn.threadId });
           native("out", options.nativeLog.outgoing(turn, messages, model));
           let attempt = 0;
           let completion: Completion;
@@ -429,6 +496,9 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
           if (completion.usage) {
             usage.input += completion.usage.input;
             usage.output += completion.usage.output;
+            if (typeof completion.usage.cachedInput === "number") {
+              usage.cachedInput = (usage.cachedInput ?? 0) + completion.usage.cachedInput;
+            }
             hasUsage = true;
             emit({ ...base(turn.threadId, turnId), type: "thread.token-usage.updated", ...usage });
           }
@@ -469,11 +539,13 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             let result: { text: string; ok: boolean } | undefined;
             let started = false;
             let fatal: Error | undefined;
+            let callArgs: Record<string, unknown> = {};
             try {
               let args: unknown;
               try { args = JSON.parse(call.function.arguments); }
               catch { throw new ChatProtocolError("tool arguments are not complete JSON"); }
               if (!object(args)) throw new ChatProtocolError("tool arguments must be a JSON object");
+              callArgs = args as Record<string, unknown>;
               const inputPreview = preview(args);
               // A harness-run tool (document page reads) needs no MCP session
               // and no permission card: it reads only what the user attached.
@@ -508,6 +580,18 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
                   result = { ok: true, text: answer };
                 }
                 handled = true;
+              } else if (call.function.name === "capability_enable") {
+                startItem();
+                result = loadCapabilities(tools, (args as { servers?: unknown }).servers, allDefinitions);
+                handled = true;
+              } else if (call.function.name === "capability_retire") {
+                startItem();
+                result = retireCapabilities(tools, (args as { servers?: unknown }).servers, allDefinitions);
+                handled = true;
+              } else if (call.function.name === ARTIFACT_READ_TOOL_NAME) {
+                startItem();
+                result = authoritativeStore.readArtifact((args as { ref?: string }).ref ?? "", args as Record<string, unknown>);
+                handled = true;
               } else if (harnessTool) {
                 // A harness-run tool (document page reads) needs no MCP
                 // session and no permission card: it reads only what the
@@ -521,7 +605,8 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
               }
               if (!handled) {
                 const diskPerms = loadDiskPermissions();
-                const perm = checkToolPermission(call.function.name, diskPerms, args as Record<string, unknown>);
+                // Already advertised for this turn (`tools.validate` ran above).
+                const perm = checkToolPermission(call.function.name, diskPerms, args as Record<string, unknown>, { mountedTool: true });
                 if (!perm.allowed) {
                   denials.push(call.function.name);
                   startItem();
@@ -538,8 +623,13 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
                 const cmdStr = String((args as any)?.command || (args as any)?.cmd || "");
                 const isMassDel = (Boolean(cmdStr) && isMassDeletionCommand(cmdStr)) || isMassDeletionCommand(inputPreview ?? "")
                   || ((args as any)?.recursive === true && ((args as any)?.path === "/" || (args as any)?.target === "/"));
-                const allowed = (turn.approvalMode === "full" && !isMassDel)
-                  || await approval.ask(call.function.name, inputPreview ?? "This tool has no arguments.");
+                // Routine workspace work runs without a card; elevated and
+                // consequential calls still stop for one. See
+                // server/tool-approval.ts.
+                const assessment = assessToolCall(call.function.name, args as Record<string, unknown>, { workspaceRoots: turn.cwd ? [turn.cwd] : undefined });
+                const allowed = needsApproval(turn.approvalMode ?? "ask", assessment, { massDeletion: isMassDel })
+                  ? await approval.ask(call.function.name, approvalSummary(assessment, inputPreview))
+                  : true;
                 abort.signal.throwIfAborted();
                 startItem();
                 if (allowed) {
@@ -561,7 +651,40 @@ export function createOpenAIChatRuntime<Config>(options: RuntimeOptions<Config>)
             const settledResult = result ?? { ok: false, text: "The tool produced no result." };
             const text = safeText(settledResult.text);
             const output = preview({ ok: settledResult.ok, result: text });
-            emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.id, ok: settledResult.ok, output });
+            emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.id, title: call.function.name, ok: settledResult.ok, output, rawOutput: text });
+            const callCompletedAt = Date.now();
+            authoritativeStore.recordExecution({
+              callId: call.id,
+              name: call.function.name,
+              args: callArgs,
+              startedAt: callCompletedAt,
+              completedAt: callCompletedAt,
+              ok: settledResult.ok,
+              rawOutput: text,
+              threadId: turn.threadId,
+              botId: turn.botId,
+            });
+            const sideEffect = classifySideEffect(call.function.name, callArgs);
+            if (settledResult.ok) {
+              executionMemory.completedSteps.push({
+                callId: call.id,
+                name: call.function.name,
+                summary: text.replace(/\s+/g, " ").trim().slice(0, 160),
+                sideEffect,
+                timestamp: callCompletedAt,
+              });
+              if (callArgs && typeof callArgs.path === "string") {
+                const p = callArgs.path;
+                if (!executionMemory.touchedFiles.includes(p)) executionMemory.touchedFiles.push(p);
+              }
+            } else {
+              executionMemory.failedSteps.push({
+                callId: call.id,
+                name: call.function.name,
+                errorSummary: text.replace(/\s+/g, " ").trim().slice(0, 200),
+                timestamp: callCompletedAt,
+              });
+            }
             if (!settledResult.ok) {
               toolFailed = true;
               roundHadFailure = true;

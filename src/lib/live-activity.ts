@@ -6,11 +6,11 @@ import type { LocaleKey } from "@/locales";
 // array is built once at import time
 const FALLBACK_LABELS: Array<[RegExp, LocaleKey]> = [
   [/\b(?:bash|shell|terminal|exec|command|run_command)\b/i, "chat.activity.runCommand"],
+  [/\b(?:web_fetch|fetch_url|read_page)\b/i, "chat.activity.readPage"],
   [/\b(?:read|read_file|view|open_file)\b/i, "chat.activity.readFile"],
   [/\b(?:write|write_file|create_file)\b/i, "chat.activity.writeFile"],
   [/\b(?:edit|apply_patch|replace|str_replace)\b/i, "chat.activity.editFile"],
   [/\b(?:web_search|search_web)\b/i, "chat.activity.searchWeb"],
-  [/\b(?:web_fetch|fetch_url|read_page)\b/i, "chat.activity.readPage"],
   [/\b(?:grep|glob|find|search)\b/i, "chat.activity.searching"],
   [/\b(?:screenshot|screen_capture)\b/i, "chat.activity.screen"],
   [/\b(?:click|type|keypress|press|scroll|computer)\b/i, "chat.activity.computer"],
@@ -44,6 +44,7 @@ export function liveActivityLabel(message?: Message): string {
     return t("chat.activity.thinking");
   }
 
+  if (message.tool.label?.trim()) return sentenceCase(message.tool.label);
   if (message.tool.spoken?.trim()) return sentenceCase(message.tool.spoken);
 
   const toolName = message.tool.name.replace(/^mcp__[^_]+__/, "").split(":", 1)[0] ?? "";
@@ -51,4 +52,24 @@ export function liveActivityLabel(message?: Message): string {
     if (pattern.test(toolName)) return t(key);
   }
   return t("chat.activity.working");
+}
+
+/**
+ * Human-friendly fallback when both label and spoken narration are missing.
+ * Strips raw internal identifiers (such as mcp prefixes or driver names)
+ * and returns a friendly verb phrase or a neutral action label.
+ */
+export function humanizeToolFallback(toolName: string): string {
+  const cleanName = toolName
+    .replace(/^mcp__[A-Za-z0-9_-]+__/, "")
+    .replace(/^mcp__/, "")
+    .replace(/^android_computer_/, "")
+    .replace(/^android_browser_/, "")
+    .replace(/^phone_/, "")
+    .split(":", 1)[0] ?? "";
+  const normalized = cleanName.replace(/_/g, " ");
+  for (const [pattern, key] of FALLBACK_LABELS) {
+    if (pattern.test(cleanName) || pattern.test(normalized)) return t(key);
+  }
+  return t("toolDetail.workingOnStep");
 }

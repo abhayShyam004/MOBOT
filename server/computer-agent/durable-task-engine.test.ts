@@ -1,8 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, renameSync, writeFileSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DurableTaskEngine } from "./durable-task-engine.ts";
+import { DurableTaskEngine, hasEstablishedMonitoring } from "./durable-task-engine.ts";
 import { GeneralProcessManager } from "./process-manager.ts";
 
 describe("Phase 3: Durable Task Engine & Lifecycle Suite", () => {
@@ -48,6 +48,40 @@ describe("Phase 3: Durable Task Engine & Lifecycle Suite", () => {
     const loaded = freshEngine.getTask(task.id);
     expect(loaded).toBeDefined();
     expect(loaded?.goal).toBe(task.goal);
+  });
+
+  it("surfaces authoritative task-write failures and keeps the last persisted state", () => {
+    const task = engine.createTask({ goal: "Persist every transition" });
+    const taskFile = join(tempDir, ".mobot", "tasks", `${task.id}.json`);
+    const persisted = readFileSync(taskFile, "utf8");
+    const tasksDir = join(tempDir, ".mobot", "tasks");
+    const heldDir = `${tasksDir}.held`;
+
+    try {
+      renameSync(tasksDir, heldDir);
+      writeFileSync(tasksDir, "not a directory");
+      expect(() => engine.startPlanning(task.id, "plan-should-not-persist")).toThrow(/Failed to persist durable task/);
+      expect(engine.getTask(task.id)?.status).toBe("CREATED");
+      expect(readFileSync(join(heldDir, `${task.id}.json`), "utf8")).toBe(persisted);
+    } finally {
+      if (existsSync(tasksDir)) unlinkSync(tasksDir);
+      if (existsSync(heldDir)) renameSync(heldDir, tasksDir);
+    }
+  });
+
+  it("scopes task lookup to its owning workspace and rejects path-like task IDs", () => {
+    const task = engine.createTask({ goal: "Workspace-bound task" });
+    const otherWorkspace = mkdtempSync(join(tmpdir(), "omb-other-workspace-"));
+    const otherEngine = new DurableTaskEngine(otherWorkspace);
+    try {
+      expect(otherEngine.getTask(task.id)).toBeNull();
+      expect(engine.getTask(task.id, otherWorkspace)).toBeNull();
+      expect(otherEngine.getTask("../durable_tasks")).toBeNull();
+      expect(() => otherEngine.startRunning(task.id)).toThrow(/not found/);
+    } finally {
+      otherEngine.stopSupervisor();
+      rmSync(otherWorkspace, { recursive: true, force: true });
+    }
   });
 
   it("2. Lifecycle transitions: follows strict explicit states", () => {
@@ -292,5 +326,31 @@ describe("Phase 3: Durable Task Engine & Lifecycle Suite", () => {
       "Successfully built and verified"
     );
     expect(notifications.some((n) => n.kind === "done")).toBe(true);
+  });
+
+  it("10. Durable background monitoring: persists target, schedule, status, and verified condition across engine reloads", () => {
+    const task = engine.createTask({ goal: "Monitor external API uptime" });
+    expect(hasEstablishedMonitoring(task)).toBe(false);
+
+    // Register active persistent monitoring target
+    const updated = engine.registerMonitoringTarget(task.id, {
+      target: "https://api.example.com/health",
+      cadenceSeconds: 60,
+      status: "active",
+      verifiedCondition: "HTTP 200 within 500ms",
+      consecutiveSuccesses: 5,
+    });
+    expect(hasEstablishedMonitoring(updated)).toBe(true);
+
+    // Reload state in a fresh engine instance from disk
+    const freshEngine = new DurableTaskEngine(tempDir, procMgr);
+    const loaded = freshEngine.getTask(task.id);
+    expect(loaded).not.toBeNull();
+    expect(hasEstablishedMonitoring(loaded)).toBe(true);
+    expect(loaded?.monitoringTarget?.target).toBe("https://api.example.com/health");
+    expect(loaded?.monitoringTarget?.cadenceSeconds).toBe(60);
+    expect(loaded?.monitoringTarget?.status).toBe("active");
+    expect(loaded?.monitoringTarget?.verifiedCondition).toBe("HTTP 200 within 500ms");
+    expect(loaded?.monitoringTarget?.consecutiveSuccesses).toBe(5);
   });
 });

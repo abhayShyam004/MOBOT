@@ -158,6 +158,17 @@ const askQuestionsOrMissing = (value: unknown) =>
         Array.isArray(question.options) &&
         question.options.every((option) => isRecord(option) && typeof option.label === "string"),
     ));
+const readinessStages = new Set(["startup", "initialize", "tools/list", "schema", "ready"]);
+const toolReadinessServer = (value: unknown) =>
+  isRecord(value) &&
+  typeof value.server === "string" &&
+  typeof value.ok === "boolean" &&
+  typeof value.stage === "string" &&
+  readinessStages.has(value.stage) &&
+  typeof value.durationMs === "number" && Number.isFinite(value.durationMs) && value.durationMs >= 0 &&
+  typeof value.timeoutMs === "number" && Number.isFinite(value.timeoutMs) && value.timeoutMs >= 0 &&
+  typeof value.toolCount === "number" && Number.isInteger(value.toolCount) && value.toolCount >= 0 &&
+  stringOrMissing(value.code) && stringOrMissing(value.error);
 
 function isRuntimeEvent(value: unknown): value is RuntimeEvent {
   if (
@@ -223,6 +234,16 @@ function isRuntimeEvent(value: unknown): value is RuntimeEvent {
           value.source === "system" ||
           value.source === "unavailable" ||
           value.source === "peer")
+      );
+    case "tool.readiness":
+      return (
+        Array.isArray(value.servers) &&
+        value.servers.length <= 32 &&
+        value.servers.every(toolReadinessServer) &&
+        typeof value.toolCount === "number" &&
+        Number.isInteger(value.toolCount) &&
+        value.toolCount >= 0 &&
+        typeof value.providerStarted === "boolean"
       );
     case "thread.token-usage.updated":
       return typeof value.input === "number" && typeof value.output === "number";

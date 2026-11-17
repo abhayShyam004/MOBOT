@@ -23,6 +23,18 @@ sealed class Chat {
             is RoomChat -> room.tasks?.firstOrNull { it.threadId == threadId }?.displayTitle ?: "Conversation"
         }
 
+    /**
+     * This conversation's title, but only when a task record actually exists
+     * for *this* thread. Absent means there is no reliable current-task
+     * description, and the header must fall back rather than reuse an older
+     * thread's title or the bot's identity snapshot.
+     */
+    val currentTaskTitle: String?
+        get() = when (this) {
+            is BotChat -> bot.tasks?.firstOrNull { it.threadId == threadId }?.title?.takeIf { it.isNotBlank() }
+            is RoomChat -> room.tasks?.firstOrNull { it.threadId == threadId }?.title?.takeIf { it.isNotBlank() }
+        }
+
     /** Older desktops omit room tasks, so don't expose routes they do not support. */
     val supportsTasks: Boolean
         get() = when (this) {

@@ -151,7 +151,20 @@ export interface Message {
    * narration of the same chip ("reading a file"), used by call mode. */
   /** `setup` marks an error fixed by installing something, not by retrying.
    * `summary` is the call's input on one redacted line (the shell command). */
-  tool?: { name: string; ok?: boolean; spoken?: string; setup?: boolean; summary?: string; input?: string; output?: string };
+  tool?: {
+    name: string;
+    label?: string;
+    state?: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "retrying";
+    operationId?: string;
+    ok?: boolean;
+    spoken?: string;
+    setup?: boolean;
+    summary?: string;
+    input?: string;
+    output?: string;
+    error?: string;
+    durationMs?: number;
+  };
   /** A failed turn, classified by the server: what went wrong, where, and what
    * to do. Never the provider's own payload — see shared/wire.ts. */
   failure?: FailureCardData;
@@ -1501,6 +1514,21 @@ export function reducer(state: AppState, action: Action): AppState {
             : current.activeLeafId,
         }));
       }
+      // Deduplicate: if this exact message ID is already present, update it in place
+      const existingMessageIndex = bot.messages.findIndex((m) => m.id === action.message.id);
+      if (existingMessageIndex >= 0) {
+        return updateBot(state, bot.id, (b) => {
+          const existing = b.messages[existingMessageIndex];
+          // If the existing message was already settled and incoming is unsettled, do not regress to pending
+          const merged: Message = (existing.tool?.ok !== undefined && action.message.tool && action.message.tool.ok === undefined)
+            ? { ...action.message, tool: { ...action.message.tool, ok: existing.tool.ok, state: existing.tool.state } }
+            : action.message;
+          return {
+            ...b,
+            messages: b.messages.map((m, idx) => (idx === existingMessageIndex ? merged : m)),
+          };
+        });
+      }
       // every server-side append chains onto (and becomes) the active leaf
       const next = updateBot(state, bot.id, (b) => {
         // A message chains onto the leaf → it becomes the leaf (the normal
@@ -1567,6 +1595,15 @@ export function reducer(state: AppState, action: Action): AppState {
       if (!bot) {
         const group = state.groups.find((g) => g.threadId === action.threadId);
         if (!group) return state;
+        const exists = group.messages.some((m) => m.id === action.message.id);
+        if (!exists) {
+          return {
+            ...state,
+            groups: state.groups.map((g) =>
+              g.id === group.id ? { ...g, messages: [...g.messages, action.message] } : g
+            ),
+          };
+        }
         return {
           ...state,
           groups: state.groups.map((g) =>
@@ -1575,6 +1612,11 @@ export function reducer(state: AppState, action: Action): AppState {
               : g,
           ),
         };
+      }
+      const messageExists = bot.messages.some((m) => m.id === action.message.id);
+      if (!messageExists) {
+        // Out-of-order patch arrived before messageAdded: insert rather than dropping
+        return reducer(state, { type: "messageAdded", threadId: action.threadId, message: action.message });
       }
       const motion =
         action.message.kind === "activity"

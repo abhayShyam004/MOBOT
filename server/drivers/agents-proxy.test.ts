@@ -23,6 +23,9 @@ let lastRoomsQuery = "";
 let lastPostBody: any = null;
 let postCalls = 0;
 let postResponse: unknown = { ok: true, messageId: "msg-1", roomName: "Launch" };
+/** Status the stub answers post-to-room with, so tests can stage an
+ * ambiguous delivery (5xx) or a harness refusal (4xx). */
+let postStatus = 201;
 const DEFAULT_AGENTS = { bots: [{ id: "bot-helper", name: "Helper", model: "fake-model", busy: false }] };
 let agentsResponse: unknown = DEFAULT_AGENTS;
 let roomsResponse: unknown = {
@@ -139,8 +142,11 @@ const pending = new Map<number, (msg: any) => void>();
 let nextId = 100;
 
 function rpc(method: string, params?: unknown): Promise<any> {
+  return rpcWithId(method, params, nextId++);
+}
+
+function rpcWithId(method: string, params: unknown, id: number): Promise<any> {
   return new Promise((resolve, reject) => {
-    const id = nextId++;
     pending.set(id, resolve);
     child.stdin!.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     setTimeout(() => {
@@ -174,7 +180,7 @@ beforeAll(async () => {
       req.on("end", () => {
         lastPostBody = JSON.parse(data);
         postCalls += 1;
-        res.writeHead(201, { "content-type": "application/json" });
+        res.writeHead(postStatus, { "content-type": "application/json" });
         res.end(JSON.stringify(postResponse));
       });
       return;
@@ -727,22 +733,60 @@ describe("agents-proxy MCP surface", () => {
     expect(res.result.content[0].text).toContain("Posted in Launch");
     expect(res.result.content[0].text).toContain("expect no reply");
     // the room id is the only thing the model chooses; who is posting comes
-    // from the env the harness injected, never from the tool arguments
+    // from the env the harness injected, never from the tool arguments. The
+    // proxy mints the post's identity itself — turn root plus ordinal — and
+    // the harness journals the post under it.
     expect(lastPostBody).toEqual({
       fromBotId: "bot-asker",
       fromThreadId: "thread-asker-routine",
       groupId: "room-launch",
       message: "shipping at 4",
+      sendId: expect.stringMatching(/^mcp\.[A-Za-z0-9_-]+\.\d+$/),
     });
+  });
+
+  it("retries an ambiguous delivery under the same post identity, and a new post under a new one", async () => {
+    // A 5xx means the harness failed, not the request: the append may already
+    // be durable. The retry — even when the transport renumbers the JSON-RPC
+    // id — must name the same post so the harness replays the original
+    // receipt instead of appending a second message.
+    postCalls = 0;
+    postResponse = {};
+    postStatus = 500;
+    const ambiguous = await rpcWithId("tools/call", { name: "post_to_room", arguments: { group_id: "room-launch", message: "ambiguity probe" } }, nextId + 7);
+    expect(ambiguous.result.isError).toBe(true);
+    const pendingBody = { ...lastPostBody };
+    expect(pendingBody.sendId).toEqual(expect.stringMatching(/^mcp\.[A-Za-z0-9_-]+\.\d+$/));
+
+    postStatus = 201;
+    postResponse = { ok: true, messageId: "msg-1", roomName: "Launch" };
+    const retried = await rpcWithId("tools/call", { name: "post_to_room", arguments: { group_id: "room-launch", message: "ambiguity probe" } }, nextId + 8);
+    expect(retried.result.isError).toBeFalsy();
+    expect(lastPostBody.sendId).toBe(pendingBody.sendId);
+    expect(retried.result.content[0].text).toContain("Posted in Launch");
+
+    // A post the harness refused outright (4xx proves it did nothing) is a
+    // different logical post next time: a fresh identity, not the stuck one.
+    postStatus = 429;
+    postResponse = { error: "This room has already taken 2 bot posts. Do not retry this call." };
+    const refused = await callTool("post_to_room", { group_id: "room-launch", message: "a different post" });
+    expect(refused.result.isError).toBe(true);
+    expect(lastPostBody.sendId).toEqual(expect.stringMatching(/^mcp\.[A-Za-z0-9_-]+\.\d+$/));
+    expect(lastPostBody.sendId).not.toBe(pendingBody.sendId);
+    postStatus = 201;
+    postResponse = { ok: true, messageId: "msg-1", roomName: "Launch" };
   });
 
   it("hands a harness refusal to the model verbatim", async () => {
     // the budget's wording is the whole point of it — it must not be
-    // reworded into something that reads like "try again"
+    // reworded into something that reads like "try again". The harness
+    // refuses with a 4xx, which is also its proof the post never landed.
+    postStatus = 429;
     postResponse = { error: "This room has already taken 2 bot posts. Do not retry this call." };
     const res = await callTool("post_to_room", { group_id: "room-launch", message: "after the cap" });
     expect(res.result.isError).toBe(true);
     expect(res.result.content[0].text).toMatch(/do not retry this call/i);
+    postStatus = 201;
     postResponse = { ok: true, messageId: "msg-1", roomName: "Launch" };
   });
 

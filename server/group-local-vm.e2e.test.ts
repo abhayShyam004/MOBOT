@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -140,7 +140,7 @@ async function room() {
   rooms.push(group.id);
   return { bots, group };
 }
-const send = (id: string) => api("POST", `/api/groups/${id}/messages`, { text: "Reply once." });
+const send = (id: string) => api("POST", `/api/groups/${id}/messages`, { text: "Reply once.", sendId: randomUUID() });
 const stop = (id: string) => api("POST", `/api/groups/${id}/interrupt`, {});
 
 describe("Group Local VM ownership on the real isolated server", () => {

@@ -105,6 +105,12 @@ export function isReadOnlyTool(tool: string, summary?: string): boolean {
   return false;
 }
 
+function sanitizePathString(s: string): string {
+  return s
+    .replace(/\/data\/(?:user\/\d+|data)\/[^/\s'"]+\/files\/host\/(?:data\/)?(?:task-workspaces|workspaces)\/[^/\s'"]+\/?(?:data\/)?/gi, "")
+    .replace(/\/data\/(?:user\/\d+|data)\/[^/\s'"]+\/?/gi, "");
+}
+
 export function humanizeApprovalRequest(options: {
   tool: string;
   summary?: string;
@@ -114,9 +120,89 @@ export function humanizeApprovalRequest(options: {
   command?: string;
 }): HumanizedApproval {
   const rawTool = options.tool || "";
-  const normTool = rawTool.replace(/^mcp__[^_]+__/, "");
+  const normTool = rawTool
+    .replace(/^mcp__(?:android_computer|android_browser|openmausbot-phone)__/i, "")
+    .replace(/^mcp__[^_]+__/i, "")
+    .replace(/^android_(?:computer|browser)_/i, "");
   const params = options.parameters || tryParseJson(options.summary) || {};
-  const summaryStr = String(options.summary || "").trim();
+  const summaryStr = sanitizePathString(String(options.summary || "").trim());
+  // A chat driver's own assessment (server/tool-approval.ts) arrives as prose:
+  // the action, then a facts line ("Leaves this device: no · …"). Its first
+  // line is the action itself, which is what the card's title is for — a
+  // prettified tool name, or a canned branch's own verb, says less. Detected
+  // up here so the tool-specific branches below defer to it instead of
+  // replacing the driver's action with their own.
+  const assessed = /^[^\n]+\n\n[^\n]*Leaves this device: /.test(summaryStr);
+
+  // Workspace Tools
+  if (normTool === "workspace_list" || normTool === "list_files") {
+    return {
+      title: "Inspect Workspace",
+      subtitle: "MOBOT wants to inspect the files in your workspace.",
+      category: "read",
+      isReadOnly: true,
+      operation: "workspace_list",
+    };
+  }
+
+  if (normTool === "workspace_read" || normTool === "read_file") {
+    const path = String(params.path || params.file || summaryStr).trim();
+    const cleanPath = path ? sanitizePathString(path) : "";
+    return {
+      title: "Read File",
+      subtitle: cleanPath ? `MOBOT wants to read ${cleanPath} in your workspace.` : "MOBOT wants to read a file in your workspace.",
+      category: "read",
+      isReadOnly: true,
+      target: cleanPath || undefined,
+      operation: "workspace_read",
+    };
+  }
+
+  if (normTool === "workspace_write" || normTool === "write_file") {
+    if (assessed) {
+      return {
+        title: sanitizePathString(summaryStr.split("\n")[0].trim()),
+        subtitle: sanitizePathString(summaryStr),
+        category: "write",
+        isReadOnly: false,
+        operation: "workspace_write",
+      };
+    }
+    const explicitPath = String(params.path || params.file || "").trim();
+    const summaryPath = summaryStr;
+    // Prose is a summary, not a path: a caller that says "The bot wants to
+    // write a file" must keep its prettified tool name rather than have the
+    // sentence spliced into "MOBOT wants to write … in your workspace".
+    if (!explicitPath && /\s/.test(summaryPath) && !summaryPath.startsWith("{")) {
+      return {
+        title: "Workspace Write",
+        subtitle: summaryPath,
+        category: "write",
+        isReadOnly: false,
+        operation: "workspace_write",
+      };
+    }
+    const path = explicitPath || summaryPath;
+    const cleanPath = path ? sanitizePathString(path) : "";
+    return {
+      title: "Create File",
+      subtitle: cleanPath ? `MOBOT wants to write ${cleanPath} in your workspace.` : "MOBOT wants to create or modify a file in your workspace.",
+      category: "write",
+      isReadOnly: false,
+      target: cleanPath || undefined,
+      operation: "workspace_write",
+    };
+  }
+
+  if (normTool === "artifact_register") {
+    return {
+      title: "Register Deliverable",
+      subtitle: "MOBOT wants to register a generated deliverable.",
+      category: "action",
+      isReadOnly: false,
+      operation: "artifact_register",
+    };
+  }
 
   // 1. Gmail Tools (Composio / MCP)
   if (/^gmail_/i.test(normTool) || /^GMAIL_/i.test(rawTool)) {
@@ -226,8 +312,29 @@ export function humanizeApprovalRequest(options: {
     };
   }
 
-  // 3. Command Execution / Shell
-  if (normTool === "shell" || normTool === "bash" || normTool === "terminal") {
+  // 3. Agent & Session Workspace Tools
+  if (normTool === "agents_session_search" || normTool === "session_search") {
+    return {
+      title: "Search Project Activity",
+      subtitle: "MOBOT wants to search your recent project files and session history.",
+      category: "read",
+      isReadOnly: true,
+      operation: "agents_session_search",
+    };
+  }
+
+  if (normTool === "agents_select_computer" || normTool === "select_computer") {
+    return {
+      title: "Connect Computer",
+      subtitle: "MOBOT wants to connect to your computer workspace.",
+      category: "action",
+      isReadOnly: false,
+      operation: "agents_select_computer",
+    };
+  }
+
+  // 4. Command Execution / Shell
+  if (normTool === "shell" || normTool === "bash" || normTool === "terminal" || normTool === "run_shell" || normTool === "run_command") {
     const cmd = String(options.command || params.command || params.cmd || summaryStr).trim();
     const isRead = isReadOnlyTool(normTool, cmd);
     const cleanCmd = cmd.length > 80 ? `${cmd.slice(0, 77)}…` : cmd;
@@ -267,8 +374,13 @@ export function humanizeApprovalRequest(options: {
   const isRead = isReadOnlyTool(normTool, summaryStr);
   let cleanSubtitle = summaryStr;
 
+  // An assessment is already written for a person, so the JSON cleanup below
+  // must not run on it: it would find the `Arguments:` payload, flatten that,
+  // and throw away the action, the destination and whether the step can be
+  // undone.
+
   // Clean raw JSON strings from subtitle
-  const jsonParsed = tryParseJson(cleanSubtitle);
+  const jsonParsed = assessed ? null : tryParseJson(cleanSubtitle);
   if (jsonParsed) {
     const entries = Object.entries(jsonParsed)
       .filter(([k]) => !k.startsWith("_") && k !== "transport" && k !== "connector")
@@ -287,9 +399,11 @@ export function humanizeApprovalRequest(options: {
     .replace(/[_-]/g, " ")
     .replace(/\b\w/g, (c) => c.toUpperCase());
 
+  const assessedAction = assessed ? sanitizePathString(summaryStr.split("\n")[0].trim()) : "";
+
   return {
-    title: options.approvalScope === "local-computer" ? "Local Computer Approval" : cleanTitle || "Approval Needed",
-    subtitle: cleanSubtitle || "MOBOT requires your approval to proceed with this action.",
+    title: assessedAction || (options.approvalScope === "local-computer" ? "Local Computer Approval" : cleanTitle || "Approval Needed"),
+    subtitle: sanitizePathString(cleanSubtitle) || "MOBOT requires your approval to proceed with this action.",
     category: isRead ? "read" : "action",
     isReadOnly: isRead,
     operation: normTool,

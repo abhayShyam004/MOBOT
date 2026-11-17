@@ -9,12 +9,20 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Surface
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -47,6 +55,9 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Close
@@ -115,6 +126,8 @@ import com.openmausbot.companion.core.Dictation
 import com.openmausbot.companion.core.DisplayedMessageAttachment
 import com.openmausbot.companion.core.DownloadedFile
 import com.openmausbot.companion.core.Message
+import com.openmausbot.companion.core.OptionCard
+import com.openmausbot.companion.core.ToolActivity
 import com.openmausbot.companion.core.BotMood
 import com.openmausbot.companion.core.BotMoodRules
 import com.openmausbot.companion.core.ThreadRef
@@ -298,6 +311,8 @@ private fun LoadedChat(
     val context = LocalContext.current
     val uriHandler = LocalUriHandler.current
 
+    val isPreview = context.packageName.endsWith(".preview")
+
     val attachmentDraft = remember(draftKey, chatDrafts) {
         chatDrafts.register(chatId, draftKey)
         chatDrafts.attachments(draftKey)
@@ -315,6 +330,11 @@ private fun LoadedChat(
     var filePreview by remember(threadId) { mutableStateOf<FilePreviewItem?>(null) }
     var fileDownloadJob by remember(threadId) { mutableStateOf<Job?>(null) }
     var startingRoom by remember(threadId) { mutableStateOf(false) }
+
+    // Pilot 2: Expressive Material 3 Bottom Sheets
+    var activeApproval by remember(threadId) { mutableStateOf<Pair<OptionCard, Message>?>(null) }
+    var activeAttachmentSheet by remember(threadId) { mutableStateOf<Triple<DisplayedMessageAttachment, Message, DownloadedFile?>?>(null) }
+    var activeToolDetails by remember(threadId) { mutableStateOf<ToolActivity?>(null) }
     val filePreviews = remember(context) { FilePreviews(context) }
     DisposableEffect(filePreviews) {
         onDispose {
@@ -656,12 +676,50 @@ private fun LoadedChat(
         session.loadThreadIfNeeded(threadId)
     }
 
-    // Filter out tool activity chips and failure dashboards from normal conversation
-    val visibleConversationRows = remember(transcript) {
-        transcript.filter { row ->
-            when (row) {
-                is TranscriptRow.Single -> row.message.kind != Message.Kind.ACTIVITY
-                is TranscriptRow.ActivityRun -> false
+    val currentTurnTools = remember(rawTranscript, isProcessing) {
+        if (!isProcessing) {
+            emptyList()
+        } else {
+            val lastUserIndex = rawTranscript.indexOfLast { it.role == Message.Role.USER }
+            val candidates = if (lastUserIndex >= 0) {
+                rawTranscript.subList(lastUserIndex + 1, rawTranscript.size)
+            } else {
+                rawTranscript
+            }
+            candidates.filter { it.kind == Message.Kind.ACTIVITY && it.tool != null }
+        }
+    }
+    val currentTurnToolIds = remember(currentTurnTools) { currentTurnTools.map { it.id }.toSet() }
+
+    // Filter conversation rows according to preview / production mode
+    val visibleConversationRows = remember(transcript, isPreview, isProcessing, currentTurnToolIds) {
+        if (!isPreview) {
+            transcript.filter { row ->
+                when (row) {
+                    is TranscriptRow.Single -> row.message.kind != Message.Kind.ACTIVITY
+                    is TranscriptRow.ActivityRun -> false
+                }
+            }
+        } else {
+            transcript.filter { row ->
+                when (row) {
+                    is TranscriptRow.Single -> {
+                        if (row.message.kind != Message.Kind.ACTIVITY) {
+                            true
+                        } else if (isProcessing && currentTurnToolIds.contains(row.message.id)) {
+                            false
+                        } else {
+                            row.message.tool != null || row.message.failure != null
+                        }
+                    }
+                    is TranscriptRow.ActivityRun -> {
+                        if (isProcessing && row.items.any { currentTurnToolIds.contains(it.id) }) {
+                            false
+                        } else {
+                            true
+                        }
+                    }
+                }
             }
         }
     }
@@ -1011,44 +1069,105 @@ private fun LoadedChat(
 
                     itemsIndexedKeyed(visibleConversationRows) { index, message ->
                         when (message) {
-                            is TranscriptRow.Single -> MessageRow(
-                                chat = chat,
-                                message = message.message,
-                                // One tail per run of bubbles from the same author,
-                                // not one per bubble.
-                                endsRun = TranscriptLayout.endsRowRun(visibleConversationRows, index),
-                                openLink = ::openLink,
-                                openAttachment = ::openAttachment,
-                                openThread = ::openThread,
-                                // A failed turn's own actions. Retry appears only
-                                // when there is a request to run again; Change
-                                // model only for a bot, and Provider settings
-                                // always, because the card decides per kind which
-                                // of them is worth offering.
-                                turnRetry = retrySources[message.message.id]?.let { source ->
-                                    { scope.launch { session.retryTurn(chat, source) } }
-                                },
-                                changeModel = if (bot != null) {
-                                    {
-                                        showingModelPicker = true
-                                        showingProfile = true
-                                    }
+                            is TranscriptRow.Single -> {
+                                val singleTool = message.message.tool
+                                if (isPreview && message.message.kind == Message.Kind.ACTIVITY && message.message.failure == null && singleTool != null) {
+                                    ExpressiveSingleActivityRow(
+                                        tool = singleTool,
+                                        chat = chat,
+                                        onToolClick = { activeToolDetails = it },
+                                    )
                                 } else {
-                                    null
-                                },
-                                openProviders = onOpenModelProviders,
-                                onPromptAction = ::submit,
-                            )
-                            is TranscriptRow.ActivityRun -> Unit
+                                    MessageRow(
+                                        chat = chat,
+                                        message = message.message,
+                                        // One tail per run of bubbles from the same author,
+                                        // not one per bubble.
+                                        endsRun = TranscriptLayout.endsRowRun(visibleConversationRows, index),
+                                        openLink = ::openLink,
+                                        openAttachment = { att, msg, downloaded ->
+                                            val isPreview = context.packageName.endsWith(".preview")
+                                            if (isPreview) {
+                                                activeAttachmentSheet = Triple(att, msg, downloaded)
+                                            } else {
+                                                openAttachment(att, msg, downloaded)
+                                            }
+                                        },
+                                        openThread = ::openThread,
+                                        openApprovalSheet = { card, msg ->
+                                            activeApproval = Pair(card, msg)
+                                        },
+                                        openToolDetailsSheet = { tool ->
+                                            activeToolDetails = tool
+                                        },
+                                        // A failed turn's own actions. Retry appears only
+                                        // when there is a request to run again; Change
+                                        // model only for a bot, and Provider settings
+                                        // always, because the card decides per kind which
+                                        // of them is worth offering.
+                                        turnRetry = retrySources[message.message.id]?.let { source ->
+                                            { scope.launch { session.retryTurn(chat, source) } }
+                                        },
+                                        changeModel = if (bot != null) {
+                                            {
+                                                showingModelPicker = true
+                                                showingProfile = true
+                                            }
+                                        } else {
+                                            null
+                                        },
+                                        openProviders = onOpenModelProviders,
+                                        onPromptAction = ::submit,
+                                    )
+                                }
+                            }
+                            is TranscriptRow.ActivityRun -> {
+                                if (isPreview) {
+                                    ExpressiveActivityRunCard(
+                                        run = message,
+                                        chat = chat,
+                                        onToolClick = { activeToolDetails = it },
+                                    )
+                                }
+                            }
                         }
                     }
 
                     if (liveCount == 1) {
                         item(key = LIVE_BUBBLE_KEY) {
-                            if (tail == TranscriptTail.WORKING || (tail == TranscriptTail.REASONING && liveText.isNullOrEmpty())) {
-                                WorkingBubble(name = chat.name, color = chat.color)
+                            if (isPreview) {
+                                if (currentTurnTools.isNotEmpty()) {
+                                    Column(modifier = Modifier.fillMaxWidth()) {
+                                        ExpressiveLiveExecutionWindow(
+                                            chat = chat,
+                                            tools = currentTurnTools,
+                                            isBusy = tail != TranscriptTail.STREAM,
+                                            isWaitingApproval = pendingApproval,
+                                            onToolClick = { activeToolDetails = it },
+                                        )
+                                        if (tail == TranscriptTail.STREAM && !liveText.isNullOrEmpty()) {
+                                            Spacer(Modifier.height(8.dp))
+                                            StreamingBubble(text = liveText, reasoning = null)
+                                        }
+                                    }
+                                } else if (tail == TranscriptTail.WORKING || (tail == TranscriptTail.REASONING && liveText.isNullOrEmpty())) {
+                                    val statusText = if (pendingApproval) "Waiting for your approval…" else "Thinking…"
+                                    ExpressiveLiveExecutionWindow(
+                                        chat = chat,
+                                        tools = emptyList(),
+                                        isBusy = true,
+                                        isWaitingApproval = pendingApproval,
+                                        statusText = statusText,
+                                    )
+                                } else {
+                                    StreamingBubble(text = liveText, reasoning = null)
+                                }
                             } else {
-                                StreamingBubble(text = liveText, reasoning = null)
+                                if (tail == TranscriptTail.WORKING || (tail == TranscriptTail.REASONING && liveText.isNullOrEmpty())) {
+                                    WorkingBubble(name = chat.name, color = chat.color)
+                                } else {
+                                    StreamingBubble(text = liveText, reasoning = null)
+                                }
                             }
                         }
                     }
@@ -1259,17 +1378,76 @@ private fun LoadedChat(
             )
         }
 
-        PlusSheet(
-            open = showingPlus,
-            actions = remember(chat, pendingApproval, canAddAttachment) {
-                ChatActions.sheet(chat, hasPendingApproval = pendingApproval, canAddAttachment = canAddAttachment)
-            },
-            onDismiss = { showingPlus = false },
-            onAction = {
-                showingPlus = false
-                onAction(it)
-            },
-        )
+        val isPreview = LocalContext.current.packageName.endsWith(".preview")
+        val sheetActions = remember(chat, pendingApproval, canAddAttachment) {
+            ChatActions.sheet(chat, hasPendingApproval = pendingApproval, canAddAttachment = canAddAttachment)
+        }
+        if (isPreview) {
+            val demoMessage = remember(chat) {
+                Message(
+                    id = "pilot2-demo-msg",
+                    role = Message.Role.BOT,
+                    kind = Message.Kind.OPTIONS,
+                    at = System.currentTimeMillis() / 1000.0,
+                    text = "Pilot 2 Expressive Bottom Sheet Demonstration",
+                )
+            }
+            ExpressiveActionMenu(
+                open = showingPlus,
+                actions = sheetActions,
+                onDismiss = { showingPlus = false },
+                onAction = {
+                    showingPlus = false
+                    onAction(it)
+                },
+                onTriggerApprovalSheet = {
+                    showingPlus = false
+                    activeApproval = Pair(
+                        OptionCard(
+                            title = "Run Terminal Command",
+                            subtitle = "sudo dnf clean all && dnf upgrade --security -y",
+                            options = listOf("Deny", "Allow Once", "Always allow"),
+                            requestId = "pilot2-demo-req-1",
+                            tool = "terminal.exec",
+                            allowKey = "dnf.upgrade",
+                        ),
+                        demoMessage,
+                    )
+                },
+                onTriggerAttachmentSheet = {
+                    showingPlus = false
+                    activeAttachmentSheet = Triple(
+                        DisplayedMessageAttachment(
+                            kind = DisplayedMessageAttachment.Kind.FILE,
+                            name = "Q4_Enterprise_Security_Audit.pdf",
+                            path = "/storage/emulated/0/Documents/Q4_Enterprise_Security_Audit.pdf",
+                        ),
+                        demoMessage,
+                        null,
+                    )
+                },
+                onTriggerToolDetailsSheet = {
+                    showingPlus = false
+                    activeToolDetails = ToolActivity(
+                        name = "deploy_service --cluster prod-us-east",
+                        ok = true,
+                        durationMs = 2140L,
+                        output = "[+] Target cluster: prod-us-east (Kubernetes v1.30.2)\n[+] Applying manifest: manifests/security-gateway.yaml\n[+] Deployment 'security-gateway' successfully rolled out [4/4 pods ready]\n[+] Ingress verified: https://gateway.internal.openmaus.net\n[+] Healthcheck returned 200 OK (latency: 18ms)",
+                        spoken = "Successfully deployed security gateway to prod-us-east in 2.14s",
+                    )
+                },
+            )
+        } else {
+            PlusSheet(
+                open = showingPlus,
+                actions = sheetActions,
+                onDismiss = { showingPlus = false },
+                onAction = {
+                    showingPlus = false
+                    onAction(it)
+                },
+            )
+        }
     }
 
     if (showingTasks) {
@@ -1323,6 +1501,47 @@ private fun LoadedChat(
             onOpen = { filePreviews.openWithSystem(item) },
             onOpenBrowser = { onOpenBrowser(it, null) },
         )
+    }
+
+    if (isPreview) {
+        activeApproval?.let { (card, message) ->
+            ExpressiveApprovalSheet(
+                card = card,
+                chat = chat,
+                message = message,
+                session = session,
+                onDismiss = { activeApproval = null },
+            )
+        }
+
+        activeAttachmentSheet?.let { (attachment, message, downloaded) ->
+            ExpressiveAttachmentSheet(
+                attachment = attachment,
+                message = message,
+                downloaded = downloaded,
+                onDismiss = { activeAttachmentSheet = null },
+                onOpenViewer = {
+                    activeAttachmentSheet = null
+                    openAttachment(attachment, message, downloaded)
+                },
+                onShare = {
+                    activeAttachmentSheet = null
+                    openAttachment(attachment, message, downloaded)
+                },
+                onOpenWithApp = {
+                    activeAttachmentSheet = null
+                    openAttachment(attachment, message, downloaded)
+                },
+            )
+        }
+
+        activeToolDetails?.let { tool ->
+            ExpressiveToolDetailsSheet(
+                tool = tool,
+                chat = chat,
+                onDismiss = { activeToolDetails = null },
+            )
+        }
     }
 }
 
@@ -1643,18 +1862,25 @@ private fun ChatIdentity(
             RelativeStamp.separator(System.currentTimeMillis().toDouble(), System.currentTimeMillis())
         }
     }
-    val subtitleText = when {
-        chat.busy || mood == BotMood.THINKING || mood == BotMood.WORKING || mood == BotMood.RESEARCHING -> when (mood) {
+    val isPreview = LocalContext.current.packageName.endsWith(".preview")
+    // The header reports what is happening now. `chat.subtitle` is the bot's
+    // identity title (often a snapshot of its first task) and is deliberately
+    // not used here: it kept showing an old task during unrelated work.
+    val liveActivity = if (!isPreview && (chat.busy || mood == BotMood.THINKING || mood == BotMood.WORKING || mood == BotMood.RESEARCHING)) {
+        when (mood) {
             BotMood.RESEARCHING -> "Searching…"
             BotMood.WORKING -> "Working…"
             else -> "Thinking…"
         }
-        hasThreads && (chat as? Chat.BotChat)?.bot?.tasks?.isNotEmpty() == true -> chat.threadTitle
-        chat.subtitle.isNotBlank() -> chat.subtitle
-        (chat as? Chat.BotChat)?.bot?.title?.isNotBlank() == true -> (chat as Chat.BotChat).bot.title
-        timeStamp.isNotEmpty() -> timeStamp
-        else -> "Active"
+    } else {
+        null
     }
+    val subtitleText = com.openmausbot.companion.core.ChatHeaderSubtitle.resolve(
+        liveActivity = liveActivity,
+        threadTitle = chat.currentTaskTitle,
+        botDescriptor = (chat as? Chat.BotChat)?.bot?.description,
+        timestamp = timeStamp,
+    )
     val subtitleColor = Color(0xFF8E8E93)
 
     Row(
@@ -1812,6 +2038,302 @@ private fun BoxScope.PlusSheet(
     }
 }
 
+/**
+ * Pilot 1: Material 3 Expressive Quick-Action Menu for MOBOT Chat.
+ * Expands directly from the composer + button with staggered spring physics,
+ * authentic squircle icon containers, and tonal action label pills.
+ */
+@Composable
+private fun BoxScope.ExpressiveActionMenu(
+    open: Boolean,
+    actions: List<ChatAction>,
+    onDismiss: () -> Unit,
+    onAction: (ChatActionId) -> Unit,
+    onTriggerApprovalSheet: (() -> Unit)? = null,
+    onTriggerAttachmentSheet: (() -> Unit)? = null,
+    onTriggerToolDetailsSheet: (() -> Unit)? = null,
+) {
+    // 1. Full-screen subtle scrim
+    AnimatedVisibility(
+        visible = open,
+        enter = fadeIn(tween(220)),
+        exit = fadeOut(tween(160)),
+        modifier = Modifier.matchParentSize(),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.35f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = onDismiss,
+                )
+                .semantics { contentDescription = "Close action menu" },
+        )
+    }
+
+    // 2. Expandable Action Items Column anchored directly above the + button
+    AnimatedVisibility(
+        visible = open,
+        enter = fadeIn(
+            spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+            )
+        ) + slideInVertically(
+            spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+            )
+        ) { it / 3 } + scaleIn(
+            spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+            ),
+            initialScale = 0.82f,
+            transformOrigin = TransformOrigin(0f, 1f),
+        ),
+        exit = fadeOut(tween(150)) + slideOutVertically(tween(150)) { it / 3 } + scaleOut(
+            tween(150),
+            targetScale = 0.85f,
+            transformOrigin = TransformOrigin(0f, 1f),
+        ),
+        modifier = Modifier
+            .align(Alignment.BottomStart)
+            .padding(start = 14.dp, end = 20.dp, bottom = 78.dp),
+    ) {
+        Column(
+            modifier = Modifier
+                .widthIn(max = 340.dp)
+                .heightIn(max = 440.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+            horizontalAlignment = Alignment.Start,
+        ) {
+            // Pilot 2 Expressive Bottom Sheet Demonstrations (Preview Mode)
+            if (onTriggerApprovalSheet != null) {
+                Row(
+                    modifier = Modifier
+                        .clickable(role = Role.Button, onClick = onTriggerApprovalSheet)
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Surface(
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.errorContainer,
+                        shadowElevation = 2.dp,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.Lock,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shadowElevation = 2.dp,
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
+                        ) {
+                            Text(
+                                text = "Security Approval Sheet",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            Text(
+                                text = "Consequential action review (Pilot 2)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (onTriggerAttachmentSheet != null) {
+                Row(
+                    modifier = Modifier
+                        .clickable(role = Role.Button, onClick = onTriggerAttachmentSheet)
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Surface(
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        shadowElevation = 2.dp,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.Info,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shadowElevation = 2.dp,
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
+                        ) {
+                            Text(
+                                text = "Attachment Details Sheet",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary,
+                            )
+                            Text(
+                                text = "Metadata, actions & preview (Pilot 2)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (onTriggerToolDetailsSheet != null) {
+                Row(
+                    modifier = Modifier
+                        .clickable(role = Role.Button, onClick = onTriggerToolDetailsSheet)
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Surface(
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        shadowElevation = 2.dp,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.PlayArrow,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shadowElevation = 2.dp,
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
+                        ) {
+                            Text(
+                                text = "Tool Execution Details",
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                            Text(
+                                text = "Monospace output & logs (Pilot 2)",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
+
+            actions.forEach { action ->
+                val alpha = if (action.enabled) 1f else 0.40f
+                val isDestructive = action.destructive
+
+                val iconContainerColor = if (isDestructive) {
+                    MaterialTheme.colorScheme.errorContainer
+                } else {
+                    MaterialTheme.colorScheme.primaryContainer
+                }
+                val iconContentColor = if (isDestructive) {
+                    MaterialTheme.colorScheme.onErrorContainer
+                } else {
+                    MaterialTheme.colorScheme.onPrimaryContainer
+                }
+                val labelContainerColor = MaterialTheme.colorScheme.surfaceContainerHigh
+                val labelTextColor = if (isDestructive) {
+                    MaterialTheme.colorScheme.error
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                }
+
+                Row(
+                    modifier = Modifier
+                        .alpha(alpha)
+                        .clickable(
+                            enabled = action.enabled,
+                            role = Role.Button,
+                            onClick = { onAction(action.id) },
+                        )
+                        .padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    // Expressive Squircle Icon Container (44dp with 14dp rounded corners)
+                    Surface(
+                        modifier = Modifier.size(44.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        color = iconContainerColor,
+                        shadowElevation = 2.dp,
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            ChatActionIcon(id = action.id, tint = iconContentColor)
+                        }
+                    }
+
+                    // Expressive Tonal Action Label Pill (16dp rounded corners)
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = labelContainerColor,
+                        shadowElevation = 2.dp,
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
+                            verticalArrangement = Arrangement.spacedBy(1.dp),
+                        ) {
+                            Text(
+                                text = action.title,
+                                style = MaterialTheme.typography.labelLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = labelTextColor,
+                            )
+                            Text(
+                                text = action.subtitle,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 private const val PLUS_MILLIS = 280
 private val PLUS_SHEET_RADIUS = 24.dp
 
@@ -1901,9 +2423,17 @@ private fun Composer(
     val inFlight = preparing || sending
     // Held as the state rather than unwrapped with `by`: read inside the layer
     // block, the turn is a new frame, not a new composition of the composer.
+    val isPreview = LocalContext.current.packageName.endsWith(".preview")
     val turn = animateFloatAsState(
         targetValue = if (plusOpen) PLUS_TURN_DEGREES else 0f,
-        animationSpec = tween(PLUS_MILLIS),
+        animationSpec = if (isPreview) {
+            spring(
+                dampingRatio = Spring.DampingRatioMediumBouncy,
+                stiffness = Spring.StiffnessMediumLow,
+            )
+        } else {
+            tween(PLUS_MILLIS)
+        },
         label = "plus",
     )
     Column(
@@ -1991,17 +2521,28 @@ private fun Composer(
             modifier = Modifier
                 .fillMaxWidth()
                 .clip(CircleShape)
-                .background(if (AppTheme.isDark) Color(0xFF1E1E22) else Color(0xFFFFFFFF))
-                .border(1.dp, if (AppTheme.isDark) Color(0xFF2C2C30) else Color(0xFFE5E5EA), CircleShape)
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, CircleShape)
                 .padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             // Standalone circular + button integrated in capsule
+            val plusBackground = if (plusOpen) {
+                MaterialTheme.colorScheme.primaryContainer
+            } else {
+                MaterialTheme.colorScheme.surfaceContainerHighest
+            }
+            val plusTint = if (plusOpen) {
+                MaterialTheme.colorScheme.onPrimaryContainer
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+
             Box(
                 modifier = Modifier
                     .size(42.dp)
                     .clip(CircleShape)
-                    .background(if (AppTheme.isDark) Color(0xFF28282C) else Color(0xFFF2F2F5))
+                    .background(plusBackground)
                     .clickable(
                         role = Role.Button,
                         onClickLabel = if (plusOpen) "Close" else "More",
@@ -2012,11 +2553,7 @@ private fun Composer(
                 Icon(
                     imageVector = Icons.Filled.Add,
                     contentDescription = null,
-                    tint = if (plusOpen) {
-                        if (AppTheme.isDark) Color.White else Color(0xFF111111)
-                    } else {
-                        if (AppTheme.isDark) Color(0xFFE0E0E6) else Color(0xFF1A1A1A)
-                    },
+                    tint = plusTint,
                     modifier = Modifier
                         .size(20.dp)
                         .graphicsLayer { rotationZ = turn.value },
@@ -2032,7 +2569,7 @@ private fun Composer(
                     Text(
                         text = "Ask $name",
                         fontSize = 15.5.sp,
-                        color = if (AppTheme.isDark) Color(0xFF8E8E93) else Color(0xFF9A9AA2),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                     )
                 }
                 BasicTextField(
@@ -2042,9 +2579,9 @@ private fun Composer(
                     maxLines = 5,
                     textStyle = LocalTextStyle.current.copy(
                         fontSize = 15.5.sp,
-                        color = if (AppTheme.isDark) Color.White else Color(0xFF1A1A1A),
+                        color = MaterialTheme.colorScheme.onSurface,
                     ),
-                    cursorBrush = SolidColor(if (AppTheme.isDark) Color.White else Color(0xFF1A1A1A)),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                     modifier = Modifier
                         .fillMaxWidth()
                         .onPreviewKeyEvent { event ->
@@ -2071,9 +2608,8 @@ private fun Composer(
                         .size(42.dp)
                         .clip(CircleShape)
                         .background(
-                            if (dictationListening) Color(0xFFEF4444)
-                            else if (AppTheme.isDark) Color(0xFF28282C)
-                            else Color(0xFFF2F2F5)
+                            if (dictationListening) MaterialTheme.colorScheme.error
+                            else MaterialTheme.colorScheme.surfaceContainerHighest
                         )
                         .clickable(
                             role = Role.Button,
@@ -2085,9 +2621,8 @@ private fun Composer(
                     Icon(
                         painter = painterResource(R.drawable.ic_mic),
                         contentDescription = null,
-                        tint = if (dictationListening) Color.White
-                               else if (AppTheme.isDark) Color(0xFFE0E0E6)
-                               else Color(0xFF1A1A1A),
+                        tint = if (dictationListening) MaterialTheme.colorScheme.onError
+                               else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.size(20.dp),
                     )
                 }
@@ -2096,7 +2631,7 @@ private fun Composer(
                     modifier = Modifier
                         .size(42.dp)
                         .clip(CircleShape)
-                        .background(Color(0xFFEF4444))
+                        .background(MaterialTheme.colorScheme.error)
                         .clickable(
                             role = Role.Button,
                             onClickLabel = "Stop generation",
@@ -2107,7 +2642,7 @@ private fun Composer(
                     Box(
                         modifier = Modifier
                             .size(12.dp)
-                            .background(Color.White, RoundedCornerShape(2.dp)),
+                            .background(MaterialTheme.colorScheme.onError, RoundedCornerShape(2.dp)),
                     )
                 }
             } else if (inFlight) {
@@ -2115,13 +2650,13 @@ private fun Composer(
                     modifier = Modifier
                         .size(42.dp)
                         .clip(CircleShape)
-                        .background(if (AppTheme.isDark) Color(0xFF28282C) else Color(0xFFF2F2F5)),
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest),
                     contentAlignment = Alignment.Center,
                 ) {
                     CircularProgressIndicator(
                         modifier = Modifier.size(18.dp),
                         strokeWidth = 2.dp,
-                        color = if (AppTheme.isDark) Color(0xFFE0E0E6) else Color(0xFF1A1A1A),
+                        color = MaterialTheme.colorScheme.primary,
                     )
                 }
             } else if (showSend) {
@@ -2129,7 +2664,7 @@ private fun Composer(
                     modifier = Modifier
                         .size(42.dp)
                         .clip(CircleShape)
-                        .background(if (AppTheme.isDark) Color(0xFFE0E0E6) else Color(0xFF1A1A1A))
+                        .background(MaterialTheme.colorScheme.primary)
                         .clickable(
                             role = Role.Button,
                             onClickLabel = "Send",
@@ -2140,7 +2675,7 @@ private fun Composer(
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.Send,
                         contentDescription = "Send",
-                        tint = if (AppTheme.isDark) Color(0xFF121214) else Color.White,
+                        tint = MaterialTheme.colorScheme.onPrimary,
                         modifier = Modifier.size(18.dp),
                     )
                 }

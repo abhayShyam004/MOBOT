@@ -37,6 +37,6 @@ enum class ThemeMode(
          * a choice someone already made.
          */
         fun fromWire(value: String?): ThemeMode =
-            entries.firstOrNull { it.wireValue == value } ?: LIGHT
+            entries.firstOrNull { it.wireValue == value } ?: SYSTEM
     }
 }

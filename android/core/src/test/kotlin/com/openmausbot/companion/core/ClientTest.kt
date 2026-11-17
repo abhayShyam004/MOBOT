@@ -208,7 +208,7 @@ class ClientTest {
 
         client.createBot()
         client.sendToBot("b1", "hello")
-        client.sendToRoom("g1", "hello room")
+        client.sendToRoom("g1", "hello room", sendId = "room_1234567890123456")
         client.respond("t1", "r1", "answer", "Yes")
         client.alwaysAllow("b1", "Bash:git")
         client.toggleReaction("t1", "m1", "👍")
@@ -260,7 +260,10 @@ class ClientTest {
             requests.map { "${it.method} ${it.path}" },
         )
         assertEquals(mapOf("text" to "hello"), stringBody(requests[1].body.readUtf8()))
-        assertEquals(mapOf("text" to "hello room"), stringBody(requests[2].body.readUtf8()))
+        assertEquals(
+            mapOf("text" to "hello room", "sendId" to "room_1234567890123456"),
+            stringBody(requests[2].body.readUtf8()),
+        )
         assertEquals(
             mapOf("requestId" to "r1", "behavior" to "answer", "message" to "Yes"),
             stringBody(requests[3].body.readUtf8()),

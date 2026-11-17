@@ -254,7 +254,7 @@ describe("per-bot thread capacity through an isolated HTTP fixture", () => {
     const roomWorking = async () =>
       (await api("GET", "/api/bots?messages=0")).body.groups.find((group: any) => group.id === room.id)?.working;
     try {
-      const sent = await api("POST", `/api/groups/${room.id}/messages`, { text: "Hold the room turn open." });
+      const sent = await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0001",  text: "Hold the room turn open." });
       expect(sent.status).toBe(202);
       expect(sent.body.queued).toBeUndefined();
       // Room turns run in the member's shared workspace, so the gated fake

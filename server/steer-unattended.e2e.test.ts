@@ -147,7 +147,13 @@ posixOnly("a steered message does not lift the unattended mark on its own", () =
   });
 
   it("keeps asking after the turn POSTs into itself with no session", async () => {
-    const bot = (await api("GET", "/api/bots?messages=0")).body.bots[0];
+    // MOBOT boots with zero bots — onboarding creates the first one — so the
+    // fixture creates the bot this scenario needs rather than assuming a
+    // seeded default exists.
+    const bot = (await api("POST", "/api/bots", {
+      name: "Unattended",
+      modelSelection: { instanceId: "claude", model: "claude-fake" },
+    })).body.bot;
     // auto mode ON: an attended turn would sail straight through
     expect((await api("PATCH", `/api/bots/${bot.id}`, {
       autoApprove: true,

@@ -16,16 +16,55 @@
 import type { McpServerSpec, ModelCatalog, ProviderAdapter, RuntimeEvent, RuntimeEventListener, SendTurnInput, TurnImageInput } from "../contracts.ts";
 import { newEventId, newId } from "../contracts.ts";
 import { readFileSync } from "node:fs";
+import { logHopTiming } from "../timing-log.ts";
 import { redactSecretsInText } from "../redact.ts";
 import { askQuestionSummary, normalizeAskUserInput } from "../../shared/ask-question.ts";
 import { toolDetailPreview } from "../tool-summary.ts";
-import { ChatToolSessionError, mountChatTools, type ChatToolDefinition, type ChatToolSession } from "./chat-mcp-tools.ts";
+import {
+  ChatToolSessionError,
+  capabilityEnableDefinition,
+  capabilityRetireDefinition,
+  chatToolAvailabilityNotice,
+  deferredCapabilityNotice,
+  loadCapabilities,
+  retireCapabilities,
+  mountChatTools,
+  type ChatToolDefinition,
+  type ChatToolSession,
+} from "./chat-mcp-tools.ts";
+import {
+  AuthoritativeToolStore,
+  artifactReadDefinition,
+  ARTIFACT_READ_TOOL_NAME,
+  classifySideEffect,
+  compactFunctionCallArguments,
+  compactToolOutputs,
+  createStructuredExecutionMemory,
+  formatStructuredContinuation,
+  type StructuredExecutionMemory,
+} from "../execution-memory.ts";
+export { compactFunctionCallArguments, compactToolOutputs };
 import { checkToolPermission, loadDiskPermissions } from "../permission-policy.ts";
+import { KNOWN_SURFACES } from "../tool-exposure.ts";
 import { createChatToolApproval } from "./chat-tool-approval.ts";
 import { appendNative } from "./native.ts";
 import { readCodexCredential, codexCredentialExpired, refreshCodexCredential, type CodexCredential } from "./codex-native-auth.ts";
 import { classifyError, computeBackoff, interruptibleDelay, RETRY_MAX_ATTEMPTS } from "./retry.ts";
+import { measureRequest, type RequestMetrics } from "./request-metrics.ts";
+import {
+  createProviderRetryBudget,
+  ProviderRetryBudgetError,
+  resolveProviderRetryBudget,
+} from "../provider-retry-budget.ts";
 import { isMassDeletionCommand } from "../capabilities/safety-policy.ts";
+import { approvalSummary, assessToolCall, needsApproval } from "../tool-approval.ts";
+import {
+  createProviderCallDeadline,
+  ProviderTimeoutError,
+  raceWithSignal,
+  resolveProviderTimeouts,
+  type ProviderTimeoutPolicy,
+} from "../provider-deadline.ts";
 
 /** The ChatGPT/Codex backend endpoint the CLI calls. */
 export const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -36,9 +75,58 @@ const CODEX_ORIGINATOR = "codex_cli_rs";
 const USER_AGENT = "openmausbot-codex-native";
 const MAX_TOOL_CALLS = 128;
 const MAX_ROUNDS = 64;
+/** How many times one turn may resume after a request that ended with nothing
+ *  generated. Bounded: a backend that keeps aborting must still settle. */
+const MAX_RECOVERY_ROUNDS = 3;
+/** One executed tool call in this turn, kept as state a resumption can be
+ * handed: identity, outcome and a bounded summary — never the full output. */
+interface StepRecord {
+  callId: string;
+  name: string;
+  ok: boolean;
+  summary: string;
+}
+
+/**
+ * The message appended before resuming a turn whose request produced nothing.
+ *
+ * It states what already ran, because the alternative — re-sending the task as
+ * if nothing happened — is how an agent repeats a side effect. It carries no
+ * tool payloads: those are already in the request, or compacted there.
+ */
+function continuationMessage(steps: ReadonlyArray<StepRecord>, memory?: StructuredExecutionMemory): string {
+  if (memory) {
+    return formatStructuredContinuation(memory, steps);
+  }
+  const done = steps.filter((step) => step.ok);
+  const failed = steps.filter((step) => !step.ok);
+  const line = (step: StepRecord) => `${step.name} [${step.callId}] ${step.summary}`;
+  return [
+    "[Recovery] The previous model response ended before producing anything. This is a transport interruption in the middle of the task, not a verdict on it.",
+    "The operations below already ran in this turn and their results are in this conversation. Do not repeat them; continue with the next unfinished step.",
+    done.length ? `Completed: ${done.map(line).join(" | ")}` : "Completed: none",
+    failed.length ? `Failed (fix the cause; assume no effect unless its result says otherwise): ${failed.map(line).join(" | ")}` : "Failed: none",
+    "Continue the task from here, verify anything you are unsure of, and do not start over.",
+  ].join("\n");
+}
 
 /** A failure in the ChatGPT backend protocol itself; never retried blindly. */
 export class CodexResponsesError extends Error {}
+
+/** A transient early termination before any tokens were generated. */
+export class ProviderEarlyIncompleteError extends CodexResponsesError {}
+
+/** The answer reached the model's output-token ceiling. Deterministic, so it
+ *  settles the turn instead of being retried; any text that streamed before
+ *  the ceiling is preserved by the caller. */
+export class ProviderOutputLimitError extends CodexResponsesError {
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(`The ChatGPT backend ended the response early (${reason}).`);
+    this.reason = reason;
+  }
+}
 
 type JsonRecord = Record<string, unknown>;
 
@@ -77,11 +165,16 @@ interface FunctionCall {
 interface Completion {
   text: string;
   reasoning: string;
-  usage: { input: number; output: number } | null;
+  /** `cachedInput` is the provider's own cache-read count for this request — a
+   *  subset of `input`, reported apart because it prices differently. */
+  usage: { input: number; output: number; cachedInput?: number } | null;
   /** The response's own output items, for the next round's input. */
   items: JsonRecord[];
   toolCalls: FunctionCall[];
   status: string | null;
+  /** Set when the provider reported `response.incomplete`. An output-ceiling
+   *  stop is not a successful completion even when partial text arrived. */
+  incompleteReason: string | null;
 }
 
 interface RequestOptions {
@@ -91,10 +184,13 @@ interface RequestOptions {
   effort: string | null;
   tools: ChatToolDefinition[];
   cacheKey: string;
-  sessionId: string;
   signal: AbortSignal;
+  /** The deadline policy for this attempt: the shipped one on the first try,
+   *  clamped to what is left of the retry budget on later ones. */
+  deadlinePolicy?: ProviderTimeoutPolicy;
   onDelta?: (delta: string, kind: "assistant_text" | "reasoning_text") => void;
-  timeoutMs: number;
+  /** What this exact request contains, measured from the body being posted. */
+  onMetrics?: (metrics: RequestMetrics) => void;
 }
 
 export interface CodexNativeRuntimeOptions {
@@ -105,7 +201,13 @@ export interface CodexNativeRuntimeOptions {
   responsesUrl?: string;
   tokenUrl?: string;
   requestTimeoutMs?: number;
+  timeoutPolicy?: Partial<ProviderTimeoutPolicy>;
   retryScale?: number;
+  /** One clock for a whole retry sequence; defaults to the shipped budget. */
+  retryBudgetMs?: number;
+  /** Monotonic millisecond clock, injectable so a test can spend the budget
+   *  without sleeping. */
+  clock?: () => number;
 }
 
 export interface CodexNativeRuntime {
@@ -146,11 +248,16 @@ function failureMessage(response: JsonRecord | null): string {
   return "The ChatGPT backend reported the response as failed.";
 }
 
-function usageFrom(usage: unknown): { input: number; output: number } | null {
+function usageFrom(usage: unknown): { input: number; output: number; cachedInput?: number } | null {
   if (!object(usage)) return null;
   const input = typeof usage.input_tokens === "number" ? usage.input_tokens : 0;
   const output = typeof usage.output_tokens === "number" ? usage.output_tokens : 0;
-  return { input, output };
+  // The Responses protocol reports the cache-read part of `input` in a nested
+  // details object. Reading it is what makes cached vs uncached usage
+  // measurable at all; dropping it made every ledger row look fully uncached.
+  const details = object(usage.input_tokens_details) ? usage.input_tokens_details : null;
+  const cached = details && typeof details.cached_tokens === "number" ? details.cached_tokens : undefined;
+  return { input, output, ...(cached !== undefined ? { cachedInput: cached } : {}) };
 }
 
 export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): CodexNativeRuntime {
@@ -163,8 +270,13 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
   }>();
   const transport = options.transport ?? fetch;
   const responsesUrl = options.responsesUrl ?? CODEX_RESPONSES_URL;
-  const timeoutMs = options.requestTimeoutMs ?? 120_000;
+  const timeoutPolicy = resolveProviderTimeouts({
+    ...(options.requestTimeoutMs ? { idleTimeoutMs: options.requestTimeoutMs, firstTokenTimeoutMs: options.requestTimeoutMs } : {}),
+    ...options.timeoutPolicy,
+  });
   const retryScale = options.retryScale ?? Number(process.env.FAKE_CODEX_RETRY_SCALE ?? "1");
+  const retryBudgetMs = options.retryBudgetMs ?? resolveProviderRetryBudget();
+  const clock = options.clock ?? (() => performance.now());
 
   const emit = (event: RuntimeEvent) => {
     for (const listener of Array.from(listeners)) listener(event);
@@ -212,12 +324,20 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
       ...(wireTools.length ? { tools: wireTools, tool_choice: "auto", parallel_tool_calls: true } : {}),
       // The summary parameter is what makes reasoning visible as it streams;
       // the effort knob rides the same object when the bot set one.
-      reasoning: { ...(request.effort ? { effort: request.effort } : {}), summary: "auto" },
+      reasoning: { ...(request.effort ? { effort: request.effort } : { effort: "low" }), summary: "auto" },
       store: false,
       stream: true,
       include: ["reasoning.encrypted_content"],
       prompt_cache_key: request.cacheKey,
+      max_output_tokens: 16384,
     });
+
+    request.onMetrics?.(measureRequest({
+      instructions: request.instructions,
+      items: request.input,
+      wireTools,
+      body,
+    }));
 
     let refreshed = false;
     for (;;) {
@@ -228,23 +348,20 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
         "content-type": "application/json",
         accept: "text/event-stream",
         originator: CODEX_ORIGINATOR,
-        "session-id": request.sessionId,
+        "session-id": newId(),
         "user-agent": USER_AGENT,
       };
       if (auth.accountId) headers["chatgpt-account-id"] = auth.accountId;
 
-      const timeoutController = new AbortController();
-      let idleTimer: NodeJS.Timeout | null = null;
-      const resetIdleTimer = () => {
-        if (idleTimer) clearTimeout(idleTimer);
-        idleTimer = setTimeout(() => {
-          timeoutController.abort(new DOMException("Streaming idle timeout elapsed", "AbortError"));
-        }, request.timeoutMs);
-      };
-      resetIdleTimer();
+      const deadline = createProviderCallDeadline(request.signal, request.deadlinePolicy ?? timeoutPolicy);
+      const llmStart = performance.now();
       try {
-        const signal = AbortSignal.any([request.signal, timeoutController.signal]);
-        const response = await transport(responsesUrl, { method: "POST", headers, body, signal });
+        const signal = deadline.signal;
+        // Raced, not merely signalled: a transport that ignores its abort
+        // signal must still leave the turn bounded.
+        const response = await raceWithSignal(transport(responsesUrl, { method: "POST", headers, body, signal }), signal);
+        const tHeaders = performance.now();
+        logHopTiming("LLM_HTTP_HANDSHAKE", tHeaders - llmStart);
         if (response.status === 401 && !refreshed) {
           // One forced renewal on an authentication rejection; a rejected
           // grant is reported as the expired sign-in it is.
@@ -258,16 +375,19 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
           );
         }
         if (!response.body) throw new CodexResponsesError("The ChatGPT backend returned an empty event stream.");
+        deadline.onConnected();
 
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
         const doneItems: JsonRecord[] = [];
         let completedResponse: JsonRecord | null = null;
+        let incompleteReason: string | null = null;
         let failure: string | null = null;
         let streamedText = "";
         let reasoning = "";
         let sawEvent = false;
+        let firstTokenTime: number | null = null;
         const consume = (line: string): void => {
           if (!line.startsWith("data:")) return;
           const data = line.slice(5).trim();
@@ -289,6 +409,10 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
             }
             case "response.output_text.delta": {
               if (typeof event.delta === "string" && event.delta) {
+                if (firstTokenTime === null) {
+                  firstTokenTime = performance.now();
+                  logHopTiming("LLM_FIRST_TOKEN", firstTokenTime - tHeaders);
+                }
                 streamedText += event.delta;
                 request.onDelta?.(event.delta, "assistant_text");
               }
@@ -296,6 +420,10 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
             }
             case "response.reasoning_summary_text.delta": {
               if (typeof event.delta === "string" && event.delta) {
+                if (firstTokenTime === null) {
+                  firstTokenTime = performance.now();
+                  logHopTiming("LLM_FIRST_TOKEN", firstTokenTime - tHeaders);
+                }
                 reasoning += event.delta;
                 request.onDelta?.(event.delta, "reasoning_text");
               }
@@ -307,7 +435,37 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
               if (kind === "response.incomplete") {
                 const details = responseRecord && object(responseRecord.incomplete_details) ? responseRecord.incomplete_details : null;
                 const reason = details && typeof details.reason === "string" ? details.reason : "unknown";
-                failure = `The ChatGPT backend ended the response early (${reason}).`;
+                const hasRealOutput =
+                  doneItems.length > 0 ||
+                  (responseRecord !== null && Array.isArray(responseRecord.output) && responseRecord.output.length > 0 &&
+                   responseRecord.output.some((it: any) => it?.type === "function_call" || (Array.isArray(it?.content) && it.content.length > 0))) ||
+                  streamedText.length > 0;
+                const hasOutput = hasRealOutput || reasoning.length > 0;
+                const usageRecord = responseRecord && object(responseRecord.usage) ? responseRecord.usage : null;
+                const reportedOutput = usageRecord && typeof usageRecord.output_tokens === "number" ? usageRecord.output_tokens : null;
+                // A ceiling spends its budget. A response that says
+                // `max_output_tokens` while producing no real text, no function calls and zero
+                // reported output tokens did not reach a ceiling — the backend aborted before it
+                // generated anything and reported this reason anyway (observed
+                // on Android: four events, in=0 out=0, empty output). Retrying
+                // sends a fresh request and normally answers, so describing it
+                // as a token limit would strand the person behind a card that
+                // says to ask for less, when there was nothing to shorten.
+                const emptyCeiling = (reportedOutput === 0 || reportedOutput === null) && !hasRealOutput;
+                if (reason === "max_output_tokens" && emptyCeiling) {
+                  failure = "The ChatGPT backend ended the response early with no output or usage.";
+                } else if (reason === "max_output_tokens") {
+                  // Preserve whatever arrived, but never present the ceiling as
+                  // a finished answer. The caller settles it as output_limit and
+                  // refuses to execute function_call items from a response the
+                  // provider itself marked incomplete.
+                  completedResponse = responseRecord || { output: doneItems };
+                  incompleteReason = reason;
+                } else if (hasOutput) {
+                  completedResponse = responseRecord || { output: doneItems };
+                } else {
+                  failure = `The ChatGPT backend ended the response early (${reason}).`;
+                }
               } else if (responseRecord) {
                 completedResponse = responseRecord;
               }
@@ -325,14 +483,14 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
         };
         try {
           for (;;) {
-            const { done, value } = await reader.read();
+            const { done, value } = await raceWithSignal(reader.read(), signal);
             if (done) {
               buffer += decoder.decode();
               const tail = buffer.trim();
               if (tail) consume(tail);
               break;
             }
-            resetIdleTimer();
+            deadline.onChunkReceived();
             buffer += decoder.decode(value, { stream: true });
             if (buffer.length > 4_000_000) throw new CodexResponsesError("The provider event stream exceeded the size limit.");
             let newline: number;
@@ -343,16 +501,39 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
             }
           }
         } finally {
-          await reader.cancel().catch(() => {});
+          // Released, not awaited: a body whose cancel() never settles would
+          // otherwise hold the turn open after its deadline has already fired,
+          // which is the wedge this cleanup exists to prevent. The abort has
+          // already torn the socket down; this only asks the stream to stop.
+          void reader.cancel().catch(() => {});
+          deadline.cleanup();
         }
         request.signal.throwIfAborted();
-        if (failure) throw new CodexResponsesError(failure);
+        const errFailure = failure as unknown as string | null;
+        if (errFailure) {
+          if (errFailure.includes("ended the response early") && !streamedText && !reasoning && !doneItems.length) {
+            throw new ProviderEarlyIncompleteError(errFailure);
+          }
+          throw new CodexResponsesError(errFailure);
+        }
         if (!completedResponse) {
-          throw new CodexResponsesError(sawEvent
+          const message = sawEvent
             ? "The ChatGPT backend stream ended before the response completed."
-            : "The ChatGPT backend returned an unrecognized event stream.");
+            : "The ChatGPT backend returned an unrecognized event stream.";
+          // Nothing was generated for THIS request, so a retry costs one request
+          // and cannot duplicate text, work or a side effect.
+          if (!streamedText && !reasoning && !doneItems.length) throw new ProviderEarlyIncompleteError(message);
+          throw new CodexResponsesError(message);
         }
         const completed = completedResponse as JsonRecord;
+        const llmDuration = Math.round(performance.now() - llmStart);
+        if (firstTokenTime !== null) {
+          logHopTiming("RESPONSE_STREAMING", performance.now() - firstTokenTime);
+        }
+        logHopTiming("LLM_LATENCY", llmDuration, {
+          status: response.status,
+          outputTokens: completed.usage && typeof (completed.usage as any).output_tokens === "number" ? (completed.usage as any).output_tokens : undefined,
+        });
         const reportedItems = Array.isArray(completed.output) ? completed.output.filter(object) : [];
         const items = doneItems.length ? doneItems : reportedItems;
         const text = items.map(messageText).join("") || streamedText;
@@ -363,9 +544,10 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
           items,
           toolCalls: toolCallsIn(items),
           status: typeof completed.status === "string" ? completed.status : null,
+          incompleteReason,
         };
       } finally {
-        if (idleTimer) clearTimeout(idleTimer);
+        deadline.cleanup();
       }
     }
   };
@@ -373,7 +555,7 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
   /** Mount this turn's MCP surface. The chat runtime's own mount is reused;
    * the phone, browser and computer descriptors are stdio MCP servers too, so
    * they ride the same transport the CLI-side driver hands to codex. */
-  const mountTools = (turn: SendTurnInput, signal: AbortSignal): Promise<ChatToolSession> => {
+  const mountTools = async (turn: SendTurnInput, signal: AbortSignal): Promise<ChatToolSession> => {
     const integrations: SendTurnInput["integrations"] = { ...turn.integrations };
     const custom: Record<string, McpServerSpec> = { ...integrations?.custom };
     if (integrations?.phone) custom.phone = integrations.phone;
@@ -382,7 +564,13 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
       const { command, args, env } = integrations.localComputer;
       custom.computer = { command, args, env };
     }
-    return mountChatTools({ ...integrations, custom }, signal);
+    const mountStart = performance.now();
+    const session = await mountChatTools({ ...integrations, custom }, signal, { expose: turn.toolExposure });
+    logHopTiming("MCP_MOUNT_TOTAL", performance.now() - mountStart, {
+      servers: Object.keys(custom),
+      toolCount: session.definitions.length,
+    });
+    return session;
   };
 
   const sendTurn = async (turn: SendTurnInput) => {
@@ -450,7 +638,7 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
 
     void (async () => {
       let tools: ChatToolSession | undefined;
-      const usage = { input: 0, output: 0 };
+      const usage: { input: number; output: number; cachedInput?: number } = { input: 0, output: 0 };
       let hasUsage = false;
       let ok = false;
       let stopReason: string | null = null;
@@ -458,6 +646,12 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
       let toolFailed = false;
       const denials: string[] = [];
       const seenCalls = new Set<string>();
+      /** What this turn already did, so a resumption never repeats it. */
+      const steps: StepRecord[] = [];
+      let recoveries = 0;
+      // Attempts made by the request sequence that actually failed, counted
+      // where they are made: the card must not report the turn's total.
+      let attemptsThisRound = 0;
       const input: JsonRecord[] = [
         ...(turn.transcript ?? []).map((message) => message.role === "assistant"
           ? { type: "message", role: "assistant", content: [{ type: "output_text", text: message.text }] }
@@ -467,7 +661,7 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
           ...imageContentParts(turn.images),
         ] },
       ];
-      const instructions = turn.system ?? "";
+      let instructions = turn.system ?? "";
       try {
         tools = await mountTools(turn, abort.signal);
         const harnessDefinitions: ChatToolDefinition[] = (turn.turnTools ?? []).map((tool) => ({
@@ -475,11 +669,63 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
           function: { name: tool.name, description: tool.description, parameters: tool.inputSchema },
         }));
         const definitions = tools.definitions.concat(harnessDefinitions);
+        const hasMountedIntegrations = tools.exposure.advertised.length > 0 || tools.exposure.deferred.length > 0;
+        if (hasMountedIntegrations) {
+          definitions.push(artifactReadDefinition());
+        }
+        const availability = chatToolAvailabilityNotice(tools.readiness);
+        if (availability) instructions = instructions ? `${instructions}\n\n${availability}` : availability;
+        // Verified servers this turn deliberately did not advertise up front.
+        // They stay one call away, so a narrow request keeps every capability.
+        if (tools.exposure.deferred.length) {
+          definitions.push(capabilityEnableDefinition(tools.exposure.deferred));
+          const deferredNotice = deferredCapabilityNotice(tools.exposure.deferred);
+          if (deferredNotice) instructions = instructions ? `${instructions}\n\n${deferredNotice}` : deferredNotice;
+        }
+        if (tools.exposure.advertised.some((s) => KNOWN_SURFACES.has(s))) {
+          definitions.push(capabilityRetireDefinition(tools.exposure.advertised));
+        }
+        const authoritativeStore = new AuthoritativeToolStore();
+        const executionMemory = createStructuredExecutionMemory({
+          objective: turn.text,
+          currentStage: turn.stage,
+        });
+        // Emitted at the last point before the first provider request; a
+        // pre-provider cancellation never reaches this line.
+        emit({
+          ...base(turn.threadId, turnId), type: "tool.readiness",
+          servers: tools.readiness.servers, toolCount: definitions.length, providerStarted: true,
+        });
         for (let round = 0; round < MAX_ROUNDS; round++) {
           abort.signal.throwIfAborted();
-          native("out", { model, instructions, input, tools: definitions.map((tool) => tool.function.name) });
+          attemptsThisRound = 0;
+          // Old tool results and large arguments are what makes a long turn's request grow without
+          // bound; recent ones stay verbatim, the rest become bounded summaries.
+          compactToolOutputs(input, { store: authoritativeStore, threadId: turn.threadId });
+          compactFunctionCallArguments(input, { store: authoritativeStore, threadId: turn.threadId });
           let attempt = 0;
           let completion: Completion;
+          // One clock for this round's attempts, started with the first one.
+          // A retry may only spend what is left of it, so a provider that
+          // never answers costs one budget rather than one per attempt.
+          let budget = createProviderRetryBudget(retryBudgetMs, clock);
+          // A request that ended with nothing at all is resumable: everything
+          // already executed lives in `input`, and none of THIS request's calls
+          // ran, so continuing preserves the work instead of losing it.
+          const resume = (error: Error): boolean => {
+            if (abort.signal.aborted || !(error instanceof ProviderEarlyIncompleteError)) return false;
+            if (!steps.length || recoveries >= MAX_RECOVERY_ROUNDS) return false;
+            recoveries++;
+            attempt = 0;
+            budget = createProviderRetryBudget(retryBudgetMs, clock);
+            input.push({
+              type: "message",
+              role: "user",
+              content: [{ type: "input_text", text: continuationMessage(steps, executionMemory) }],
+            });
+            emit({ ...base(turn.threadId, turnId), type: "turn.retrying", attempt: recoveries, delayMs: 0, reason: "early_termination_resume" });
+            return true;
+          };
           for (;;) {
             let streamed = false;
             const pending = { assistant_text: "", reasoning_text: "" };
@@ -497,20 +743,30 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
               if (visible) emit({ ...base(turn.threadId, turnId), type: "content.delta", streamKind, delta: visible });
             };
             try {
+              attemptsThisRound++;
               completion = await complete({
                 input,
                 model,
                 instructions,
                 effort: turn.effort ?? null,
                 tools: definitions,
-                cacheKey: turn.threadId,
-                sessionId: turn.threadId,
+                cacheKey: `${turn.threadId}:${turnId}`,
                 signal: abort.signal,
-                timeoutMs,
+                // The first attempt keeps its shipped deadlines; only retries
+                // are squeezed into what is left of the sequence's budget.
+                deadlinePolicy: attempt === 0 ? timeoutPolicy : budget.policyForAttempt(timeoutPolicy),
                 onDelta: (text, streamKind) => {
                   streamed = true;
                   delta(text, streamKind);
                 },
+                // The tee now carries the measurement of the body it records,
+                // so "what was re-sent" is a fact in the trace rather than a
+                // reconstruction from a body whose schemas were stripped.
+                onMetrics: (metrics) => native("out", {
+                  model, instructions, input,
+                  tools: definitions.map((tool) => tool.function.name),
+                  metrics,
+                }),
               });
               delta("", "assistant_text", true);
               delta("", "reasoning_text", true);
@@ -518,25 +774,69 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
             } catch (value) {
               const error = asError(value);
               const verdict = classifyError(error);
-              if (abort.signal.aborted || streamed || seenCalls.size ||
-                  error instanceof CodexResponsesError || !verdict.transient || attempt >= RETRY_MAX_ATTEMPTS - 1) throw error;
+              const nonRetryableTimeout = error instanceof ProviderTimeoutError && (error.phase === "call_total" || error.phase === "idle");
+              // A CodexResponsesError is only non-retryable if the retry classifier
+              // determines the failure is terminal (e.g. HTTP 400, auth, quota, output ceiling).
+              // Transient HTTP 5xx (500, 502, 503, 504) and 429 rate limits must enter
+              // bounded retries rather than immediately aborting the turn.
+              const nonRetryableCodexError = error instanceof CodexResponsesError &&
+                !(error instanceof ProviderEarlyIncompleteError) &&
+                !verdict.transient;
+              // `seenCalls` deliberately does NOT block this: a retry is issued
+              // inside `complete`, before any of this round's calls run, and
+              // every call that already ran has its output in `input`. So a
+              // retry resumes the task rather than replaying it — refusing it
+              // threw away a turn that had already done real work.
+              if (abort.signal.aborted || streamed || nonRetryableTimeout ||
+                  nonRetryableCodexError || !verdict.transient || attempt >= RETRY_MAX_ATTEMPTS - 1) {
+                if (resume(error)) continue;
+                throw error;
+              }
+              // No budget left for another attempt: the sequence ends now, with
+              // the phase that actually failed and the total that stopped it.
+              if (!budget.allowsAnotherAttempt()) {
+                if (resume(error)) continue;
+                throw new ProviderRetryBudgetError(error, budget.limitMs, attempt + 1);
+              }
               const delayMs = computeBackoff(attempt++);
               emit({ ...base(turn.threadId, turnId), type: "turn.retrying", attempt, delayMs, reason: verdict.reason });
               await interruptibleDelay(delayMs * retryScale, abort.signal).promise;
               abort.signal.throwIfAborted();
+              // The wait is part of the budget too: a sequence can run out
+              // during backoff, not only during an attempt.
+              if (!budget.allowsAnotherAttempt()) {
+                if (resume(error)) continue;
+                throw new ProviderRetryBudgetError(error, budget.limitMs, attempt + 1);
+              }
             }
           }
           native("in", { text: completion.text, reasoning: completion.reasoning, status: completion.status, toolCalls: completion.toolCalls.map((call) => call.name) });
           if (completion.usage) {
             usage.input += completion.usage.input;
             usage.output += completion.usage.output;
+            if (typeof completion.usage.cachedInput === "number") {
+              usage.cachedInput = (usage.cachedInput ?? 0) + completion.usage.cachedInput;
+            }
             hasUsage = true;
             emit({ ...base(turn.threadId, turnId), type: "thread.token-usage.updated", ...usage });
           }
-          const reply = completion.text.trim() ? completion.text : completion.toolCalls.length ? "" : completion.reasoning;
-          console.log("DEBUG_CODEX_NATIVE_REPLY:", JSON.stringify({ textLen: completion.text.length, toolCalls: completion.toolCalls.length, reply: reply.slice(0, 100) }));
+          const incomplete = completion.incompleteReason !== null;
+          const reply = completion.text.trim()
+            ? completion.text
+            : completion.toolCalls.length || incomplete
+              ? ""
+              : completion.reasoning;
           if (reply.trim()) emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "assistant_text", text: safeText(reply) });
           abort.signal.throwIfAborted();
+          if (completion.incompleteReason) {
+            // The provider stopped at the model's output ceiling. Text emitted
+            // above is real and stays in the transcript, but the turn is not a
+            // success: a second identical request would reach the same ceiling,
+            // and function_call items from an incomplete response must never be
+            // executed as if their arguments were final.
+            stopReason = "output_limit";
+            throw new ProviderOutputLimitError(completion.incompleteReason);
+          }
           if (!completion.toolCalls.length) {
             if (!reply.trim()) throw new CodexResponsesError("The ChatGPT backend returned an empty response.");
             if (toolFailed && !reply.trim()) {
@@ -570,11 +870,13 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
             let result: { text: string; ok: boolean } | undefined;
             let started = false;
             let fatal: Error | undefined;
+            let callArgs: Record<string, unknown> = {};
             try {
               let args: unknown;
               try { args = JSON.parse(call.arguments); }
               catch { throw new CodexResponsesError("Tool arguments are not complete JSON."); }
               if (!object(args)) throw new CodexResponsesError("Tool arguments must be a JSON object.");
+              callArgs = args;
               const inputPreview = preview(args);
               const harnessTool = (turn.turnTools ?? []).find((tool) => tool.name === call.name);
               const startItem = () => {
@@ -600,6 +902,18 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
                   ? { ok: false, text: "The question was left unanswered because the turn was stopped or closed. Wrap up the task without the answer, or say what is still needed." }
                   : { ok: true, text: answer };
                 handled = true;
+              } else if (call.name === "capability_enable") {
+                startItem();
+                result = loadCapabilities(tools, (args as { servers?: unknown }).servers, definitions);
+                handled = true;
+              } else if (call.name === "capability_retire") {
+                startItem();
+                result = retireCapabilities(tools, (args as { servers?: unknown }).servers, definitions);
+                handled = true;
+              } else if (call.name === ARTIFACT_READ_TOOL_NAME) {
+                startItem();
+                result = authoritativeStore.readArtifact((args as { ref?: string }).ref ?? "", args as Record<string, unknown>);
+                handled = true;
               } else if (harnessTool) {
                 startItem();
                 const output = await harnessTool.execute(args as Record<string, unknown>);
@@ -610,7 +924,8 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
               }
               if (!handled) {
                 const diskPerms = loadDiskPermissions();
-                const perm = checkToolPermission(call.name, diskPerms, args as Record<string, unknown>);
+                // Already advertised for this turn (`tools.validate` ran above).
+                const perm = checkToolPermission(call.name, diskPerms, args as Record<string, unknown>, { mountedTool: true });
                 if (!perm.allowed) {
                   denials.push(call.name);
                   startItem();
@@ -622,8 +937,14 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
                 const cmdStr = String((args as any)?.command || (args as any)?.cmd || "");
                 const isMassDel = (Boolean(cmdStr) && isMassDeletionCommand(cmdStr)) || isMassDeletionCommand(inputPreview ?? "")
                   || ((args as any)?.recursive === true && ((args as any)?.path === "/" || (args as any)?.target === "/"));
-                const allowed = (turn.approvalMode === "full" && !isMassDel)
-                  || await approval.ask(call.name, inputPreview ?? "This tool has no arguments.");
+                // Routine workspace work is what the person asked for by
+                // sending the task; only elevated and consequential calls stop
+                // for a card. server/tool-approval.ts owns the categories and
+                // the words the card shows.
+                const assessment = assessToolCall(call.name, args as Record<string, unknown>, { workspaceRoots: turn.cwd ? [turn.cwd] : undefined });
+                const allowed = needsApproval(turn.approvalMode ?? "ask", assessment, { massDeletion: isMassDel })
+                  ? await approval.ask(call.name, approvalSummary(assessment, inputPreview))
+                  : true;
                 abort.signal.throwIfAborted();
                 startItem();
                 if (allowed) {
@@ -643,7 +964,42 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
             const settled = result ?? { ok: false, text: "The tool produced no result." };
             const text = safeText(settled.text);
             const output = preview({ ok: settled.ok, result: text });
-            emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.callId, ok: settled.ok, output });
+            emit({ ...base(turn.threadId, turnId), type: "item.completed", itemType: "tool", itemId: call.callId, title: call.name, ok: settled.ok, output, rawOutput: text });
+            const summary = text.replace(/\s+/g, " ").trim().slice(0, 160);
+            steps.push({ callId: call.callId, name: call.name, ok: settled.ok, summary });
+            const callCompletedAt = Date.now();
+            authoritativeStore.recordExecution({
+              callId: call.callId,
+              name: call.name,
+              args: callArgs,
+              startedAt: callCompletedAt,
+              completedAt: callCompletedAt,
+              ok: settled.ok,
+              rawOutput: text,
+              threadId: turn.threadId,
+              botId: turn.botId,
+            });
+            const sideEffect = classifySideEffect(call.name, callArgs);
+            if (settled.ok) {
+              executionMemory.completedSteps.push({
+                callId: call.callId,
+                name: call.name,
+                summary,
+                sideEffect,
+                timestamp: callCompletedAt,
+              });
+              if (callArgs && typeof callArgs.path === "string") {
+                const p = callArgs.path;
+                if (!executionMemory.touchedFiles.includes(p)) executionMemory.touchedFiles.push(p);
+              }
+            } else {
+              executionMemory.failedSteps.push({
+                callId: call.callId,
+                name: call.name,
+                errorSummary: text.replace(/\s+/g, " ").trim().slice(0, 200),
+                timestamp: callCompletedAt,
+              });
+            }
             if (!settled.ok) toolFailed = true;
             input.push({ type: "function_call_output", call_id: call.callId, output: JSON.stringify({ ok: settled.ok, result: text }) });
             abort.signal.throwIfAborted();
@@ -652,9 +1008,21 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
         }
         if (!ok) throw new CodexResponsesError("Model-call limit reached before a final response.");
       } catch (value) {
-        stopReason = abort.signal.aborted ? "interrupted" : stopReason ?? "error";
-        failure = safeText(asError(value).message).slice(0, 2_000);
+        const error = asError(value);
+        const verdict = classifyError(error);
+        const isTimeout = error instanceof ProviderTimeoutError || verdict.reason === "timeout" || /timeout/i.test(error.message);
+        if (error instanceof ProviderOutputLimitError || verdict.reason === "output_limit") {
+          stopReason = "output_limit";
+        } else if (isTimeout) {
+          stopReason = "timeout";
+        } else if (abort.signal.aborted) {
+          stopReason = "interrupted";
+        } else {
+          stopReason = stopReason ?? "error";
+        }
+        failure = safeText(error.message).slice(0, 2_000);
       } finally {
+        const tFinalStart = performance.now();
         approval.close();
         let cleanupFailed = false;
         try { await tools?.close(); }
@@ -664,9 +1032,10 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
           cleanupFailed = true;
           failure = "Tool processes could not be stopped; their execution state is uncertain.";
         }
-        if (abort.signal.aborted) { ok = false; stopReason = "interrupted"; }
-        if (failure && (!abort.signal.aborted || cleanupFailed)) {
-          emit({ ...base(turn.threadId, turnId), type: "runtime.error", message: failure, terminal: !abort.signal.aborted });
+        if (abort.signal.aborted && stopReason !== "timeout") { ok = false; stopReason = "interrupted"; }
+        if (failure && (!abort.signal.aborted || stopReason === "timeout" || cleanupFailed)) {
+          emit({ ...base(turn.threadId, turnId), type: "runtime.error", message: failure, terminal: !abort.signal.aborted || stopReason === "timeout",
+            ...(attemptsThisRound > 0 ? { attempts: attemptsThisRound } : {}) });
         }
         active.delete(turn.threadId);
         emit({ ...base(turn.threadId, turnId), type: "turn.completed", ok, stopReason, cost: null,
@@ -674,6 +1043,7 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
           ...(denials.length ? { denials } : {}),
         });
         resolveDone();
+        logHopTiming("FINAL_ANSWER_TURN", performance.now() - tFinalStart);
       }
     })();
     return { turnId };
@@ -726,11 +1096,10 @@ export function createCodexNativeRuntime(options: CodexNativeRuntimeOptions): Co
         instructions: "",
         effort: null,
         tools: [],
-        cacheKey: "openmausbot-generate",
-        sessionId: newId(),
+        cacheKey: `openmausbot-generate-${newId()}`,
         signal: signal ?? new AbortController().signal,
-        timeoutMs,
       });
+      if (completion.incompleteReason) throw new ProviderOutputLimitError(completion.incompleteReason);
       if (completion.toolCalls.length) throw new CodexResponsesError("The model returned tool calls to a text-only helper.");
       return completion.text.trim() ? completion.text : completion.reasoning;
     },

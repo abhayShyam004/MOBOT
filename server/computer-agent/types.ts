@@ -310,6 +310,16 @@ export interface TaskVerificationItem {
   evidence?: string;
 }
 
+export interface MonitoringTargetRecord {
+  target: string;
+  cadenceSeconds: number;
+  status: "active" | "paused" | "completed" | "failed";
+  verifiedCondition?: string;
+  lastCheckedAt?: number;
+  lastObservation?: string;
+  consecutiveSuccesses?: number;
+}
+
 export interface DurableTaskRecord {
   id: string;
   botId: string;
@@ -333,6 +343,7 @@ export interface DurableTaskRecord {
   progressMessage: string;
   workspacePath: string;
   planId?: string;
+  monitoringTarget?: MonitoringTargetRecord;
   waitState?: {
     untilTimestamp: number;
     reason: string;

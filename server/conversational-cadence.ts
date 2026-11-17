@@ -24,6 +24,8 @@ export interface ConversationalCadencePolicy {
   suppressBulletPoints: boolean;
 }
 
+import type { ResolvedBotIdentity } from "../shared/bot-identity.ts";
+
 export const ERR_UNNATURAL_VERBOSITY = "ERR_UNNATURAL_VERBOSITY";
 
 export class UnnaturalVerbosityError extends Error {
@@ -40,6 +42,17 @@ export class UnnaturalVerbosityError extends Error {
  * Prohibited canned introductions mandated by Phase 18 Section 6:
  * Anti-Patterns & Prohibited Implementations.
  */
+/** A canned *introduction* is by definition at the opening of a reply. The
+ * patterns also appear verbatim in the system prompt that forbids them, so
+ * testing the whole reply flagged a long answer for quoting the anti-pattern
+ * and the verbosity recovery then cut it down to its first sentence. */
+const CANNED_GREETING_OPENING = 200;
+
+const opensWithProhibitedGreeting = (text: string): boolean => {
+  const opening = text.trimStart().slice(0, CANNED_GREETING_OPENING);
+  return PROHIBITED_CANNED_GREETING_REGEXES.some((rx) => rx.test(opening));
+};
+
 export const PROHIBITED_CANNED_GREETING_REGEXES: readonly RegExp[] = [
   /Hello!\s+I\s+am\s+MOBOT,\s+your\s+AI\s+assistant\.\s+How\s+may\s+I\s+assist\s+you\s+today\s+with\s+your\s+coding,\s*research,\s*or\s+productivity\s+goals\?/i,
   /Hello!\s+I(?:'m|\s+am)\s+MOBOT,\s+your(?:\s+personal)?\s+AI\s+assistant\b/i,
@@ -47,22 +60,119 @@ export const PROHIBITED_CANNED_GREETING_REGEXES: readonly RegExp[] = [
   /I\s+am\s+MOBOT,\s+your\s+AI\s+assistant\.\s+How\s+can\s+I\s+assist\s+you/i,
 ];
 
-/**
- * Checks whether a user prompt is a one-word or short conversational greeting.
- * Invariant: One-word greeting ("Hey", "Morning") receives a one-sentence warm reply, not a feature menu.
- */
-export function isGreeting(prompt: string): boolean {
-  if (!prompt || typeof prompt !== "string") return false;
-  const clean = prompt
+const GREETING_PHRASE =
+  /^(?:hey(?:[ -]there)?|hi(?:[ -]there)?|hello(?:[ -]there)?|hiya|yo|howdy|sup|morning|good[ -]morning|afternoon|good[ -]afternoon|evening|good[ -]evening|greetings|salutations|what'?s[ -]up)/i;
+const DEFAULT_GREETING_ADDRESSES = ["mobot", "bot", "there", "friend", "buddy", "team"];
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const cleanGreetingPrompt = (prompt: string): string =>
+  prompt
     .trim()
     .toLowerCase()
     .replace(/^[^\w]+|[^\w]+$/g, "");
+
+function greetingAddresses(addressTerms: readonly string[]): string[] {
+  const addresses = [...DEFAULT_GREETING_ADDRESSES];
+  for (const term of addressTerms) {
+    if (typeof term !== "string") continue;
+    const normalized = term.trim().toLowerCase().replace(/^[^\w]+|[^\w]+$/g, "");
+    if (normalized && !addresses.includes(normalized)) addresses.push(normalized);
+  }
+  return addresses;
+}
+
+/**
+ * Checks whether a user prompt is a one-word or short conversational greeting.
+ * Invariant: One-word greeting ("Hey", "Morning") receives a one-sentence warm reply, not a feature menu.
+ *
+ * Only the built-in address terms and, when supplied, the active bot's own name
+ * may follow the greeting phrase. Arbitrary trailing words are not accepted:
+ * "hey can you explain…" is a request, not a greeting.
+ */
+export function isGreeting(prompt: string, addressTerms: readonly string[] = []): boolean {
+  if (!prompt || typeof prompt !== "string") return false;
+  const clean = cleanGreetingPrompt(prompt);
   if (!clean) return false;
 
-  // Single word or short greeting phrase
-  return /^(?:hey(?:[ -]there)?|hi(?:[ -]there)?|hello(?:[ -]there)?|hiya|yo|howdy|sup|morning|good[ -]morning|afternoon|good[ -]afternoon|evening|good[ -]evening|greetings|salutations|what'?s[ -]up)(?:\s+(?:mobot|bot|there|friend|buddy|team))?$/i.test(
-    clean
-  );
+  const addressPattern = greetingAddresses(addressTerms).map(escapeRegExp).join("|");
+  return new RegExp(`^${GREETING_PHRASE.source}(?:\\s+(?:${addressPattern}))?$`, "i").test(clean);
+}
+
+/**
+ * Returns the request that follows a leading greeting ("hey, explain X" →
+ * "explain X"), or null when the prompt is only a greeting. Greeting is
+ * conversational framing; it must not change how the request behind it is
+ * classified.
+ */
+export function stripGreetingPrefix(prompt: string, addressTerms: readonly string[] = []): string | null {
+  if (!prompt || typeof prompt !== "string") return null;
+  const clean = cleanGreetingPrompt(prompt);
+  if (!clean) return null;
+
+  const addressPattern = greetingAddresses(addressTerms).map(escapeRegExp).join("|");
+  const match = new RegExp(`^${GREETING_PHRASE.source}(?:\\s+(?:${addressPattern}))?[\\s,!.]*`, "i").exec(clean);
+  if (!match) return null;
+  const remainder = clean.slice(match[0].length).trim();
+  return remainder || null;
+}
+
+/**
+ * Output-format directives are instructions about how an answer is rendered,
+ * not about what the answer must do in the world. They are a small, closed
+ * linguistic category: an imperative answer verb plus a rendering target
+ * ("reply with just the number", "respond in one sentence"). They are kept
+ * separate from capability vocabulary so a word that happens to appear inside
+ * the directive ("reply with the single word SEARCH") cannot select a tool.
+ */
+const OUTPUT_FORMAT_VERB =
+  /^(?:please\s+|just\s+|now\s+)*(?:reply|respond|answer|output|return|print|write|say|format)\b/i;
+const OUTPUT_FORMAT_TARGET =
+  /\b(?:word|words|sentence|sentences|number|numbers|line|lines|paragraph|paragraphs|bullet|bullets|list|json|markdown|format|lowercase|uppercase|letter|letters|character|characters|token|tokens|phrase|phrases|exactly|only|plain\s+text)\b/i;
+/** Objects that make a sentence a real task even when it also constrains the
+ * rendering. "Reply with the number of files in the directory" still needs
+ * the filesystem; "Reply with the single word SEARCH" does not. */
+const OUTPUT_FORMAT_EXTERNAL_OBJECT =
+  /\b(?:file|files|folder|folders|directory|directories|app|apps|application|applications|browser|website|url|weather|news|calendar|event|contacts?|location|screenshot|camera|clipboard|reminder|alarm|terminal|shell|command|script|program|repository|repo|git|database|server|phone|device)\b/i;
+
+/** True when the whole message is only a rendering instruction. */
+export function isOutputFormatInstruction(prompt: string): boolean {
+  if (!prompt || typeof prompt !== "string") return false;
+  const text = prompt.trim();
+  if (!text) return false;
+  if (!OUTPUT_FORMAT_VERB.test(text)) return false;
+  if (!OUTPUT_FORMAT_TARGET.test(text)) return false;
+  return !OUTPUT_FORMAT_EXTERNAL_OBJECT.test(text);
+}
+
+/**
+ * Removes trailing rendering instructions from the text used for routing.
+ * The original message still reaches the provider; this only stops a format
+ * suffix from changing the task's modality. A message that is entirely a
+ * formatting instruction is returned unchanged so callers can recognize it.
+ */
+export function stripTrailingOutputFormatConstraints(prompt: string): string {
+  if (!prompt || typeof prompt !== "string") return prompt;
+  const trimmed = prompt.trim();
+  if (!trimmed) return prompt;
+
+  const sentences = trimmed.split(/(?<=[.!?])\s+/);
+  while (sentences.length > 1 && isOutputFormatInstruction(sentences[sentences.length - 1]!)) {
+    sentences.pop();
+  }
+  let result = sentences.join(' ').trim();
+
+  // One sentence can still carry a coordinate format clause:
+  // "Search for recent Android research and reply with three bullet points."
+  const clause = /(?:,\s*|\s+and\s+|;\s*)(?:please\s+)?(?:reply|respond|answer|output|return|print|say|format)\b[\s\S]*$/i.exec(result);
+  if (clause) {
+    const directive = clause[0].replace(/^(?:,\s*|\s+and\s+|;\s*)/i, '').trim();
+    if (isOutputFormatInstruction(directive)) {
+      const head = result.slice(0, clause.index).trim();
+      if (head.length >= 3) result = head;
+    }
+  }
+  return result || prompt;
 }
 
 /**
@@ -164,6 +274,8 @@ export interface UnnaturalVerbosityCheckResult {
   isAcknowledgement: boolean;
   containsProhibitedGreeting: boolean;
   containsUnsolicitedCatalogue: boolean;
+  containsGenericAssistantTrope?: boolean;
+  containsMalformedRoleInterpolation?: boolean;
   reasons: string[];
 }
 
@@ -172,10 +284,11 @@ export interface UnnaturalVerbosityCheckResult {
  * - Conversational greeting yielding >100 words of output triggers ERR_UNNATURAL_VERBOSITY.
  * - Prohibited canned introductions trigger ERR_UNNATURAL_VERBOSITY.
  * - Unsolicited feature catalogues / capability lists for simple greetings trigger ERR_UNNATURAL_VERBOSITY.
+ * - Generic boilerplate assistant tropes on greeting for custom identity bots trigger recovery.
  */
 export function detectUnnaturalVerbosity(
   botResponse: string,
-  options: { userPrompt: string }
+  options: { userPrompt: string; botIdentity?: ResolvedBotIdentity | null }
 ): UnnaturalVerbosityCheckResult {
   const text = (botResponse || "").trim();
   const prompt = (options.userPrompt || "").trim();
@@ -186,7 +299,7 @@ export function detectUnnaturalVerbosity(
   const reasons: string[] = [];
 
   // 1. Prohibited canned greeting
-  const containsProhibitedGreeting = PROHIBITED_CANNED_GREETING_REGEXES.some((rx) => rx.test(text));
+  const containsProhibitedGreeting = opensWithProhibitedGreeting(text);
   if (containsProhibitedGreeting) {
     reasons.push(
       `${ERR_UNNATURAL_VERBOSITY}: Response contains prohibited canned assistant introduction.`
@@ -223,6 +336,30 @@ export function detectUnnaturalVerbosity(
     );
   }
 
+  // 5. Generic boilerplate assistant tropes on greeting for custom identity bots
+  let containsGenericAssistantTrope = false;
+  if (greeting && options.botIdentity?.hasCustomIdentity) {
+    if (
+      /\b(?:what\s+are\s+we\s+tackling|what\s+would\s+you\s+like(?:\s+me)?\s+to\s+do|how\s+(?:can|may)\s+i\s+(?:help|assist)\s+you|what\s+can\s+i\s+do\s+for\s+you|what\s+are\s+we\s+working\s+on\s+today)\b/i.test(
+        text
+      )
+    ) {
+      containsGenericAssistantTrope = true;
+      reasons.push(
+        `${ERR_UNNATURAL_VERBOSITY}: Customized bot emitted generic assistant trope on greeting.`
+      );
+    }
+  }
+
+  // 6. Malformed role interpolation (e.g. "ready to dive into study budy", "dive into study buddy")
+  let containsMalformedRoleInterpolation = false;
+  if (/\b(?:(?:ready\s+to\s+)?dive\s+into\s+[\w\s]{2,30}|here,\s*ready\s+to\s+dive)\b/i.test(text)) {
+    containsMalformedRoleInterpolation = true;
+    reasons.push(
+      `${ERR_UNNATURAL_VERBOSITY}: Response contains malformed role interpolation or template artifact.`
+    );
+  }
+
   const hasUnnaturalVerbosity = reasons.length > 0;
 
   return {
@@ -232,6 +369,8 @@ export function detectUnnaturalVerbosity(
     isAcknowledgement: ack,
     containsProhibitedGreeting,
     containsUnsolicitedCatalogue,
+    containsGenericAssistantTrope,
+    containsMalformedRoleInterpolation,
     reasons,
   };
 }
@@ -241,13 +380,16 @@ export function detectUnnaturalVerbosity(
  */
 export function recoverFromUnnaturalVerbosity(
   botResponse: string,
-  options: { userPrompt: string }
+  options: { userPrompt: string; botIdentity?: ResolvedBotIdentity | null }
 ): string {
   const prompt = (options.userPrompt || "").trim();
   const text = (botResponse || "").trim();
 
-  // 1. User sent a simple greeting ("Hey", "Morning", "Hi")
+  // 1. User sent a simple greeting ("Hey", "Morning", "Hi", "yo")
   if (isGreeting(prompt)) {
+    if (options.botIdentity && options.botIdentity.hasCustomIdentity) {
+      return options.botIdentity.conversationalGreetingReply;
+    }
     const cleanPrompt = prompt.toLowerCase();
     if (/morning/i.test(cleanPrompt)) {
       return "Good morning! What are you working on today?";
@@ -268,11 +410,20 @@ export function recoverFromUnnaturalVerbosity(
 
   // 3. Prohibited canned greeting in mixed response: strip prohibited prefixes
   let cleaned = text;
-  for (const rx of PROHIBITED_CANNED_GREETING_REGEXES) {
-    cleaned = cleaned.replace(rx, "").trim();
+  if (opensWithProhibitedGreeting(cleaned)) {
+    for (const rx of PROHIBITED_CANNED_GREETING_REGEXES) {
+      cleaned = cleaned.replace(rx, "").trim();
+    }
   }
 
+  // Strip malformed role interpolation artifacts (e.g. ", ready to dive into study budy")
+  cleaned = cleaned.replace(/,\s*(?:ready\s+to\s+)?dive\s+into\s+[\w\s]{2,30}(?=[.!?]|\s+—|\s+what)/i, "").trim();
+  cleaned = cleaned.replace(/\b(?:ready\s+to\s+)?dive\s+into\s+[\w\s]{2,30}\s*—\s*/i, "").trim();
+
   if (!cleaned) {
+    if (options.botIdentity && options.botIdentity.hasCustomIdentity) {
+      return options.botIdentity.conversationalGreetingReply;
+    }
     return "Ready when you are. What would you like to do?";
   }
 

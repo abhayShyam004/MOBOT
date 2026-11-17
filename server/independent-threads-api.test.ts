@@ -389,7 +389,7 @@ describe("independent bot tasks through the isolated control surface", () => {
     expect((await api("PATCH", `/api/groups/${group.id}/setup`, {
       action: "complete", cwd: null, bulletin: "", defaultResponder: { kind: "member", botId },
     })).status).toBe(200);
-    expect((await api("POST", `/api/groups/${group.id}/messages`, { text: "GROUP_MODEL_OWNER" })).status).toBe(202);
+    expect((await api("POST", `/api/groups/${group.id}/messages`, {sendId: "test_room_send_0001",  text: "GROUP_MODEL_OWNER" })).status).toBe(202);
     await dump(models[0]);
     const selection = { instanceId: "claude", model: models[1] };
     expect((await api("PATCH", `/api/bots/${botId}/tasks/${threadId}`, { modelSelection: selection })).status).toBe(200);

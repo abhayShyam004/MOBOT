@@ -207,6 +207,29 @@ describe.each<Provider>(["openai-compat", "grok", "minimax"])("%s structured too
     expect(f.instance.adapter.capabilities).toMatchObject({ agentsMcp: true, composioMcp: true, customMcp: true });
   });
 
+  it("withholds a deferred integration until the model loads it, then carries its tools into the next request", async () => {
+    const f = await fixture((_body, response, round) => {
+      if (round === 1) {
+        return sse(response, [chunk({ tool_calls: [toolCall("capability_enable", JSON.stringify({ servers: ["android_browser"] }), "call_enable")] }, "tool_calls")]);
+      }
+      if (round === 2) return sse(response, [chunk({ tool_calls: [toolCall("android_browser_write")] }, "tool_calls")]);
+      return answer(response);
+    }, provider);
+    // The person mounted a browser server, but this turn was classified as
+    // needing nothing from it: it is verified and withheld, not dropped.
+    await f.start({
+      toolExposure: [],
+      integrations: { custom: { android_browser: { command: process.execPath, args: [join(f.directory, "mcp.mjs"), f.directory, f.origin], env: {} } } },
+    });
+    expect(await f.decide()).toBe("allowed-once");
+    expect(await f.completed()).toMatchObject({ ok: true });
+    expect(f.requests[0].tools?.map((tool) => tool.function.name)).toEqual(["capability_enable"]);
+    expect(f.requests[0].messages.map((message) => message.content).join("\n")).toContain("Deferred Capabilities");
+    expect(f.requests[1].tools?.map((tool) => tool.function.name)).toContain("android_browser_write");
+    expect(f.requests[1].messages).toContainEqual(expect.objectContaining({ role: "tool", tool_call_id: "call_enable", content: expect.stringContaining("android_browser") }));
+    expect(f.effects()).toEqual([{ name: "receipt", value: "done" }]);
+  });
+
   it("preserves ordinary transcript chat and leaves textual tool imitations as text", async () => {
     const imitation = '<tool_call>{"name":"audit_write","arguments":{"value":"pretend"}}</tool_call>';
     const f = await fixture((_body, response) => answer(response, imitation), provider);

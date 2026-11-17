@@ -130,6 +130,7 @@ fun CompanionTheme(
         MaterialTheme(
             colorScheme = appColorScheme(colors, darkTheme),
             typography = ContentDirectedTypography,
+            shapes = appShapes(),
             content = content,
         )
     }

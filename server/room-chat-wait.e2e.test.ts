@@ -217,7 +217,7 @@ describe("chat rooms wait for a member busy elsewhere", { timeout: 45_000 }, () 
 
     try {
       await holdBusy(busy.id, "Finish this first");
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Hello team" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0001",  text: "Hello team" })).status).toBe(202);
       await releaseAfterRoomWait(room.id, busy.id, "Busy");
 
       await expect.poll(async () => {
@@ -254,7 +254,7 @@ describe("chat rooms wait for a member busy elsewhere", { timeout: 45_000 }, () 
     try {
       await holdBusy(bee.id, "Bee, finish this first");
       // only Ace is addressed; Bee arrives through Ace's reply
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "@Ace please bring Bee in" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0002",  text: "@Ace please bring Bee in" })).status).toBe(202);
       await releaseAfterRoomWait(room.id, bee.id, "Bee");
 
       await expect.poll(async () => {
@@ -328,7 +328,7 @@ describe("chat rooms wait for a member busy elsewhere", { timeout: 45_000 }, () 
       channelId = channel.id;
       await expect.poll(() => botBusy(ink.id)).toBe(false);
       await holdBusy(ink.id, "Ink, finish this first");
-      expect((await api("POST", `/api/groups/${channel.id}/messages`, { text: "@Ink one more thing" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${channel.id}/messages`, {sendId: "test_room_send_0003",  text: "@Ink one more thing" })).status).toBe(202);
       await releaseAfterRoomWait(channel.id, ink.id, "Ink");
 
       await expect.poll(async () => {

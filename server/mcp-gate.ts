@@ -199,7 +199,14 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         const params = message.params as Json | undefined;
         const toolName = typeof params?.name === "string" ? params.name : "tool";
         const args = (params?.arguments ?? {}) as Record<string, unknown>;
-        const perm = checkToolPermission(toolName, loadDiskPermissions(), args);
+        // This gate is mounted once per configured upstream server, so every
+        // call arriving here was advertised by a server the user configured —
+        // the case `mountedTool` exists for. Without it, an upstream's own
+        // arbitrary tool names (get_food_cart, search_products) classify as
+        // "unknown" and are silently denied before the approval layer can
+        // decide. Permission domains are still honoured from disk, and the
+        // default-deny for anything that has not proved it was mounted stays.
+        const perm = checkToolPermission(toolName, loadDiskPermissions(), args, { mountedTool: true });
         if (!perm.allowed) {
           process.stdout.write(
             JSON.stringify({

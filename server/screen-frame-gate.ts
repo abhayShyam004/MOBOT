@@ -299,12 +299,463 @@ export interface ScreenFrameValidationResult {
   height?: number;
 }
 
+/** A human sentence for the activity row that explains why a capture was not
+ * attached. Raw codes stay in the log; the transcript gets plain language. */
+export function screenFrameFailureMessage(result: ScreenFrameValidationResult): string {
+  switch (result.code) {
+    case "ERR_SCREEN_CAPTURE_BLANK":
+      return "Screenshot not attached — the captured frame was blank.";
+    case "ERR_SCREEN_CAPTURE_CORRUPT":
+      return "Screenshot not attached — the image data was unreadable or truncated.";
+    case "ERR_SCREEN_CAPTURE_EMPTY":
+      return "Screenshot not attached — no image data was returned.";
+    case "ERR_SCREEN_CAPTURE_TOO_SMALL":
+      return "Screenshot not attached — the image data was incomplete.";
+    case "ERR_SCREEN_CAPTURE_TOO_LARGE":
+      return "Screenshot not attached — the image was too large.";
+    case "ERR_SCREEN_CAPTURE_INVALID_DIMENSIONS":
+      return "Screenshot not attached — the image had invalid dimensions.";
+    case "ERR_SCREEN_CAPTURE_UNKNOWN_FORMAT":
+      return "Screenshot not attached — the image format was not recognized.";
+    default:
+      return "Screenshot not attached — the image could not be verified.";
+  }
+}
+
+// A 4K screen frame is ~8 MB; 32 MB leaves room for a lossless retina capture
+// while still bounding the work an untrusted tool output can ask for.
+const MAX_SCREEN_FRAME_BYTES = 32 * 1024 * 1024;
+const MAX_SCREEN_FRAME_PIXELS = 20_000_000;
+const MAX_PNG_DECODED_BYTES = 96 * 1024 * 1024;
+
+const PNG_COLOR_CHANNELS: Readonly<Record<number, number>> = {
+  0: 1, // grayscale
+  2: 3, // truecolour
+  3: 1, // indexed
+  4: 2, // grayscale + alpha
+  6: 4, // truecolour + alpha
+};
+
+const PNG_BIT_DEPTHS: Readonly<Record<number, readonly number[]>> = {
+  0: [1, 2, 4, 8, 16],
+  2: [8, 16],
+  3: [1, 2, 4, 8],
+  4: [8, 16],
+  6: [8, 16],
+};
+
+const ADAM7_PASSES = [
+  { xStart: 0, yStart: 0, xStep: 8, yStep: 8 },
+  { xStart: 4, yStart: 0, xStep: 8, yStep: 8 },
+  { xStart: 0, yStart: 4, xStep: 4, yStep: 8 },
+  { xStart: 2, yStart: 0, xStep: 4, yStep: 4 },
+  { xStart: 0, yStart: 2, xStep: 2, yStep: 4 },
+  { xStart: 1, yStart: 0, xStep: 2, yStep: 2 },
+  { xStart: 0, yStart: 1, xStep: 1, yStep: 2 },
+] as const;
+
+interface FrameStatistics {
+  minLuminance: number;
+  maxLuminance: number;
+  dominantLuminance: number;
+  materialPixels: number;
+  pixels: number;
+}
+
+interface PngInspection {
+  width: number;
+  height: number;
+  stats?: FrameStatistics;
+  failure?: { code: string; reason: string };
+}
+
+function pngPassGeometry(
+  width: number,
+  height: number,
+  interlace: number,
+): Array<{ width: number; height: number }> {
+  if (interlace !== 1) return [{ width, height }];
+  return ADAM7_PASSES.map((pass) => ({
+    width: width <= pass.xStart ? 0 : Math.ceil((width - pass.xStart) / pass.xStep),
+    height: height <= pass.yStart ? 0 : Math.ceil((height - pass.yStart) / pass.yStep),
+  }));
+}
+
+function pngExpectedBytes(
+  width: number,
+  height: number,
+  bitDepth: number,
+  channels: number,
+  interlace: number,
+): number {
+  let total = 0;
+  for (const pass of pngPassGeometry(width, height, interlace)) {
+    if (pass.width === 0 || pass.height === 0) continue;
+    const rowBytes = Math.ceil((pass.width * channels * bitDepth) / 8);
+    total += (1 + rowBytes) * pass.height;
+  }
+  return total;
+}
+
+function paethPredictor(left: number, up: number, upLeft: number): number {
+  const estimate = left + up - upLeft;
+  const leftDistance = Math.abs(estimate - left);
+  const upDistance = Math.abs(estimate - up);
+  const upLeftDistance = Math.abs(estimate - upLeft);
+  if (leftDistance <= upDistance && leftDistance <= upLeftDistance) return left;
+  if (upDistance <= upLeftDistance) return up;
+  return upLeft;
+}
+
+/** Reverse one PNG scanline filter in place. PNG filters predict each byte
+ * from the already-reconstructed left byte and the previous row, so skipping
+ * this step reads the raw filter residuals as if they were pixels. */
+function unfilterScanline(
+  row: Buffer,
+  previous: Buffer | undefined,
+  filter: number,
+  bytesPerPixel: number,
+): boolean {
+  for (let index = 0; index < row.length; index++) {
+    const raw = row[index]!;
+    const left = index >= bytesPerPixel ? row[index - bytesPerPixel]! : 0;
+    const up = previous ? previous[index]! : 0;
+    const upLeft = previous && index >= bytesPerPixel ? previous[index - bytesPerPixel]! : 0;
+    let value: number;
+    switch (filter) {
+      case 0:
+        value = raw;
+        break;
+      case 1:
+        value = raw + left;
+        break;
+      case 2:
+        value = raw + up;
+        break;
+      case 3:
+        value = raw + Math.floor((left + up) / 2);
+        break;
+      case 4:
+        value = raw + paethPredictor(left, up, upLeft);
+        break;
+      default:
+        return false;
+    }
+    row[index] = value & 0xff;
+  }
+  return true;
+}
+
+/** Read one pixel sample. For 16-bit images the high byte carries enough
+ * luminance information for a blank frame, so the low byte is skipped. */
+function collectPassPixels(
+  data: Buffer,
+  width: number,
+  bitDepth: number,
+  colorType: number,
+  palette: Buffer | null,
+  paletteAlpha: Uint8Array | null,
+  histogram: Uint32Array,
+): string | null {
+  const channels = PNG_COLOR_CHANNELS[colorType]!;
+  const maxSample = (1 << bitDepth) - 1;
+  const sampleAt = (index: number): number => {
+    if (bitDepth === 8) return data[index]!;
+    if (bitDepth === 16) return data[index * 2]!;
+    const bitOffset = index * bitDepth;
+    const byte = data[bitOffset >> 3]!;
+    const shift = 8 - bitDepth - (bitOffset & 7);
+    return (byte >> shift) & maxSample;
+  };
+
+  for (let pixel = 0; pixel < width; pixel++) {
+    let red: number;
+    let green: number;
+    let blue: number;
+    let alpha = 255;
+
+    switch (colorType) {
+      case 0: {
+        const value = sampleAt(pixel);
+        red = green = blue = bitDepth < 8 ? Math.round((value * 255) / maxSample) : value;
+        break;
+      }
+      case 2: {
+        const base = pixel * 3;
+        red = sampleAt(base);
+        green = sampleAt(base + 1);
+        blue = sampleAt(base + 2);
+        break;
+      }
+      case 3: {
+        const index = sampleAt(pixel);
+        if (!palette || index * 3 + 2 >= palette.length) {
+          return "indexed PNG refers to a colour outside its palette";
+        }
+        red = palette[index * 3]!;
+        green = palette[index * 3 + 1]!;
+        blue = palette[index * 3 + 2]!;
+        alpha = paletteAlpha?.[index] ?? 255;
+        break;
+      }
+      case 4: {
+        const base = pixel * channels;
+        if (bitDepth === 8) {
+          red = green = blue = data[base]!;
+          alpha = data[base + 1]!;
+        } else {
+          red = green = blue = data[base * 2]!;
+          alpha = data[base * 2 + 2]!;
+        }
+        break;
+      }
+      case 6: {
+        const base = pixel * channels;
+        if (bitDepth === 8) {
+          red = data[base]!;
+          green = data[base + 1]!;
+          blue = data[base + 2]!;
+          alpha = data[base + 3]!;
+        } else {
+          red = data[base * 2]!;
+          green = data[base * 2 + 2]!;
+          blue = data[base * 2 + 4]!;
+          alpha = data[base * 2 + 6]!;
+        }
+        break;
+      }
+      default:
+        return "unsupported PNG colour type";
+    }
+
+    const luminance = (red * 299 + green * 587 + blue * 114) / 1000;
+    // Composite over white: a fully transparent "coloured" frame is just as
+    // blank to the reader as a white one.
+    const visible = alpha >= 255
+      ? luminance
+      : (luminance * alpha + 255 * (255 - alpha)) / 255;
+    const bucket = Math.max(0, Math.min(255, Math.round(visible)));
+    histogram[bucket] = histogram[bucket]! + 1;
+  }
+  return null;
+}
+
+function analyseHistogram(histogram: Uint32Array, pixels: number): FrameStatistics {
+  let minLuminance = 255;
+  let maxLuminance = 0;
+  let dominantLuminance = 0;
+  for (let bucket = 0; bucket < histogram.length; bucket++) {
+    const count = histogram[bucket]!;
+    if (count === 0) continue;
+    if (bucket < minLuminance) minLuminance = bucket;
+    if (bucket > maxLuminance) maxLuminance = bucket;
+    if (count > histogram[dominantLuminance]!) dominantLuminance = bucket;
+  }
+  let materialPixels = 0;
+  for (let bucket = 0; bucket < histogram.length; bucket++) {
+    if (Math.abs(bucket - dominantLuminance) > 8) materialPixels += histogram[bucket]!;
+  }
+  return {
+    minLuminance: pixels === 0 ? 0 : minLuminance,
+    maxLuminance,
+    dominantLuminance,
+    materialPixels,
+    pixels,
+  };
+}
+
+function blankFrameReason(stats: FrameStatistics, label: string): string | null {
+  if (stats.pixels === 0) return `${label} screen capture contains no pixels`;
+  if (stats.maxLuminance < 2) {
+    return `${label} screen capture is completely black or blank (max luminance < 2)`;
+  }
+  if (stats.maxLuminance - stats.minLuminance < 3) {
+    if (stats.minLuminance >= 250) return `${label} screen capture is blank (uniform white frame)`;
+    return `${label} screen capture is blank (uniform frame, luminance range < 3)`;
+  }
+  // A handful of stray anti-aliasing pixels is not content: a blank white
+  // page with one rounded corner is still blank. Real text or UI differs in
+  // thousands of pixels. The floor keeps very small frames honest.
+  const materialLimit = Math.max(2, Math.floor(stats.pixels * 0.00002));
+  if (stats.materialPixels <= materialLimit) {
+    return `${label} screen capture is blank (almost uniform: ${stats.materialPixels} differing pixels)`;
+  }
+  return null;
+}
+
+function inspectPng(buf: Buffer): PngInspection {
+  if (buf.length < 33) {
+    return { width: 0, height: 0, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG buffer too short for IHDR" } };
+  }
+
+  const width = buf.readUInt32BE(16);
+  const height = buf.readUInt32BE(20);
+  if (width === 0 || height === 0) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_INVALID_DIMENSIONS", reason: `Invalid PNG dimensions (${width}x${height})` } };
+  }
+  if (width > 20_000 || height > 20_000 || width * height > MAX_SCREEN_FRAME_PIXELS) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_TOO_LARGE", reason: `PNG dimensions are too large (${width}x${height})` } };
+  }
+
+  let header: Buffer | null = null;
+  let palette: Buffer | null = null;
+  let transparency: Buffer | null = null;
+  const idatChunks: Buffer[] = [];
+  let sawEnd = false;
+  let offset = 8;
+
+  while (offset + 12 <= buf.length) {
+    const length = buf.readUInt32BE(offset);
+    const type = buf.toString("ascii", offset + 4, offset + 8);
+    if (offset + 12 + length > buf.length) {
+      return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: `PNG chunk '${type}' is truncated` } };
+    }
+    const data = buf.subarray(offset + 8, offset + 8 + length);
+
+    if (!header) {
+      if (type !== "IHDR" || length !== 13) {
+        return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG does not begin with a valid IHDR chunk" } };
+      }
+      header = data;
+    } else if (type === "IHDR") {
+      return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG contains more than one IHDR chunk" } };
+    } else if (type === "IDAT") {
+      idatChunks.push(Buffer.from(data));
+    } else if (type === "PLTE") {
+      if (length === 0 || length > 768 || length % 3 !== 0) {
+        return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG palette has an invalid length" } };
+      }
+      palette = Buffer.from(data);
+    } else if (type === "tRNS") {
+      transparency = Buffer.from(data);
+    } else if (type === "IEND") {
+      sawEnd = true;
+      break;
+    }
+    offset += 12 + length;
+  }
+
+  if (!header) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG is missing its IHDR chunk" } };
+  }
+  if (idatChunks.length === 0) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG is missing image data" } };
+  }
+  if (!sawEnd) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG is missing its IEND terminator" } };
+  }
+
+  const bitDepth = header[8]!;
+  const colorType = header[9]!;
+  const compression = header[10]!;
+  const filterMethod = header[11]!;
+  const interlace = header[12]!;
+  const channels = PNG_COLOR_CHANNELS[colorType];
+  const allowedDepths = PNG_BIT_DEPTHS[colorType];
+
+  if (!channels || !allowedDepths || !allowedDepths.includes(bitDepth)) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: `Unsupported PNG colour type ${colorType} at bit depth ${bitDepth}` } };
+  }
+  if (compression !== 0 || filterMethod !== 0 || (interlace !== 0 && interlace !== 1)) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG uses an unsupported compression, filter, or interlace mode" } };
+  }
+  if (colorType === 3 && !palette) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "Indexed PNG is missing its palette" } };
+  }
+
+  const expectedBytes = pngExpectedBytes(width, height, bitDepth, channels, interlace);
+  if (expectedBytes > MAX_PNG_DECODED_BYTES) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_TOO_LARGE", reason: `PNG decodes to an oversized frame (${expectedBytes} bytes)` } };
+  }
+
+  let decompressed: Buffer;
+  try {
+    decompressed = zlib.inflateSync(Buffer.concat(idatChunks), { maxOutputLength: expectedBytes });
+  } catch {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG image data is corrupt or truncated" } };
+  }
+  if (decompressed.length !== expectedBytes) {
+    return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: `PNG image data is truncated (${decompressed.length} of ${expectedBytes} bytes)` } };
+  }
+
+  const paletteAlpha = colorType === 3 && transparency
+    ? Uint8Array.from({ length: 256 }, (_, index) => transparency![index] ?? 255)
+    : null;
+  const filterBytesPerPixel = Math.max(1, Math.ceil((channels * bitDepth) / 8));
+  const histogram = new Uint32Array(256);
+  let pixels = 0;
+  let cursor = 0;
+
+  for (const pass of pngPassGeometry(width, height, interlace)) {
+    if (pass.width === 0 || pass.height === 0) continue;
+    const rowBytes = Math.ceil((pass.width * channels * bitDepth) / 8);
+    let previous: Buffer | undefined;
+    for (let row = 0; row < pass.height; row++) {
+      const filter = decompressed[cursor]!;
+      const scanline = decompressed.subarray(cursor + 1, cursor + 1 + rowBytes);
+      if (!unfilterScanline(scanline, previous, filter, filterBytesPerPixel)) {
+        return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: `PNG uses an unknown scanline filter (${filter})` } };
+      }
+      const error = collectPassPixels(
+        scanline,
+        pass.width,
+        bitDepth,
+        colorType,
+        palette,
+        paletteAlpha,
+        histogram,
+      );
+      if (error) {
+        return { width, height, failure: { code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: `PNG pixel data is invalid: ${error}` } };
+      }
+      pixels += pass.width;
+      previous = scanline;
+      cursor += 1 + rowBytes;
+    }
+  }
+
+  return { width, height, stats: analyseHistogram(histogram, pixels) };
+}
+
+function jpegDimensions(buf: Buffer): { width: number; height: number } | null {
+  let offset = 2;
+  while (offset + 4 <= buf.length) {
+    if (buf[offset] !== 0xff) {
+      offset++;
+      continue;
+    }
+    let marker = buf[offset + 1]!;
+    while (marker === 0xff && offset + 2 < buf.length) {
+      offset++;
+      marker = buf[offset + 1]!;
+    }
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) {
+      offset += 2;
+      continue;
+    }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    if (offset + 4 > buf.length) return null;
+    const length = buf.readUInt16BE(offset + 2);
+    if (length < 2 || offset + 2 + length > buf.length) return null;
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      if (length < 7 || offset + 9 > buf.length) return null;
+      const height = buf.readUInt16BE(offset + 5);
+      const width = buf.readUInt16BE(offset + 7);
+      if (width === 0 || height === 0) return null;
+      return { width, height };
+    }
+    offset += 2 + length;
+  }
+  return null;
+}
+
 /**
  * Validates raw or base64 screen frame bytes:
- * - Checks file signatures (PNG, JPEG, WebP)
- * - Verifies dimensions and minimum payload integrity
- * - Unpacks and samples scanlines to prevent all-black or blank placeholders
- *   from settling into the transcript.
+ * - Checks file signatures (PNG, JPEG, WebP) and bounds the payload
+ * - Unpacks PNG scanlines through every filter, then samples real pixels
+ * - Rejects black, white, uniform, and almost-uniform placeholders while
+ *   preserving mostly-white frames that contain actual text or UI
+ * - Rejects corrupt, truncated, or oversized captures.
  */
 export function validateScreenFrameBytes(input: Buffer | string | undefined | null): ScreenFrameValidationResult {
   if (!input) {
@@ -317,8 +768,11 @@ export function validateScreenFrameBytes(input: Buffer | string | undefined | nu
     if (!raw) {
       return { valid: false, code: "ERR_SCREEN_CAPTURE_EMPTY", reason: "Base64 image string is empty" };
     }
+    if (!/^[A-Za-z0-9+/=_\-\s]+$/.test(raw)) {
+      return { valid: false, code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "Image string is not valid base64" };
+    }
     try {
-      buf = Buffer.from(raw, "base64");
+      buf = Buffer.from(raw.replace(/-/g, "+").replace(/_/g, "/"), "base64");
     } catch {
       return { valid: false, code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "Failed to decode base64 image data" };
     }
@@ -331,77 +785,53 @@ export function validateScreenFrameBytes(input: Buffer | string | undefined | nu
   if (buf.length < 32) {
     return { valid: false, code: "ERR_SCREEN_CAPTURE_TOO_SMALL", reason: `Image buffer is suspiciously small (${buf.length} bytes)` };
   }
+  if (buf.length > MAX_SCREEN_FRAME_BYTES) {
+    return { valid: false, code: "ERR_SCREEN_CAPTURE_TOO_LARGE", reason: `Image buffer is too large (${buf.length} bytes)` };
+  }
 
   // 1. Detect PNG: 89 50 4E 47 0D 0A 1A 0A
   if (buf.length >= 8 && buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47 && buf[4] === 0x0d && buf[5] === 0x0a && buf[6] === 0x1a && buf[7] === 0x0a) {
-    if (buf.length < 33) {
-      return { valid: false, code: "ERR_SCREEN_CAPTURE_CORRUPT", reason: "PNG buffer too short for IHDR" };
+    const inspected = inspectPng(buf);
+    if (inspected.failure) {
+      return {
+        valid: false,
+        code: inspected.failure.code,
+        reason: inspected.failure.reason,
+        format: "png",
+        width: inspected.width,
+        height: inspected.height,
+      };
     }
-    const width = buf.readUInt32BE(16);
-    const height = buf.readUInt32BE(20);
-    const colorType = buf[25];
-
-    if (width === 0 || height === 0) {
-      return { valid: false, code: "ERR_SCREEN_CAPTURE_INVALID_DIMENSIONS", reason: `Invalid PNG dimensions (${width}x${height})` };
-    }
-
-    const idatChunks: Buffer[] = [];
-    let offset = 8;
-    while (offset + 8 <= buf.length) {
-      const length = buf.readUInt32BE(offset);
-      const type = buf.toString("ascii", offset + 4, offset + 8);
-      if (type === "IDAT" && offset + 8 + length <= buf.length) {
-        idatChunks.push(buf.subarray(offset + 8, offset + 8 + length));
-      }
-      offset += 12 + length;
-      if (type === "IEND") break;
-    }
-
-    if (idatChunks.length > 0) {
-      try {
-        const compressed = Buffer.concat(idatChunks);
-        const decompressed = zlib.inflateSync(compressed);
-        let maxLum = 0;
-        const bpp = colorType === 6 ? 4 : colorType === 2 ? 3 : colorType === 4 ? 2 : 1;
-        const stride = 1 + width * bpp;
-
-        const stepRow = Math.max(1, Math.floor(height / 100));
-        for (let row = 0; row < height; row += stepRow) {
-          const rowOffset = row * stride;
-          if (rowOffset + stride > decompressed.length) break;
-          const stepCol = Math.max(1, Math.floor(width / 20));
-          for (let col = 0; col < width; col += stepCol) {
-            const pxOffset = rowOffset + 1 + col * bpp;
-            if (pxOffset + bpp <= decompressed.length) {
-              const r = decompressed[pxOffset]!;
-              const g = bpp >= 3 ? decompressed[pxOffset + 1]! : r;
-              const b = bpp >= 3 ? decompressed[pxOffset + 2]! : r;
-              const lum = (r * 299 + g * 587 + b * 114) / 1000;
-              if (lum > maxLum) maxLum = lum;
-            }
-          }
-        }
-
-        if (maxLum < 2) {
-          return {
-            valid: false,
-            code: "ERR_SCREEN_CAPTURE_BLANK",
-            reason: "PNG screen capture is completely black or blank (max luminance < 2)",
-            format: "png",
-            width,
-            height,
-          };
-        }
-      } catch {
-        // If inflate fails, fall through to structural validity
+    if (inspected.stats) {
+      const reason = blankFrameReason(inspected.stats, "PNG");
+      if (reason) {
+        return {
+          valid: false,
+          code: "ERR_SCREEN_CAPTURE_BLANK",
+          reason,
+          format: "png",
+          width: inspected.width,
+          height: inspected.height,
+        };
       }
     }
-
-    return { valid: true, format: "png", width, height };
+    return { valid: true, format: "png", width: inspected.width, height: inspected.height };
   }
 
   // 2. Detect JPEG: FF D8 FF
   if (buf.length >= 3 && buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    const dimensions = jpegDimensions(buf);
+    if (dimensions && (dimensions.width > 20_000 || dimensions.height > 20_000 || dimensions.width * dimensions.height > MAX_SCREEN_FRAME_PIXELS)) {
+      return {
+        valid: false,
+        code: "ERR_SCREEN_CAPTURE_TOO_LARGE",
+        reason: `JPEG dimensions are too large (${dimensions.width}x${dimensions.height})`,
+        format: "jpeg",
+        width: dimensions.width,
+        height: dimensions.height,
+      };
+    }
+
     let sum = 0;
     let sumSq = 0;
     const n = Math.min(buf.length, 4096);
@@ -420,10 +850,11 @@ export function validateScreenFrameBytes(input: Buffer | string | undefined | nu
         code: "ERR_SCREEN_CAPTURE_BLANK",
         reason: "JPEG screen capture is blank or lacks visual content",
         format: "jpeg",
+        ...(dimensions ?? {}),
       };
     }
 
-    return { valid: true, format: "jpeg" };
+    return { valid: true, format: "jpeg", ...(dimensions ?? {}) };
   }
 
   // 3. Detect WebP: RIFF ... WEBP
@@ -539,6 +970,102 @@ export function sanitizeMessageForChatStorage<
   }
 
   return { message, blocked: false };
+}
+
+export interface ExtractedImagePayload {
+  base64: string;
+  mime?: string;
+}
+
+/**
+ * Robustly extracts base64 image data and optional MIME type from arbitrary tool
+ * output structures, including:
+ *   - MCP image parts: `{ content: [{ type: "image", data: "...", mimeType: "..." }] }`
+ *   - Escaped JSON strings (e.g. nested in `result` string)
+ *   - Objects with `data`, `base64`, or `image`
+ *   - Plain JSON strings or regex matches supporting escaped quotes
+ */
+export function extractBase64ImageFromOutput(output: unknown): ExtractedImagePayload | null {
+  if (!output) return null;
+
+  const visit = (val: unknown, depth = 0): ExtractedImagePayload | null => {
+    if (depth > 5 || !val) return null;
+
+    if (typeof val === "string") {
+      try {
+        const parsed = JSON.parse(val);
+        const res = visit(parsed, depth + 1);
+        if (res) return res;
+      } catch {}
+
+      const m = val.match(/(?:\\)?"(?:data|base64)(?:\\)?"\s*:\s*(?:\\)?"([A-Za-z0-9+/=]{100,})(?:\\)?"/);
+      if (m && m[1]) {
+        const mimeMatch = val.match(/(?:\\)?"(?:mimeType|mime)(?:\\)?"\s*:\s*(?:\\)?"([^"\\]+)(?:\\)?"/i);
+        return {
+          base64: m[1],
+          ...(mimeMatch && mimeMatch[1] ? { mime: mimeMatch[1] } : {}),
+        };
+      }
+      return null;
+    }
+
+    if (typeof val !== "object") return null;
+
+    if (Array.isArray(val)) {
+      for (const item of val) {
+        const res = visit(item, depth + 1);
+        if (res) return res;
+      }
+      return null;
+    }
+
+    const rec = val as Record<string, unknown>;
+
+    // Standard MCP image content part
+    if (Array.isArray(rec.content)) {
+      for (const part of rec.content) {
+        if (part && typeof part === "object") {
+          const p = part as Record<string, unknown>;
+          if (p.type === "image" && typeof p.data === "string" && p.data.length > 100) {
+            return {
+              base64: p.data,
+              ...(typeof p.mimeType === "string" ? { mime: p.mimeType } : {}),
+            };
+          }
+          const res = visit(part, depth + 1);
+          if (res) return res;
+        }
+      }
+    }
+
+    if (typeof rec.base64 === "string" && rec.base64.length > 100) {
+      return {
+        base64: rec.base64,
+        ...(typeof rec.mime === "string" ? { mime: rec.mime } : typeof rec.mimeType === "string" ? { mime: rec.mimeType } : {}),
+      };
+    }
+
+    if (typeof rec.data === "string" && rec.data.length > 100) {
+      return {
+        base64: rec.data,
+        ...(typeof rec.mime === "string" ? { mime: rec.mime } : typeof rec.mimeType === "string" ? { mime: rec.mimeType } : {}),
+      };
+    }
+
+    if ("result" in rec) {
+      const res = visit(rec.result, depth + 1);
+      if (res) return res;
+    }
+
+    if ("screenshot" in rec) {
+      const res = visit(rec.screenshot, depth + 1);
+      if (res) return res;
+    }
+
+    return null;
+  };
+
+  return visit(output);
 }
 
 

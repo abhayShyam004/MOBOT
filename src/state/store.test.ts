@@ -1978,3 +1978,81 @@ describe("conversation model variant discoveries", () => {
     expect(state.bots[0].tasks![0].modelSelection?.variant).toBe("minimal");
   });
 });
+
+describe("activity event ordering and deduplication", () => {
+  const baseBot: Bot = {
+    id: "bot-1",
+    name: "Assistant",
+    threadId: "thread-1",
+    model: "claude",
+    messages: [],
+    busy: true,
+  } as unknown as Bot;
+
+  it("deduplicates repeated messageAdded events without appending duplicate entries", () => {
+    const startState: AppState = { ...initialState, bots: [baseBot] };
+    const activityMsg: Message = {
+      id: "act-1",
+      at: 100,
+      role: "bot",
+      kind: "activity",
+      tool: { name: "Bash", ok: undefined, state: "running" },
+    };
+
+    const first = reducer(startState, { type: "messageAdded", threadId: "thread-1", message: activityMsg });
+    expect(first.bots[0].messages).toHaveLength(1);
+
+    // Duplicate messageAdded event arrives
+    const duplicate = reducer(first, { type: "messageAdded", threadId: "thread-1", message: activityMsg });
+    expect(duplicate.bots[0].messages).toHaveLength(1);
+    expect(duplicate.bots[0].messages[0].id).toBe("act-1");
+  });
+
+  it("preserves settled tool status when duplicate pending messageAdded arrives late", () => {
+    const startState: AppState = { ...initialState, bots: [baseBot] };
+    const settledMsg: Message = {
+      id: "act-1",
+      at: 100,
+      role: "bot",
+      kind: "activity",
+      tool: { name: "Bash", ok: true, state: "succeeded", output: "success" },
+    };
+    const runningMsg: Message = {
+      id: "act-1",
+      at: 100,
+      role: "bot",
+      kind: "activity",
+      tool: { name: "Bash", ok: undefined, state: "running" },
+    };
+
+    const settledState = reducer(startState, { type: "messageAdded", threadId: "thread-1", message: settledMsg });
+    expect(settledState.bots[0].messages[0].tool?.ok).toBe(true);
+
+    // Late running message should not regress settled status
+    const result = reducer(settledState, { type: "messageAdded", threadId: "thread-1", message: runningMsg });
+    expect(result.bots[0].messages).toHaveLength(1);
+    expect(result.bots[0].messages[0].tool?.ok).toBe(true);
+    expect(result.bots[0].messages[0].tool?.state).toBe("succeeded");
+  });
+
+  it("handles out-of-order messagePatched arriving before messageAdded without losing the event", () => {
+    const startState: AppState = { ...initialState, bots: [baseBot] };
+    const completedMsg: Message = {
+      id: "act-99",
+      at: 200,
+      role: "bot",
+      kind: "activity",
+      tool: { name: "edit_file", ok: true, state: "succeeded" },
+    };
+
+    // messagePatched arrives first
+    const patchedState = reducer(startState, { type: "messagePatched", threadId: "thread-1", message: completedMsg });
+    expect(patchedState.bots[0].messages).toHaveLength(1);
+    expect(patchedState.bots[0].messages[0].id).toBe("act-99");
+    expect(patchedState.bots[0].messages[0].tool?.ok).toBe(true);
+
+    // Later messageAdded arrives for same ID
+    const addedState = reducer(patchedState, { type: "messageAdded", threadId: "thread-1", message: completedMsg });
+    expect(addedState.bots[0].messages).toHaveLength(1);
+  });
+});

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Model Context Protocol (MCP) Server for OpenMausBot
 // Standard JSON-RPC 2.0 stdio transport for external agent orchestration (Hermes, Claude Desktop, Cursor, etc.).
+import { randomUUID } from "node:crypto";
 import readline from "node:readline";
 
 export function validateBaseUrl(url: string): string {
@@ -262,6 +263,10 @@ export const TOOLS: McpToolDefinition[] = [
         channel_id: { type: "string", description: "The ID of the channel." },
         task_id: { type: "string", description: "Optional expected active task/thread ID." },
         text: { type: "string", description: "The message content to post." },
+        send_id: {
+          type: "string",
+          description: "Optional stable identity for this logical send (16-80 letters, digits, hyphens or underscores). Pass the same send_id when retrying a send whose outcome was unknown.",
+        },
       },
       required: ["channel_id", "text"],
       additionalProperties: false,
@@ -551,6 +556,15 @@ function optionalStringArg(
 function idArg(args: Record<string, unknown>, key: string): string {
   const value = stringArg(args, key);
   if (!/^[\w-]+$/.test(value)) throw new ToolInputError(`${key} is not a valid OpenMausBot ID`);
+  return value;
+}
+
+/** The server accepts exactly this shape as a room-post identity. */
+function sendIdArg(args: Record<string, unknown>, key: string): string {
+  const value = stringArg(args, key);
+  if (!/^[A-Za-z0-9_-]{16,80}$/.test(value)) {
+    throw new ToolInputError(`${key} must be 16-80 letters, digits, hyphens or underscores`);
+  }
   return value;
 }
 
@@ -922,11 +936,15 @@ export async function handleToolCall(
       if (channel.threadId !== taskId) {
         throw new Error(`Task '${taskId}' is not active for channel '${channelId}'; switch to it before sending`);
       }
+      // One identity per logical send. A caller that retries after an unknown
+      // outcome can pass the same send_id and get the original receipt rather
+      // than a second message.
+      const sendId = args.send_id === undefined ? randomUUID() : sendIdArg(args, "send_id");
       await fetcher(`/api/groups/${encodeURIComponent(channelId)}/messages`, {
         method: "POST",
-        body: JSON.stringify({ text, threadId: taskId }),
+        body: JSON.stringify({ text, threadId: taskId, sendId }),
       });
-      return { success: true, channelId, taskId };
+      return { success: true, channelId, taskId, sendId };
     }
 
     case "create_channel": {

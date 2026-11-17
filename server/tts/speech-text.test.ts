@@ -136,8 +136,11 @@ describe("narrateTool", () => {
     expect(narrateTool("")).toBeNull();
   });
 
-  it("falls back to naming an unknown tool, without reading its argv", () => {
-    expect(narrateTool("deploy_thing")).toBe("running deploy_thing");
+  it("falls back to human language, never a raw tool identifier", () => {
+    expect(narrateTool("deploy_thing")).toBe("publishing thing");
+    expect(narrateTool("android_computer_project_start")).toBe("starting the project");
+    expect(narrateTool("mcp__android_computer__workspace_read")).toBe("reading a file");
+    expect(narrateTool("x9f2a")).toBe("working on a step");
     expect(narrateTool('curl -X POST "https://x/y" --data @{}')).toBeNull();
   });
 });

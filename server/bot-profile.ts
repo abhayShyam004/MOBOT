@@ -23,6 +23,47 @@ export {
   CONCLUSION_INDICATOR_PATTERNS,
 } from "./recommendation.ts";
 
+import {
+  specializationProfileSchema,
+} from "./specialization.ts";
+
+export {
+  type BotIdentitySeed,
+  type DomainCategory,
+  type ResolvedBotIdentity,
+  resolveBotIdentity,
+  compileBotIdentityPrompt,
+} from "./bot-identity.ts";
+
+export {
+  type SpecializationRoleId,
+  type SpecializationHeuristics,
+  type SpecializationProfile,
+  type SpecializationDiagnostic,
+  type SpecialistBoundaryViolation,
+  type CitationValidationResult,
+  type TestRunValidationResult,
+  type DependencyValidationResult,
+  type PlanTaskItem,
+  type SearchStrategyPlan,
+  ROLE_HEURISTIC_DEFAULTS,
+  specializationProfileSchema,
+  specializationDiagnostics,
+  defaultSpecializationProfile,
+  normalizeRoleId,
+  resolveSpecializationProfile,
+  ERR_SPECIALIST_BOUNDARY_OVERSTEP,
+  SpecialistBoundaryOverstepError,
+  classifyToolCapability,
+  checkSpecialistToolBoundary,
+  rankSpecialistTools,
+  filterSpecialistToolCandidates,
+  validateSourceCitations,
+  validateAutomatedTestRun,
+  validateDependencyGraph,
+  resolveSearchStrategy,
+} from "./specialization.ts";
+
 /** A name or title is quoted inside prompts and cards as one line — a
  * roster entry, a "Name: …" speaker line, the bracketed provenance note.
  * Text that can break out of that line (a newline, a control byte, the
@@ -50,6 +91,7 @@ export const BOT_PROFILE_PATCH_FIELDS = [
   "mascotBody",
   "voice",
   "speakReplies",
+  "specialization",
 ] as const;
 
 const profilePatchSchema = z.object({
@@ -107,6 +149,7 @@ const profilePatchSchema = z.object({
         .max(MAX_MCP_SERVERS, { error: `Select at most ${MAX_MCP_SERVERS} MCP servers.` }),
     ])
     .optional(),
+  specialization: specializationProfileSchema.optional(),
 });
 
 export type BotProfilePatchInput = z.input<typeof profilePatchSchema>;
@@ -125,6 +168,7 @@ export type BotProfilePatch = Partial<
     | "voice"
     | "speakReplies"
     | "mcpServers"
+    | "specialization"
   >
 >;
 

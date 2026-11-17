@@ -16,7 +16,8 @@ export type TransientReason =
   | "overloaded"
   | "server_error"
   | "connection_reset"
-  | "timeout";
+  | "timeout"
+  | "early_termination";
 
 export type TerminalReason =
   | "auth"
@@ -24,6 +25,7 @@ export type TerminalReason =
   | "unknown_model"
   | "invalid_request"
   | "not_found"
+  | "output_limit"
   | ProviderErrorCode
   | "terminal_exit"
   | "interrupted"
@@ -33,6 +35,20 @@ export interface ErrorClassification {
   transient: boolean;
   reason: string;
 }
+
+/** The model stopped at its output-token ceiling. This is a deterministic
+ *  property of the request and the selected model, not a provider hiccup:
+ *  re-sending the identical request spends the same budget and truncates at
+ *  the same place. It settles as `output_limit` on the first attempt. */
+const OUTPUT_LIMIT_PATTERN =
+  /\bmax_output_tokens\b|output[\s_-]*limit|length[\s_-]*limit|\bended the response early \(max_output_tokens\)/i;
+
+/** The response ended before generating anything: no items, no text, no
+ *  usage. Measured on the Codex backend mid-turn ("ended the response early
+ *  with no output or usage"). Nothing was truncated, so this is a retryable
+ *  transport outcome, not the deterministic output ceiling above. */
+const EARLY_TERMINATION_PATTERN =
+  /\b(?:ended the response early|empty event stream|stream ended before the response completed|unrecognized event stream)\b/i;
 
 const TRANSIENT_PATTERNS: Array<{ pattern: RegExp; reason: TransientReason }> = [
   { pattern: /\b(?:429|rate.?limit|too many requests)\b/i, reason: "rate_limited" },
@@ -94,6 +110,13 @@ export function classifyError(err: FailureInput): ErrorClassification {
   const text = messageOf(err);
   // A surrounding HTTP 5xx/429 must not replay a provider safety block.
   if (isProviderSafetyBlock(text)) return { transient: false, reason: "provider_safety" };
+  // Checked before both the HTTP-status and exit-code arms: an output ceiling
+  // is terminal whether it arrived in an event stream or a CLI's stderr.
+  if (OUTPUT_LIMIT_PATTERN.test(text)) return { transient: false, reason: "output_limit" };
+  // An unexpected end with nothing generated is retryable on its own terms:
+  // it is not a provider outage and not a ceiling, and calling it either one
+  // misreports it in the transcript and in the turn's retry decision.
+  if (EARLY_TERMINATION_PATTERN.test(text)) return { transient: true, reason: "early_termination" };
   if (err && "exitCode" in err) {
     const { exitCode: code } = err;
     if (code !== null && code < 0) return { transient: false, reason: "interrupted" };
@@ -149,4 +172,52 @@ export function interruptibleDelay(ms: number, signal?: AbortSignal): BackoffWai
     promise,
     cancel: () => onCancel?.(),
   };
+}
+
+/**
+ * Distinguishes safe read-only operations from state-mutating actions.
+ * Read actions are safe to retry on transient failures.
+ * Mutations must be protected to prevent duplicate side effects.
+ */
+export function isIdempotentAction(actionName: string): boolean {
+  const lower = actionName.toLowerCase().trim();
+  // Safe read-only actions
+  if (/^(?:read|get|list|fetch|search|query|inspect|describe|check|view|status|screenshot|browse)/.test(lower)) {
+    return true;
+  }
+  // Explicit mutations
+  if (/^(?:write|create|update|delete|insert|drop|send|post|patch|pay|charge|execute|run_command|bash|deploy)/.test(lower)) {
+    return false;
+  }
+  // Default to false (mutation protected)
+  return false;
+}
+
+export interface RetryEvaluation {
+  shouldRetry: boolean;
+  reason: string;
+}
+
+/**
+ * Decides whether a failed operation should be retried.
+ * Mutations are blocked from automatic retry; only safe reads with transient errors are retried.
+ */
+export function shouldRetryOperation(options: {
+  isMutation: boolean;
+  attempt: number;
+  maxAttempts?: number;
+  error: FailureInput;
+}): RetryEvaluation {
+  const max = options.maxAttempts ?? RETRY_MAX_ATTEMPTS;
+  if (options.attempt >= max) {
+    return { shouldRetry: false, reason: "max_attempts_exceeded" };
+  }
+  if (options.isMutation) {
+    return { shouldRetry: false, reason: "mutation_idempotency_protected" };
+  }
+  const classification = classifyError(options.error);
+  if (!classification.transient) {
+    return { shouldRetry: false, reason: classification.reason };
+  }
+  return { shouldRetry: true, reason: classification.reason };
 }

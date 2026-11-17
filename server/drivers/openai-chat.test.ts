@@ -46,7 +46,7 @@ describe("createOpenAIChatRuntime tool approvals", () => {
   const mcpDir: string[] = [];
   afterEach(() => { for (const d of mcpDir.splice(0)) rmSync(d, { recursive: true, force: true }); });
 
-  const toolServer = () => {
+  const toolServer = (tool = "write") => {
     const dir = mkdtempSync(join(tmpdir(), "omb-chat-approval-"));
     mcpDir.push(dir);
     const script = join(dir, "fake-mcp.mjs");
@@ -61,7 +61,7 @@ describe("createOpenAIChatRuntime tool approvals", () => {
           const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
           const m = JSON.parse(line);
           if (m.method === "initialize") send({jsonrpc:"2.0",id:m.id,result:{protocolVersion:"2024-11-05",capabilities:{tools:{}}}});
-          else if (m.method === "tools/list") send({jsonrpc:"2.0",id:m.id,result:{tools:[{name:"write",description:"Fixture write",inputSchema:{type:"object",properties:{},additionalProperties:false}}]}});
+          else if (m.method === "tools/list") send({jsonrpc:"2.0",id:m.id,result:{tools:[{name:"${tool}",description:"Fixture tool",inputSchema:{type:"object",properties:{},additionalProperties:false}}]}});
           else if (m.method === "tools/call") send({jsonrpc:"2.0",id:m.id,result:{content:[{type:"text",text:"done"}]}});
         }
       });
@@ -104,6 +104,76 @@ describe("createOpenAIChatRuntime tool approvals", () => {
 
   it("answers for the person under Full access, so no card is raised", async () => {
     expect(await cardRaisedFor("full")).toBe(false);
+  }, 20_000);
+
+  // The card above is only reachable if the call survives the permission
+  // check first. A custom server's tool names are its own (`fx_write`,
+  // `github_create_issue`), and the fail-closed classifier used to refuse them
+  // outright — the tool mounted, the model called it, and every call came back
+  // "Unclassified tool … blocked by security policy", with no card and no way
+  // for the person to allow it. A tool this turn actually advertised belongs to
+  // the person's own configuration, so the approval layer decides.
+  const runToolTurn = async (options: {
+    approvalMode: "ask" | "full";
+    callName: string;
+    serverName?: string;
+    toolName?: string;
+  }) => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"${options.callName}","arguments":"{}"}}]}}]}\n\n`
+        + 'data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+      { status: 200, headers: { "content-type": "text/event-stream" } },
+    )));
+    const instance = await OpenAICompatDriver.create({
+      instanceId: "compat", displayName: "Compat", enabled: true,
+      config: OpenAICompatDriver.decodeConfig({ url: "https://api.example.com/v1", apiKeyEnv: "K", model: "m" }),
+      environment: { K: "secret" },
+    });
+    const events: RuntimeEvent[] = [];
+    instance.adapter.onEvent((event) => events.push(event));
+    await instance.adapter.sendTurn({
+      threadId: "thread", text: "hi", approvalMode: options.approvalMode,
+      integrations: { custom: { [options.serverName ?? "fx"]: toolServer(options.toolName ?? "write") } },
+    });
+    await vi.waitFor(() => {
+      if (!events.some((e) => e.type === "request.opened" || e.type === "item.started" || e.type === "turn.completed")) {
+        throw new Error("waiting");
+      }
+    }, { timeout: 10_000 });
+    const snapshot = [...events];
+    await instance.adapter.interruptTurn("thread").catch(() => {});
+    await instance.dispose();
+    return snapshot;
+  };
+
+  it("lets a configured server's own tool name reach the person instead of silently refusing it", async () => {
+    const events = await runToolTurn({ approvalMode: "ask", callName: "fx_write" });
+    expect(events.some((event) => event.type === "request.opened")).toBe(true);
+    // And it really was the approval layer, not a denial wearing a card's shape.
+    const output = events
+      .filter((event) => event.type === "item.completed" && event.itemType === "tool")
+      .map((event) => (event.type === "item.completed" ? String(event.output) : ""))
+      .join(" ");
+    expect(output).not.toContain("blocked by security policy");
+  }, 20_000);
+
+  it("still refuses a tool the turn never advertised", async () => {
+    // The permission fix must not become "any unknown name runs": the session
+    // knows what it mounted, and a name outside that set is never executed.
+    const events = await runToolTurn({ approvalMode: "full", callName: "fx_ghost" });
+    expect(events.some((event) => event.type === "request.opened")).toBe(false);
+    const output = events
+      .filter((event) => event.type === "item.completed" && event.itemType === "tool")
+      .map((event) => (event.type === "item.completed" ? String(event.output) : ""))
+      .join(" ");
+    expect(output).toMatch(/not advertised/i);
+  }, 20_000);
+
+  it("does not card a routine workspace tool on Ask", async () => {
+    // The permission workstream's rule, seen from this driver: routine work runs
+    // unattended once the person asked for the task.
+    const events = await runToolTurn({ approvalMode: "ask", serverName: "workspace", toolName: "write", callName: "workspace_write" });
+    expect(events.some((event) => event.type === "request.opened")).toBe(false);
   }, 20_000);
 });
 

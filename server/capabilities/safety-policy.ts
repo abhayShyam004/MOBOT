@@ -391,12 +391,20 @@ export class DeviceSafetyPolicy {
 
     // ── 9. Notifications, Reminders & Reach (device.notifications / device.reminders / device.reach) ──
     if (lowerCap === 'device.notifications' || lowerCap === 'device.reminders' || lowerCap === 'device.reach') {
-      if (['list', 'get', 'status', 'list_events', 'check_readiness'].includes(lowerOp)) {
+      if (['list', 'get', 'status', 'list_events', 'check_readiness', 'schedule', 'schedule_reminder', 'post_notification', 'create'].includes(lowerOp)) {
         return {
           tier: 'low',
           requiresExplicitConfirmation: false,
-          consequentialImpactDescription: `Reading notifications, alarms, or reach events.`,
+          consequentialImpactDescription: `Scheduling reminder or posting notification.`,
           reversible: true,
+        };
+      }
+      if (['schedule_call', 'make_call', 'initiate_call'].includes(lowerOp)) {
+        return {
+          tier: 'medium',
+          requiresExplicitConfirmation: approvalMode === 'ask',
+          consequentialImpactDescription: `Initiating a phone call to '${parameters.number || parameters.contact || 'target'}' via Reach.`,
+          reversible: false,
         };
       }
       if (['cancel_all', 'delete_all', 'clear_all', 'delete'].includes(lowerOp)) {
@@ -408,9 +416,9 @@ export class DeviceSafetyPolicy {
         };
       }
       return {
-        tier: 'medium',
-        requiresExplicitConfirmation: approvalMode === 'ask',
-        consequentialImpactDescription: `Posting notification or scheduling reminder.`,
+        tier: 'low',
+        requiresExplicitConfirmation: false,
+        consequentialImpactDescription: `Operating notification or reminder service.`,
         reversible: true,
       };
     }
@@ -817,6 +825,15 @@ export class ActionAuthorizationManager {
       };
     }
 
+    // 9. Verify Thread Ownership if bound
+    if (grant.threadId && input.threadId && grant.threadId !== input.threadId) {
+      return {
+        valid: false,
+        code: ERR_CONFIRMATION_INVALID,
+        reason: 'Confirmation grant belongs to a different thread conversation.',
+      };
+    }
+
     // Authoritative execution consumption: One-time use enforced!
     grant.consumed = true;
 
@@ -855,6 +872,7 @@ export class ActionAuthorizationManager {
 }
 
 export const defaultActionAuthorizationManager = new ActionAuthorizationManager();
+export type { ActionConfirmationGrant } from './types.ts';
 
 export function checkAgentExecutionPermission(
   toolOrCapability: string,

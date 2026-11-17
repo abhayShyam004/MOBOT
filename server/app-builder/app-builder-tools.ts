@@ -9,6 +9,8 @@ import { AutonomousRepairLoop } from "./repair-loop.ts";
 import { DeploymentManager } from "../deploy/deployment-manager.ts";
 import type { DeploymentProviderId, ProjectFramework } from "./types.ts";
 import { sharedObservability } from "../capabilities/observability.ts";
+import { ProjectLifecycle } from "./project-lifecycle.ts";
+import { defaultTaskEngine } from "../computer-agent/durable-task-engine.ts";
 
 export interface ToolSpec {
   description: string;
@@ -19,6 +21,7 @@ export interface ToolSpec {
 let sharedManager: ProjectManager | null = null;
 let sharedRepairLoop: AutonomousRepairLoop | null = null;
 let sharedDeploymentManager: DeploymentManager | null = null;
+let sharedLifecycle: ProjectLifecycle | null = null;
 
 export function getProjectManager(): ProjectManager {
   if (!sharedManager) {
@@ -31,6 +34,15 @@ export function setProjectManager(manager: ProjectManager): void {
   sharedManager = manager;
   sharedRepairLoop = new AutonomousRepairLoop(manager);
   sharedDeploymentManager = new DeploymentManager(undefined, undefined, manager);
+  sharedLifecycle = null;
+}
+
+/** The one bridge that binds a project to its durable task ledger. */
+export function getProjectLifecycle(): ProjectLifecycle {
+  if (!sharedLifecycle) {
+    sharedLifecycle = new ProjectLifecycle(getProjectManager(), defaultTaskEngine);
+  }
+  return sharedLifecycle;
 }
 
 export function getRepairLoop(): AutonomousRepairLoop {
@@ -938,12 +950,13 @@ export const APP_BUILDER_TOOLS: Record<string, ToolSpec> = {
   },
 
   project_git_commit: {
-    description: "Create a git commit with a message documenting changes made to the project.",
+    description: "Commit unstaged changes in this isolated project workspace using real Git. Existing staged changes block the operation, and secret-like files are never staged.",
     inputSchema: {
       type: "object",
       properties: {
         projectId: { type: "string", description: "Project ID" },
         message: { type: "string", description: "Commit message explaining what was implemented or fixed" },
+        paths: { type: "array", items: { type: "string" }, description: "Optional exact project-relative changed paths to commit; existing staged changes block the operation." },
       },
       required: ["projectId", "message"],
     },
@@ -952,8 +965,11 @@ export const APP_BUILDER_TOOLS: Record<string, ToolSpec> = {
         const projectId = String(args.projectId || "").trim();
         const message = String(args.message || "").trim();
         if (!projectId || !message) return toolError("projectId and message are required");
+        if (args.paths !== undefined && (!Array.isArray(args.paths) || args.paths.some((path: unknown) => typeof path !== "string"))) {
+          return toolError("paths must be an array of project-relative strings");
+        }
         const mgr = getProjectManager();
-        const res = mgr.gitCommit(projectId, message);
+        const res = mgr.gitCommit(projectId, message, args.paths as string[] | undefined);
         return { ok: true, projectId, ...res };
       } catch (err: any) {
         return toolError(err.message);
@@ -1024,6 +1040,180 @@ export const APP_BUILDER_TOOLS: Record<string, ToolSpec> = {
         const loop = getRepairLoop();
         const state = loop.getLoopState(projectId);
         return { ok: true, state };
+      } catch (err: any) {
+        return toolError(err.message);
+      }
+    },
+  },
+
+  // ── durable project lifecycle (server/app-builder/project-lifecycle.ts) ──
+  // A project request becomes resumable work: requirements, acceptance
+  // criteria and ordered steps are persisted inside the project, and the
+  // durable task engine tracks progress so a restart resumes instead of
+  // starting over. These tools add no second project manager or task store.
+
+  project_start: {
+    description:
+      "Start a durable engineering project: persists requirements, acceptance criteria and an ordered step list inside the project workspace, and opens a durable task that survives turns and restarts. Call this before implementing a substantial software request, then follow the returned steps. Repeating the same project id resumes the existing lifecycle instead of creating a second project or task.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Project display name" },
+        id: { type: "string", description: "Optional project slug; defaults to a slug of the name" },
+        description: { type: "string", description: "Short description of what is being built" },
+        framework: { type: "string", enum: ["html", "nodejs", "react", "nextjs", "fullstack"] },
+        goal: { type: "string", description: "The user's requested outcome, in their own terms" },
+        requirements: { type: "array", items: { type: "string" }, description: "Explicit functional requirements" },
+        steps: {
+          type: "array",
+          description: "Ordered implementation steps; each must have a concrete expected outcome",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Stable step id, e.g. step_1" },
+              title: { type: "string" },
+              description: { type: "string" },
+              expectedOutcome: { type: "string", description: "Observable result that proves the step worked" },
+            },
+            required: ["title", "description", "expectedOutcome"],
+          },
+        },
+        acceptanceCriteria: { type: "array", items: { type: "string" }, description: "Conditions that must each carry evidence before the project can be finished" },
+        initGit: { type: "boolean", description: "Initialize a real git repository (default true)" },
+      },
+      required: ["name", "goal", "requirements", "steps", "acceptanceCriteria"],
+    },
+    handler: (args) => {
+      try {
+        const result = getProjectLifecycle().start({
+          name: String(args.name || ""),
+          id: args.id ? String(args.id) : undefined,
+          description: args.description ? String(args.description) : undefined,
+          framework: (args.framework ? String(args.framework) : "fullstack") as ProjectFramework,
+          goal: String(args.goal || ""),
+          requirements: Array.isArray(args.requirements) ? (args.requirements as string[]) : [],
+          steps: Array.isArray(args.steps) ? (args.steps as any[]) : [],
+          acceptanceCriteria: Array.isArray(args.acceptanceCriteria) ? (args.acceptanceCriteria as string[]) : [],
+          botId: args.botId ? String(args.botId) : undefined,
+          threadId: args.threadId ? String(args.threadId) : undefined,
+          initGit: args.initGit !== false,
+        });
+        return { ...result, status: getProjectLifecycle().status(result.projectId) };
+      } catch (err: any) {
+        return toolError(err.message);
+      }
+    },
+  },
+
+  project_lifecycle_status: {
+    description:
+      "Read the durable state of a started project: task status, completed steps with their evidence, remaining next step, and which acceptance criteria are still unverified. Use this after a restart instead of guessing what was already done.",
+    inputSchema: {
+      type: "object",
+      properties: { projectId: { type: "string", description: "Project ID" } },
+      required: ["projectId"],
+    },
+    handler: (args) => {
+      try {
+        const projectId = String(args.projectId || "").trim();
+        if (!projectId) return toolError("projectId is required");
+        return getProjectLifecycle().status(projectId);
+      } catch (err: any) {
+        return toolError(err.message);
+      }
+    },
+  },
+
+  project_step_complete: {
+    description:
+      "Record that one planned step is complete, with the observation and evidence that proved it. Updates the durable task's milestones and progress. Repeating a completed step is reported as alreadyCompleted and never duplicates the milestone.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        stepId: { type: "string" },
+        observation: { type: "string", description: "What the real tool result showed" },
+        evidence: { type: "string", description: "File path, commit, test result or URL that proves it" },
+      },
+      required: ["projectId", "stepId", "observation"],
+    },
+    handler: (args) => {
+      try {
+        const projectId = String(args.projectId || "").trim();
+        if (!projectId) return toolError("projectId is required");
+        const result = getProjectLifecycle().completeStep(
+          projectId,
+          String(args.stepId || ""),
+          String(args.observation || ""),
+          args.evidence ? String(args.evidence) : undefined,
+        );
+        return {
+          ok: true,
+          alreadyCompleted: result.alreadyCompleted,
+          nextStep: result.nextStep,
+          taskStatus: result.task.status,
+          progressPercent: result.task.progressPercent,
+        };
+      } catch (err: any) {
+        return toolError(err.message);
+      }
+    },
+  },
+
+  project_criterion_verify: {
+    description:
+      "Record whether one acceptance criterion is satisfied, citing the evidence that was actually observed. A criterion cannot be marked verified without evidence.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        criterionId: { type: "string" },
+        verified: { type: "boolean" },
+        evidence: { type: "string", description: "The observed result proving or disproving the criterion" },
+      },
+      required: ["projectId", "criterionId", "verified", "evidence"],
+    },
+    handler: (args) => {
+      try {
+        const projectId = String(args.projectId || "").trim();
+        if (!projectId) return toolError("projectId is required");
+        const spec = getProjectLifecycle().verifyCriterion(
+          projectId,
+          String(args.criterionId || ""),
+          args.verified === true,
+          String(args.evidence || ""),
+        );
+        return { ok: true, acceptanceCriteria: spec.acceptanceCriteria };
+      } catch (err: any) {
+        return toolError(err.message);
+      }
+    },
+  },
+
+  project_finish: {
+    description:
+      "Close a durable project only when every step is complete and every acceptance criterion carries verified evidence. Returns ok:false with the real reason when it is not, so the work continues instead of being reported as done.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        projectId: { type: "string" },
+        summary: { type: "string", description: "Truthful summary of what was delivered" },
+        deliveredArtifacts: { type: "array", items: { type: "string" }, description: "Artifact ids or paths actually delivered" },
+      },
+      required: ["projectId", "summary"],
+    },
+    handler: (args) => {
+      try {
+        const projectId = String(args.projectId || "").trim();
+        if (!projectId) return toolError("projectId is required");
+        const result = getProjectLifecycle().finish(
+          projectId,
+          String(args.summary || ""),
+          Array.isArray(args.deliveredArtifacts) ? (args.deliveredArtifacts as string[]) : undefined,
+        );
+        return result.ok
+          ? { ok: true, taskStatus: result.task?.status, finalResult: result.task?.finalResult }
+          : { ok: false, error: result.error };
       } catch (err: any) {
         return toolError(err.message);
       }

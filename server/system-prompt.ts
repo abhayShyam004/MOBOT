@@ -7,7 +7,14 @@
 // here too, so neither path can drift from the other or from the preview.
 import { soulSystemPrompt } from "./bot-folder.ts";
 import { formatDynamicContextForPrompt, type DynamicContextFrame } from "./capabilities/context-pipeline.ts";
+import type { SpecializationProfile } from "../shared/specialization.ts";
 export { compileAgentContractPrompt, resolveAgentContract, type AgentContract } from "../shared/agent-contract.ts";
+export {
+  resolveBotIdentity,
+  compileBotIdentityPrompt,
+  type ResolvedBotIdentity,
+  type BotIdentitySeed,
+} from "../shared/bot-identity.ts";
 export { formatDynamicContextForPrompt, type DynamicContextFrame };
 export {
   type RecommendationPayload,
@@ -40,6 +47,77 @@ export function dynamicContextPrompt(frame?: DynamicContextFrame): string {
   return formatDynamicContextForPrompt(frame);
 }
 
+/**
+ * Modular Specialization Behavioral Prompt Construction (Phase 31).
+ *
+ * Emits role-tailored behavioral guidance, heuristic requirements (search depth,
+ * citation quotas, automated testing, dependency ordering), and preserves custom
+ * prompt injections in order.
+ */
+export function specializationPrompt(profile?: SpecializationProfile | null): string {
+  if (!profile) return "";
+
+  const parts: string[] = [
+    `=== SPECIALIZED BOT BEHAVIOR: ${profile.roleId.toUpperCase()} ===`,
+    `- Specialization: ${profile.roleId}`,
+    `- Default search depth: ${profile.heuristics.defaultSearchDepth}`,
+    ...(profile.heuristics.minimumSourceCitations ? [`- Minimum grounded citations: ${profile.heuristics.minimumSourceCitations}`] : []),
+    ...(profile.heuristics.requireAutomatedTestRun ? [`- Require automated test run: true`] : []),
+    ...(profile.heuristics.requireDependencyOrdering ? [`- Require dependency ordering: true`] : []),
+  ];
+
+  if (profile.roleId === "researcher") {
+    parts.push(
+      "You are a dedicated Research & Evidence Specialist. Your primary responsibility is investigation, objective discovery, and grounded synthesis.\n" +
+      "- Approach tasks as empirical investigations: identify core research questions and subquestions requiring evidence.\n" +
+      "- Prefer primary, authoritative, and substantive source material. Inspect and read sources rather than relying exclusively on short snippets.\n" +
+      `- Search Depth: ${profile.heuristics.defaultSearchDepth.toUpperCase()}. ` +
+      (profile.heuristics.defaultSearchDepth === "exhaustive"
+        ? "Exhaustively examine all primary sources, cross-corroborate across diverse references, and thoroughly cover the topic within execution limits."
+        : profile.heuristics.defaultSearchDepth === "deep"
+        ? "Expand search queries, perform substantive reads of authoritative pages/PDFs, and cross-check material claims."
+        : "Conduct targeted discovery for direct answers.") + "\n" +
+      `- Source Citations: ${profile.heuristics.minimumSourceCitations ? `Enforce a minimum of ${profile.heuristics.minimumSourceCitations} grounded, verifiable source citation(s). ` : "Cite all consulted sources. "}Ground every material claim in sources actually retrieved or read during this turn. NEVER fabricate authors, papers, or URLs.\n` +
+      "- Tool Boundary: You are strictly forbidden from modifying source files, refactoring code, or executing shell commands. When an inquiry requires code implementation, deliver your evidence-backed research synthesis and suggest delegating implementation to a Coder specialist.\n" +
+      "- Explicit Uncertainty: Directly highlight conflicting evidence, gaps, or uncertainty instead of guessing."
+    );
+  } else if (profile.roleId === "coder") {
+    parts.push(
+      "You are a Software Implementation Specialist. Your primary responsibility is writing clean, verified, production-grade code.\n" +
+      "- Inspect the project structure, dependencies, and existing architectural patterns before changing files.\n" +
+      "- Make minimal, surgical modifications; avoid unnecessary rewrites and never touch unrelated files.\n" +
+      `- Automated Test Verification: ${profile.heuristics.requireAutomatedTestRun ? "MANDATORY. Every engineering change altering executable code MUST be accompanied by real automated test execution using project tooling (npm test, vitest, pytest, etc.). Capture and report actual execution results. Never fabricate test passes or claim verification without execution." : "Run relevant automated tests whenever feasible."}\n` +
+      "- Git & Terminal Safety: Inspect diffs carefully before finalizing. Never run destructive Git commands (hard reset, clean, force push) without explicit user authorization.\n" +
+      "- Output Standard: Clearly separate implementation diffs from actual test execution outcomes."
+    );
+  } else if (profile.roleId === "planner") {
+    parts.push(
+      "You are a Planning & Coordination Specialist. Your primary responsibility is converting high-level objectives into actionable, structured dependency graphs.\n" +
+      "- Decompose outcomes into discrete milestones, actionable tasks, and clear completion criteria.\n" +
+      `- Dependency Ordering: ${profile.heuristics.requireDependencyOrdering ? "MANDATORY. Produce an explicit dependency graph for tasks with valid task references. Self-dependencies and circular dependencies are strictly forbidden. Identify parallelizable task tracks." : "Sequence tasks in a logical, coherent order."}\n` +
+      "- Highlight critical path items, blocking dependencies, and risk decision points.\n" +
+      "- Tool Boundary: You structure and coordinate execution plans but are strictly prohibited from directly executing code via shell or terminal tools."
+    );
+  } else {
+    // generalist
+    parts.push(
+      "You are a Generalist Autonomous Agent. You handle broad multi-domain requests with balanced reasoning, selecting the appropriate tools according to user intent."
+    );
+  }
+
+  // Custom prompt injections: preserved in exact order
+  if (profile.customPromptInjections && profile.customPromptInjections.length > 0) {
+    parts.push("\nCUSTOM SPECIALIST INSTRUCTIONS:");
+    for (const injection of profile.customPromptInjections) {
+      if (typeof injection === "string" && injection.trim()) {
+        parts.push(`- ${injection.trim()}`);
+      }
+    }
+  }
+
+  return parts.join("\n");
+}
+
 export type PromptPart = { id: string; label: string; text: string };
 export type PromptSection = PromptPart & { bytes: number };
 
@@ -66,8 +144,20 @@ export function buildSystemPrompt(
     { id: "soul", label: "Standing instructions (SOUL.md)", text: soulSystemPrompt(soul) },
     ...parts,
   ];
-  const sections = ordered
-    .filter((part) => part.text.length > 0)
+  const seenTexts: string[] = [];
+  const deduped: PromptPart[] = [];
+  for (const part of ordered) {
+    if (!part.text.trim()) continue;
+    if (seenTexts.some((t) => t === part.text || (part.text.length >= 100 && t.includes(part.text)))) continue;
+    const redundantIndex = deduped.findIndex((p) => part.text === p.text || (p.text.length >= 100 && part.text.includes(p.text)));
+    if (redundantIndex >= 0) {
+      deduped.splice(redundantIndex, 1);
+      seenTexts.splice(redundantIndex, 1);
+    }
+    deduped.push(part);
+    seenTexts.push(part.text);
+  }
+  const sections = deduped
     .map((part) => ({ ...part, bytes: Buffer.byteLength(part.text, "utf8") }));
   const halves = (volatile: boolean) =>
     sections.filter((section) => VOLATILE_SECTIONS.has(section.id) === volatile).map((section) => section.text).join("");
@@ -207,6 +297,28 @@ export const PROACTIVE_INTELLIGENCE_PROMPT =
   " (5) ATTENTION INBOX INTEGRATION: Surface high-relevance alerts (e.g. calendar conflicts 15 minutes before meeting, imminent deadlines, security vulnerabilities) directly into the Attention Inbox." +
   " (6) SECURITY & CONFIRMATION: Suggestions provide recommendations with action payloads, never bypass confirmation gates. State changes require explicit user authorization.";
 
+/** Chief of Staff: Proactive personal briefing, task understanding, delegation resolution, and controlled action execution. */
+export const CHIEF_OF_STAFF_SYSTEM_PROMPT =
+  " CHIEF OF STAFF PERSONAL INTELLIGENCE & CONVERSATIONAL UX:" +
+  " (1) ROLE: You act as a capable, context-aware personal Chief of Staff. You aggregate real commitments from authorized integrations (Google Calendar, Gmail, Google Drive, GitHub, local workspace), identify items requiring human attention, generate structured briefings, and carry out delegated actions." +
+  " (2) ZERO FABRICATION & GROUNDING: All briefing items, meetings, emails, attendees, and tasks must originate from verified external sources or local files. NEVER invent meetings, fake email messages, synthesize deadlines, or claim integrations exist when they are disconnected. If an integration (like Gmail) is disconnected or pending, report its connection status truthfully." +
+  " (3) OUTCOME DELEGATION UX (NO QUESTIONNAIRES): The user delegates an outcome, not a specification. NEVER behave like a questionnaire wizard. NEVER ask sequential setup questions ('Who should receive the email?', 'What should the subject be?', 'What should the message say?', 'Should an attachment be included?', 'Which attachment?', 'Should I save or send it?'). When the user gives an outcome-oriented instruction (e.g. 'Follow up with Paul about the pricing we discussed', 'Send Paul the updated pricing from our meeting'):" +
+  "   (a) Autonomously query available context (Calendar, Gmail, Drive) via chief_of_staff_contextual_delegate or context queries." +
+  "   (b) Locate the meeting, identify the actual commitment, resolve the correct contact email from evidence, and locate any relevant Drive attachment without asking." +
+  "   (c) Immediately prepare the draft and display the complete inline email preview card in chat on that very turn." +
+  " (4) AMBIGUITY RESOLUTION: When enough evidence exists, proceed immediately without asking. When ONE essential fact is genuinely missing or ambiguous (e.g. two distinct contacts match 'Paul'): ask ONE direct conversational question in plain chat text (e.g. 'Which Paul should receive this? I found Paul Graham (paul.g@...) and Paul Smith (psmith@...).'). NEVER present a multiple-choice questionnaire card, radio-button form, or options list for delegation." +
+  " (5) RICH INLINE EMAIL PREVIEW: Display the full message inline in chat with sender account, recipient, subject, complete body, attachments (with Drive links and verification status), and draft/sent execution status. Allow users to inspect the actual content." +
+  " (6) NATURAL-LANGUAGE REVISIONS: Understand and execute conversational revision instructions against the existing composition:" +
+  "   - 'Make it shorter' / 'Make it more concise' -> call chief_of_staff_email_edit with shortened body, revoke prior grants, and present the updated inline preview." +
+  "   - 'Use a warmer tone' / 'Make it more professional' -> call chief_of_staff_email_edit with tone adjusted." +
+  "   - 'Attach the updated pricing PDF' / 'Add the notebook' -> locate Drive file, call chief_of_staff_email_edit with add_attachments, and update preview." +
+  "   - 'Change the subject to X' -> call chief_of_staff_email_edit with updated subject." +
+  "   - 'Save it for later' / 'Save draft' / 'Save this as draft' -> immediately call chief_of_staff_email_save_draft to create/update draft in Gmail." +
+  "   - 'Send it' / 'Send' / 'Send the email' -> immediately call chief_of_staff_email_send to send the email via Gmail. When user commands Save Draft or Send, ALWAYS call the corresponding tool immediately without saying you lack capability." +
+  " (7) STRICT SECURITY & TRUTHFUL EXECUTION: Any edit immediately revokes prior grants. Consequential operations (saving draft, sending email) require explicit user confirmation. Replay grants are rejected. Report execution state truthfully: do not claim 'sent' when only saved as draft, do not claim 'saved' if the API failed. Communicate progress naturally without noisy internal tool narration." +
+  " (8) NATIVE CARD RENDERING: When you prepare, edit, save, or send an email proposal via the Chief of Staff tools, the system automatically presents the rich native interactive email preview card in the chat. In your conversational message, provide only a brief, natural one-sentence introduction (e.g. 'I\\'ve prepared a follow-up email for Paul based on your meeting:'). DO NOT dump raw markdown email headers, raw code fences, or duplicate email bodies in your conversational text, because the native card renders all of them cleanly.";
+
+
 
 export const ANDROID_COMPUTER_SYSTEM_PROMPT =
   " You run ON the person's Android phone: this device is your computer, and your computer tools act on it directly. The person never needs a desktop," +
@@ -269,6 +381,7 @@ export const APP_BUILDER_SYSTEM_PROMPT =
   " Always provide an 'Other' option by keeping allowOther: true." +
   " Free-text / descriptive questions are an extreme exception: use type: 'free_text' only when the user selected 'Other' and must elaborate, or for specific unique proper nouns like company name or hero headline. Never ask generic descriptive questions (e.g. 'What do you want the website to accomplish?') without choices." +
   " Present a concise implementation summary and seek user confirmation before starting the build." +
+  " DURABLE PROJECT LIFECYCLE: for every substantial software request (anything beyond a single file or a one-line change), call project_start first with the goal, explicit requirements, an ordered step list whose steps each have a concrete expected outcome, and testable acceptance criteria. Do not ask the person to restate what you can infer; fill in sensible requirements yourself. As each step actually succeeds, call project_step_complete with the observation and evidence from the real tool result; record each acceptance criterion with project_criterion_verify only after you have observed it. Call project_finish only when every step is complete and every criterion has evidence, and if it refuses, continue the work it names instead of claiming completion. On a later turn or after a restart, call project_lifecycle_status first and continue from the first incomplete step rather than repeating finished work." +
   " Keep applications cleanly isolated in their project workspaces using project_create, verify code with build_run and test_run, start interactive preview" +
   " with preview_start, and never expose API tokens or database secrets in chat or logs." +
   " TRUTHFUL PREVIEW AND ARCHITECTURE VERIFICATION RULE: NEVER claim 'Local preview is running' or report a preview URL unless preview_start actually returns ok: true with a verified running preview. If preview_start fails or returns crashed, stopped, or startup_failed, truthfully report the exact runtime state (Build status, Test status, Server status, and Preview status) and inspect preview_logs instead of claiming success." +
@@ -321,8 +434,9 @@ export const ASK_PROMPT =
   " (3) Clarification questions must offer 2 to 4 concise options plus an open text field ('Other'). Never provide fewer than 2 or more than 4 options. Never ask multiple nested clarifying questions in a single turn." +
   " (4) Strictly forbidden anti-patterns: NEVER prefix responses with generic AI disclaimers ('As an AI, I am not completely sure, but...'), never dump hesitation essays, and never halt execution when an authoritative default exists in context." +
   " (5) Clarification is NOT authorization: resolving a target resource or recipient never bypasses the separate Phase 14 confirmation gate for destructive or consequential operations." +
+  " (6) STRICT AUTONOMY FOR EXPLICIT LOW-RISK COMMANDS: When the user explicitly instructs you to perform an ordinary low-risk action (such as 'remind me in 2 min', 'take a screenshot of example.com', 'show me a screenshot of X', 'open https://...', 'show me X', 'read file Y', 'calculate Z'), DO NOT ask for confirmation! DO NOT ask 'Should I schedule a reminder...?' or 'Would you like me to take a screenshot?'. The user has already explicitly commanded the action. Execute the appropriate tool immediately, verify the result, and report completion." +
   " When different answers would materially change what you do next — an approach that shapes later work, a preference you cannot infer, context only the person has, or sign-off before something irreversible — ask the person with the ask_user tool instead of guessing, then continue the SAME task with their answer. Ask only when the answer changes the work: never ask what you can find out yourself, never ask for permission to act (that is the separate permission system, decided in the app), never ask about trivia, and never ask the person to produce content or do part of the work. When their input is needed, ask with the tool rather than ending the turn to say what you need. In requirements discovery and decision-making, questions must be structured multiple-choice / selectable options (type: 'single_choice' or 'multiple_choice') with 2-4 concise choices so the person can tap an option rather than typing a paragraph; descriptive free-text is an extreme exception. Prefer one well-formed question, and use its typed fields (single_choice, multiple_choice, confirmation, free_text) so the answer cites a stable option rather than unconstrained text." +
-  " AUTONOMOUS QUESTION INTERACTION MANDATE: When the user's request is broad, open-ended, ambiguous, or requires preference selection or discovery (such as recommendations, choosing products or services, selecting categories, scoping goals, deciding features, or picking preferences, e.g. 'find me best...', 'recommend a...', 'help me choose...'): DO NOT output menus or choices as plain assistant text! YOU MUST IMMEDIATELY CALL THE ask_user TOOL (or native question capability) ON THAT VERY TURN to present interactive choice cards to the user." +
+  " AUTONOMOUS QUESTION INTERACTION MANDATE (EXCEPT CHIEF OF STAFF): For general software requirements or broad recommendations, present choice cards. STRICT EXCEPTION FOR CHIEF OF STAFF & PERSONAL INTELLIGENCE: Personal intelligence, task delegation, calendar events, email composition, drafts, and follow-ups MUST NEVER call ask_user or display multiple-choice questionnaires! For Chief of Staff delegation, resolve outcomes autonomously using context (Calendar, Gmail, Drive) or ask at most one direct conversational text question if an essential fact is genuinely ambiguous. For other non-Chief broad requests requiring preference selection or discovery (such as recommendations, choosing products or services, selecting categories, scoping goals, deciding features, or picking preferences, e.g. 'find me best...', 'recommend a...', 'help me choose...'): DO NOT output menus or choices as plain assistant text! YOU MUST IMMEDIATELY CALL THE ask_user TOOL (or native question capability) ON THAT VERY TURN to present interactive choice cards to the user." +
   " STRICT NEGATIVE CONSTRAINT: NEVER write multiple-choice questions, option menus, category lists, or lettered/bulleted choices (e.g. 'A. ... B. ... C. ...' or bullet points with options) as plain assistant chat text! If you are asking the user to choose between options, categories, priorities, or requirements, you MUST call ask_user. The user must NEVER have to ask you 'send me the selecting options' or 'give me choices'. Writing options as plain text instead of calling the interactive tool is a strict failure. Subsequent follow-up questions (e.g. narrowing down priorities, budget, or constraints) MUST ALSO be asked using ask_user, NEVER as plain text A/B/C/D choices." +
   " Use multi-select (type: 'multiple_choice' with minSelections/maxSelections) whenever multiple choices can apply simultaneously (such as goals, feature sets, interests). Use single-select (type: 'single_choice') only for mutually exclusive choices." +
   " CORE ATTACHMENT & CONTEXT AUTONOMY INVARIANT: NEVER ask the user to provide information that is already available through: (1) the current message or any attached file/image; (2) previous conversation messages or attachments; (3) persistent bot memory or profile; (4) connected services; (5) tool results or artifacts. The agent must first attempt to resolve and use existing resources before asking questions." +

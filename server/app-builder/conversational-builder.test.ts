@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConversationalAppBuilder, type StructuredDiscoveryQuestion } from "./conversational-builder.ts";
@@ -81,6 +82,24 @@ describe("ConversationalAppBuilder (Phase I App Builder UX)", () => {
     // Verify style.css was updated with new accent
     const css = mgr.readFile(plan.projectId, "style.css").content;
     expect(css).toContain("--accent: #ec4899;");
+  });
+
+  it("discloses when a revision could not be committed to Git", async () => {
+    const plan = builder.planApplication("Build me a small search tracker");
+    await builder.buildAndPreview(plan);
+    const hookDir = join(mgr.getProjectDir(plan.projectId), ".hooks");
+    mkdirSync(hookDir, { recursive: true });
+    const hook = join(hookDir, "pre-commit");
+    writeFileSync(hook, "#!/bin/sh\necho controlled-hook-failure >&2\nexit 1\n");
+    chmodSync(hook, 0o700);
+    const configured = spawnSync("git", ["config", "core.hooksPath", hookDir], { cwd: mgr.getProjectDir(plan.projectId) });
+    expect(configured.status).toBe(0);
+
+    const summary = await builder.applyRevision(plan.projectId, "Add search filtering");
+    expect(summary.status).toBe("preview_ready");
+    expect(summary.previewUrl).toBeDefined();
+    expect(summary.message).toContain("revision is not committed to Git");
+    expect(summary.message).toContain("controlled-hook-failure");
   });
 
   it("plans a job application tracker with essential auth, storage, and stage decisions", () => {

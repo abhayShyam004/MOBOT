@@ -59,6 +59,12 @@ export interface TurnImageInput {
   path: string;
   mime: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
   bytes: number;
+  /** Provenance attached by the context builder. Providers send the bytes;
+   * these fields stay server-side for grounding and payload diagnostics. */
+  author?: "user" | "assistant" | "tool";
+  tool?: string;
+  ownerThreadId?: string;
+  messageId?: string;
 }
 
 // ── instance configuration envelope ────────────────────────────────────
@@ -91,6 +97,8 @@ export type RequestOutcome = "allowed-once" | "rejected" | "answered" | "unavail
 // becomes onEvent(listener) → unsubscribe; sessions start implicitly on
 // the first turn (the agentcal per-turn-process model) with resumeCursor
 // carrying the provider-native continuation (e.g. a claude session id).
+export type TaskStage = "planning" | "exploration" | "implementation" | "verification" | "deployment" | "validation";
+
 export interface SendTurnInput {
   threadId: ThreadId;
   /** The bot this turn belongs to. threadIds are meant to be unique per bot
@@ -100,6 +108,9 @@ export interface SendTurnInput {
    * bots (e.g. a delegation still holding its own broker open) can never
    * collide with another bot's live session or broker (see #1017). */
   botId?: string;
+  /** Task lifecycle stage (planning, exploration, implementation, verification,
+   * deployment, validation) for adaptive capability and context policies. */
+  stage?: TaskStage;
   text: string;
   /** Per-bot approval policy, reasserted by providers on every turn so a
    * resumed native session cannot retain a stale, more permissive mode. */
@@ -140,6 +151,12 @@ export interface SendTurnInput {
    * prompt when the provider supports it; the current brief also arrives
    * in this turn's text. */
   refreshSystemPrompt?: boolean;
+  /** Integration names this turn should advertise up front. Absent means
+   * every mounted integration, which is what an unclassified or multi-step
+   * request gets. The rest are still mounted and verified; the model can load
+   * them with `capability_enable`, so a narrow first request never loses a
+   * capability it turns out to need. */
+  toolExposure?: string[];
   /** Per-bot integrations the driver may hand to the agent as tools. */
   integrations?: {
     /** A local stdio bridge owns the remote Composio transport. Keeping the

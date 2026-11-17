@@ -359,6 +359,13 @@ describe("message-linked files", () => {
     }
   });
 
+  it("serves a delivered notebook as a notebook rather than a generic download", async () => {
+    writeFileSync(join(workspace, "answers.ipynb"), "{}");
+    const file = await openMessageFile("answers.ipynb", [workspace]);
+    expect(file.mime).toBe("application/x-ipynb+json");
+    await file.handle.close();
+  });
+
   it("serves message-authorized video formats without changing the file ceiling", async () => {
     for (const [extension, mime] of [
       ["mp4", "video/mp4"], ["m4v", "video/x-m4v"],

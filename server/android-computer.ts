@@ -21,6 +21,7 @@
 // Everything returns bounded text; nothing reads or logs credentials (the
 // proxy's env is only ever the workspace path and a command PATH allowlist).
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import {
   chmodSync, copyFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync,
   readlinkSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
@@ -41,6 +42,7 @@ import { defaultCapabilityRegistry, DEVICE_CAPABILITY_TOOLS } from "./capabiliti
 import { COMPUTER_AGENT_TOOLS } from "./computer-agent/agent-tools.ts";
 import { ProjectManager } from "./app-builder/project-manager.ts";
 import { checkToolPermission, loadDiskPermissions } from "./permission-policy.ts";
+import { refusalForShellCommand } from "./shell-policy.ts";
 
 const isMainScript = Boolean(
   process.argv[1] &&
@@ -53,10 +55,16 @@ if (!WORKSPACE && isMainScript) {
   process.stderr.write("android-computer: AC_WORKSPACE is not set\n");
   process.exit(2);
 }
+/** Where task projects live. A project is a sibling of the workspace, not
+ *  part of it: the shell's boundary below covers the task's own workspace, so
+ *  one project cannot delete or read another merely because both are projects.
+ *  The tree is still exempt from credential naming, because a project holds
+ *  fixtures called `auth.json` that are not credentials. */
+const PROJECTS_DIR = process.env.OMB_PROJECTS_DIR
+  || (process.env.OMB_DATA_DIR ? join(process.env.OMB_DATA_DIR, "projects") : (WORKSPACE ? join(WORKSPACE, "projects") : ""));
 if (WORKSPACE) {
   mkdirSync(WORKSPACE, { recursive: true });
   mkdirSync(join(WORKSPACE, ".tmp"), { recursive: true });
-  const PROJECTS_DIR = process.env.OMB_PROJECTS_DIR || (process.env.OMB_DATA_DIR ? join(process.env.OMB_DATA_DIR, "projects") : join(WORKSPACE, "projects"));
   setProjectManager(new ProjectManager(PROJECTS_DIR));
 }
 
@@ -538,7 +546,28 @@ function placeNativeAddons(): void {
   }
 }
 
+/** Put the runtime this adapter publishes on its OWN process PATH.
+ *
+ * `shellEnv()` hands node/npm/npx to the bot *terminal*, but a build or test
+ * the project lifecycle runs is spawned by ProjectManager from this process —
+ * and the harness gives this process `PATH = nativeLibraryDir:/system/bin`
+ * (HarnessHost.kt). Nothing there is named `npm`, so `build_run`/`test_run`
+ * answered "npm: not found" while `run_shell` worked: the lifecycle could
+ * create a project and write its files on the phone, then never build or test
+ * it. Publishing once and prepending the bin directory to our own PATH makes
+ * every child we spawn resolve the same runtime the person's shell does.
+ */
+function adoptRuntimePath(): void {
+  if (!WORKSPACE) return;
+  const published = publishRuntimeBins();
+  if (!published.length) return;
+  const parts = (process.env.PATH ?? "").split(":").filter(Boolean);
+  if (parts.includes(BOT_BIN_DIR)) return;
+  process.env.PATH = [BOT_BIN_DIR, ...parts].join(":");
+}
+
 placeNativeAddons();
+adoptRuntimePath();
 
 /** Clean shell env for the bot terminal: no credentials from this process,
  *  plus what node/npm need on Android (library path for the embedded
@@ -563,12 +592,29 @@ function shellEnv(): Record<string, string> {
   };
 }
 
-/** Prepended to every run_shell command: defines this shell's npm()/npx()
- *  functions over the published wrappers. Functions are what a shell can run
- *  here — Android denies the app's own domain exec of an app-data file, so a
- *  subprocess must reach the same shim through $OMB_NPX_SHIM instead. */
+/** Kernel-enforced ceilings for every shell command. These are resource
+ *  limits, not a filesystem boundary: `ulimit` cannot confine a path. They
+ *  stop one runaway turn from filling the phone's storage or pinning a core,
+ *  and stay generous enough for a real install or build. Measured on device:
+ *  each of these is accepted by Android's sh (a rejected one is skipped at
+ *  prelude time rather than failing the command). */
+export const SHELL_ULIMITS: readonly string[] = Object.freeze([
+  "ulimit -f 1048576 2>/dev/null || true", // 512 MiB per file written
+  "ulimit -t 300 2>/dev/null || true", // 5 min of CPU per process
+  "ulimit -p 4096 2>/dev/null || true", // stops a fork bomb; well above a build
+  "ulimit -c 0 2>/dev/null || true", // no core dumps in the workspace
+]);
+
+/** Prepended to every run_shell command: resource ceilings, then this shell's
+ *  npm()/npx() functions over the published wrappers. Functions are what a
+ *  shell can run here — Android denies the app's own domain exec of an
+ *  app-data file, so a subprocess must reach the same shim through
+ *  $OMB_NPX_SHIM instead. */
 function shellPrelude(): string {
-  const lines = ["# OpenMausBot terminal runtime: node is on PATH; npm/npx run here."];
+  const lines = [
+    "# OpenMausBot terminal runtime: node is on PATH; npm/npx run here.",
+    ...SHELL_ULIMITS,
+  ];
   if (ensureNodeSymlink()) {
     const node = join(BOT_BIN_DIR, "node");
     if (existsSync(NPM_CLI)) lines.push(`npm() { "${node}" "${NPM_CLI}" "$@"; }`);
@@ -823,6 +869,31 @@ function workspaceExists(args: Record<string, unknown>): unknown {
   }
 }
 
+/** The directories a task's own shell may work in. The workspace only: a
+ *  project tree next to it is a different task's files, and treating every
+ *  project as "the workspace" let one task delete another's source. */
+function shellWorkspaceRoots(): string[] {
+  return [WORKSPACE].filter(Boolean);
+}
+
+/** Trees whose `auth.json` is a fixture, not the credential store. */
+function shellCredentialExemptRoots(): string[] {
+  return [PROJECTS_DIR].filter(Boolean);
+}
+
+function killTree(child: ChildProcess): void {
+  if (!child.pid) return;
+  // Both spawns are process-group leaders (detached), so the negative pid
+  // reaches every descendant — including a child the shell backgrounded and
+  // never waited on, which a plain `child.kill` leaves running after the turn
+  // was cancelled.
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch {
+    try { child.kill("SIGKILL"); } catch { /* already gone */ }
+  }
+}
+
 function runCommand(args: Record<string, unknown>, signal: AbortSignal): Promise<unknown> {
   let prepared;
   try {
@@ -831,22 +902,32 @@ function runCommand(args: Record<string, unknown>, signal: AbortSignal): Promise
     if (error instanceof SandboxError) return Promise.resolve(toolError(error.message));
     throw error;
   }
+  // The applet is allowlisted, but its arguments are not: `cat <auth.json>` is
+  // an allowlisted program naming a credential. Refused here, in the tool,
+  // because no card can undo a read that already happened.
+  const named = [prepared.file.split("/").pop() ?? "", ...prepared.args].join(" ");
+  const refusal = refusalForShellCommand(named, {
+    workspaceRoots: shellWorkspaceRoots(),
+    credentialExemptRoots: shellCredentialExemptRoots(),
+  });
+  if (refusal) return Promise.resolve(toolError(refusal.reason));
   return new Promise((resolve) => {
     const child = spawn(prepared.file, prepared.args, {
       cwd: WORKSPACE,
       env: prepared.env,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
     let stdout = "";
     let stderr = "";
     let killed = false;
     const timer = setTimeout(() => {
       killed = true;
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      try { killTree(child); } catch { /* already gone */ }
     }, prepared.timeoutMs);
     const bail = () => {
       clearTimeout(timer);
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      try { killTree(child); } catch { /* already gone */ }
     };
     signal.addEventListener("abort", bail, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
@@ -900,22 +981,33 @@ function runShell(args: Record<string, unknown>, signal: AbortSignal): Promise<u
     }
     timeoutMs = args.timeoutMs;
   }
+  // No card can undo a read of the app's own credential store, so the tool
+  // refuses it outright — a person's Allow is not a disclosure licence for
+  // secrets the model never needs. Everything else outside the workspace is
+  // left to the approval gate (tool-approval.ts), which asks on the whole
+  // command's paths rather than on its first word.
+  const refusal = refusalForShellCommand(command, {
+    workspaceRoots: shellWorkspaceRoots(),
+    credentialExemptRoots: shellCredentialExemptRoots(),
+  });
+  if (refusal) return Promise.resolve(toolError(refusal.reason));
   return new Promise((resolve) => {
     const child = spawn(`${SYSTEM_BIN}/sh`, ["-c", `${shellPrelude()}\n${command}`], {
       cwd: WORKSPACE,
       env: shellEnv(),
       stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
     });
     let stdout = "";
     let stderr = "";
     let killed = false;
     const timer = setTimeout(() => {
       killed = true;
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      try { killTree(child); } catch { /* already gone */ }
     }, timeoutMs);
     const bail = () => {
       clearTimeout(timer);
-      try { child.kill("SIGKILL"); } catch { /* already gone */ }
+      try { killTree(child); } catch { /* already gone */ }
     };
     signal.addEventListener("abort", bail, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
@@ -2074,8 +2166,18 @@ const TOOLS: Record<string, ToolSpec> = {
     Object.entries(APP_BUILDER_TOOLS).map(([name, spec]) => [name, {
       description: spec.description,
       inputSchema: spec.inputSchema,
-      handler: (args: Record<string, unknown>, signal: AbortSignal) =>
-        spec.handler(args, signal),
+      handler: (args: Record<string, unknown>, signal: AbortSignal) => {
+        // Project identity must be bound to the user-facing chat that created
+        // it. The model cannot choose or spoof these server-stamped values.
+        const contextualArgs = name === "project_start"
+          ? {
+              ...args,
+              ...(process.env.OMB_BOT_ID ? { botId: process.env.OMB_BOT_ID } : {}),
+              ...(process.env.OMB_THREAD_ID ? { threadId: process.env.OMB_THREAD_ID } : {}),
+            }
+          : args;
+        return spec.handler(contextualArgs, signal);
+      },
     }]),
   ),
   // ── device capability registry tools (server/capabilities/capability-registry.ts) ──

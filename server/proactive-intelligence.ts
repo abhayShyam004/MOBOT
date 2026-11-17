@@ -28,9 +28,12 @@ export const ERR_SUGGESTION_SPAM_DETECTED = "ERR_SUGGESTION_SPAM_DETECTED";
 
 export class SuggestionSpamError extends Error {
   readonly code = ERR_SUGGESTION_SPAM_DETECTED;
-  constructor(message = "Multiple proactive suggestions generated within cooldown window", readonly suggestionId?: string) {
+  readonly suggestionId?: string;
+
+  constructor(message = "Multiple proactive suggestions generated within cooldown window", suggestionId?: string) {
     super(message);
     this.name = "SuggestionSpamError";
+    this.suggestionId = suggestionId;
   }
 }
 

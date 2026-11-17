@@ -698,6 +698,88 @@ describe("CodexDriver turns (fake app-server)", () => {
     })).rejects.toThrow(/reserved environment variable.*OMB_HARNESS_URL/i);
   });
 
+  it("mounts a custom MCP server the harness stamped with this turn's own bot id", async () => {
+    await create();
+    const dump = join(scratch, "custom-self-identity.json");
+    process.env.FAKE_CODEX_DUMP = dump;
+
+    // server/index.ts attaches OMB_BOT_ID to the computer/browser servers
+    // after reading the user's config; the reserved-name guard must not read
+    // that harness stamp as a user override.
+    await instance.adapter.sendTurn({
+      threadId: "t-custom-self-identity",
+      botId: "bot-self",
+      text: "go",
+      integrations: {
+        custom: {
+          android_computer: {
+            command: "mcp-adapter",
+            args: [],
+            env: { AC_WORKSPACE: "/tmp/ws", OMB_BOT_ID: "bot-self", OMB_THREAD_ID: "t-custom-self-identity" },
+          },
+        },
+      },
+    });
+    await recorder.until((event) => event.type === "turn.completed");
+    const seen = JSON.parse(readFileSync(dump, "utf8"));
+    expect(seen.argv.join(" ")).toContain("mcp_servers.android_computer.command");
+    expect(seen.env.OMB_BOT_ID).toBe("bot-self");
+    expect(seen.env.OMB_THREAD_ID).toBe("t-custom-self-identity");
+
+    // Normal bot MCP descriptors keep OMB_BOT_ID, but only the harness's
+    // android_computer/android_browser names receive this special treatment.
+    await expect(instance.adapter.sendTurn({
+      threadId: "t-custom-self-identity",
+      botId: "bot-self",
+      text: "go",
+      integrations: {
+        custom: {
+          unrelated: {
+            command: "mcp-adapter",
+            args: [],
+            env: { OMB_BOT_ID: "bot-self" },
+          },
+        },
+      },
+    })).rejects.toThrow(/reserved environment variable.*OMB_BOT_ID/i);
+  });
+
+  it("still refuses a custom MCP server that claims another bot's identity", async () => {
+    await create();
+    await expect(instance.adapter.sendTurn({
+      threadId: "t-custom-foreign-identity",
+      botId: "bot-self",
+      text: "go",
+      integrations: {
+        custom: {
+          android_computer: {
+            command: "mcp-adapter",
+            args: [],
+            env: { OMB_BOT_ID: "someone-else" },
+          },
+        },
+      },
+    })).rejects.toThrow(/reserved environment variable.*OMB_BOT_ID/i);
+  });
+
+  it("refuses a custom MCP server that claims another thread's identity", async () => {
+    await create();
+    await expect(instance.adapter.sendTurn({
+      threadId: "t-custom-self-identity",
+      botId: "bot-self",
+      text: "go",
+      integrations: {
+        custom: {
+          android_computer: {
+            command: "mcp-adapter",
+            args: [],
+            env: { OMB_THREAD_ID: "different-thread" },
+          },
+        },
+      },
+    })).rejects.toThrow(/reserved environment variable.*OMB_THREAD_ID/i);
+  });
+
   it.each(["ask", "auto"] as const)("pre-allows peer-agent comms without exposing its token in %s mode", async (approvalMode) => {
     await create();
     const dump = join(scratch, "agents.json");

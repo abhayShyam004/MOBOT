@@ -8,6 +8,7 @@ import { homedir } from "node:os";
 import { checkToolPermission, loadDiskPermissions } from "../permission-policy.ts";
 import { saveImage } from "../attachments.ts";
 import { validateScreenFrameBytes } from "../screen-frame-gate.ts";
+import { logHopTiming } from "../timing-log.ts";
 
 type Json = Record<string, unknown>;
 export type Device = { serial: string; state: string; model: string; connection: "usb" | "network" | "emulator" };
@@ -294,21 +295,35 @@ export async function callNativeDriver(endpoint: string, options: { method?: str
     throw new PhoneActionError("ANDROID_ACCESS_REQUIRED", "Native phone driver is not active");
   }
 
-  const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
-    method: options.method ?? "GET",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: options.body ? JSON.stringify(options.body) : undefined,
-  });
+  const start = performance.now();
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}${endpoint}`, {
+      method: options.method ?? "GET",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
 
-  if (!res.ok) {
-    const errText = await res.text();
-    throw new PhoneActionError("ACTION_FAILED", `Native driver error (HTTP ${res.status}): ${errText}`);
+    if (!res.ok) {
+      const errText = await res.text();
+      const dur = Math.round(performance.now() - start);
+      logHopTiming("IPC", dur, { endpoint, status: res.status, ok: false });
+      throw new PhoneActionError("ACTION_FAILED", `Native driver error (HTTP ${res.status}): ${errText}`);
+    }
+
+    const data = await res.json();
+    const dur = Math.round(performance.now() - start);
+    logHopTiming("IPC", dur, { endpoint, ok: true });
+    return data;
+  } catch (err) {
+    if (!(err instanceof PhoneActionError)) {
+      const dur = Math.round(performance.now() - start);
+      logHopTiming("IPC", dur, { endpoint, ok: false, error: String(err) });
+    }
+    throw err;
   }
-
-  return await res.json();
 }
 
 export async function readySerial(requested?: unknown): Promise<string> {
@@ -754,24 +769,26 @@ const MAX_SEEN_ACTIONS = 1000;
 export const seenActions = new Set<string>();
 let activeDeviceLock: Promise<void> = Promise.resolve();
 
-export function checkActionIsolation(args: Json) {
+export function checkActionIsolation(name: string, args: Json) {
+  if (name === "status" || name === "read_screen") return;
   const actionId = typeof args.actionId === "string" ? args.actionId : undefined;
   if (actionId) {
-    if (seenActions.has(actionId)) {
+    const key = `${name}:${actionId}`;
+    if (seenActions.has(key)) {
       throw new PhoneActionError("ACTION_FAILED", `Action ${actionId} was already executed (duplicate rejected).`);
     }
     if (seenActions.size >= MAX_SEEN_ACTIONS) {
       const first = seenActions.values().next().value;
       if (first !== undefined) seenActions.delete(first);
     }
-    seenActions.add(actionId);
+    seenActions.add(key);
   }
 }
 
-export function rollbackActionIsolation(args: Json) {
+export function rollbackActionIsolation(name: string, args: Json) {
   const actionId = typeof args.actionId === "string" ? args.actionId : undefined;
   if (actionId) {
-    seenActions.delete(actionId);
+    seenActions.delete(`${name}:${actionId}`);
   }
 }
 
@@ -864,6 +881,11 @@ const TOOLS = [
     description: "Restore the MOBOT companion application to the foreground after controlling another app. Call this when completed interacting with third-party apps unless the user explicitly requested to leave the app open.",
     inputSchema: { type: "object", properties: { serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } } },
   },
+  {
+    name: "open_accessibility_settings",
+    description: "Open Android Accessibility Settings so the user can enable MOBOT Phone Assistant. ONLY call this tool after explaining why the service is needed and receiving explicit user consent in chat.",
+    inputSchema: { type: "object", properties: { serial: { type: "string" }, actionId: { type: "string" }, turnId: { type: "string" } } },
+  },
 ] as const;
 
 type ToolResult = {
@@ -878,7 +900,7 @@ const textResult = (text: string, isError = false): ToolResult => ({
 
 async function callTool(name: string, args: Json): Promise<ToolResult> {
   verifyPermission(name);
-  checkActionIsolation(args);
+  checkActionIsolation(name, args);
 
   try {
     return await withDeviceLock(async () => {
@@ -1085,10 +1107,24 @@ async function callTool(name: string, args: Json): Promise<ToolResult> {
       return textResult(res);
     }
 
+    if (name === "open_accessibility_settings") {
+      if (isNativeDriverActive()) {
+        const data = await callNativeDriver("/setup_permission", { method: "POST", body: { type: "accessibility" } });
+        if (!data.ok) throw new PhoneActionError(data.code || "ACTION_FAILED", data.error || "Failed to open accessibility settings");
+        return textResult(JSON.stringify({
+          ok: true,
+          action: "open_accessibility_settings",
+          opened: true,
+          message: "Opened Android Accessibility Settings. Remind the user to enable 'MOBOT Phone Assistant' under Installed Apps/Services, then return to MOBOT.",
+        }));
+      }
+      return textResult("Accessibility settings cannot be opened directly in ADB mode.");
+    }
+
     throw new PhoneActionError("ACTION_NOT_SUPPORTED", `Unknown phone tool: ${name}`);
     });
   } catch (error) {
-    rollbackActionIsolation(args);
+    rollbackActionIsolation(name, args);
     throw error;
   }
 }

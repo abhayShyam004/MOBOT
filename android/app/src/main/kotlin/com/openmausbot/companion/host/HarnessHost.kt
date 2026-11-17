@@ -61,6 +61,10 @@ class HarnessHost(
         fun appPackageName(): String = "com.openmausbot.companion"
         /** Device crash-injection point, preview builds only; null otherwise. */
         fun crashPoint(): String? = null
+        /** Provider test envelope, preview builds only: a private endpoint and
+         *  shortened budgets for observing deadlines on the device. Null
+         *  otherwise, which is every production build. */
+        fun providerTestEnvelope(): String? = null
     }
 
     private val _status = MutableStateFlow<HostStatus>(HostStatus.Idle)
@@ -427,6 +431,14 @@ class HarnessHost(
         files.crashPoint()?.let { point ->
             env["OMB_MEMORY_CRASH_POINT"] = point
             logI("security: crash injection armed at '$point' (preview build only)")
+        }
+        // Provider deadlines can only be observed against a stalled provider,
+        // and the shipped endpoint cannot be stalled on demand. A preview build
+        // may point model traffic at a private endpoint with shorter budgets;
+        // the server re-validates both and refuses anything public.
+        files.providerTestEnvelope()?.let { envelope ->
+            env["OMB_PROVIDER_TEST_ENVELOPE"] = envelope
+            logI("provider-test: envelope from the preview setting is being used (private endpoint only)")
         }
         if (bridgeName != null) {
             env["OMB_MEMORY_INTEGRITY_SOCK"] = bridgeName

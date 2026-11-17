@@ -35,12 +35,21 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.RadioButton
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -208,9 +217,16 @@ fun SettingsScreen(
                     onBack = { activeSubPage = null },
                 ) {
                     SettingsSection(title = "Theme Mode") {
-                        Box(modifier = Modifier.padding(16.dp)) {
+                        Column(
+                            modifier = Modifier.padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(16.dp),
+                        ) {
+                            ThemePreviewCards(
+                                currentMode = themeMode,
+                                onSelect = { mode -> environment.appearance.setTheme(mode) },
+                            )
                             ChoiceRow(
-                                label = "Theme",
+                                label = "Theme Selection",
                                 options = ThemeMode.entries.map { it.label },
                                 selectedIndex = ThemeMode.entries.indexOf(themeMode),
                                 onSelect = { index -> environment.appearance.setTheme(ThemeMode.entries[index]) },
@@ -227,6 +243,25 @@ fun SettingsScreen(
                                 onClick = {
                                     activeSubPage = null
                                     onOpenMascotStudio()
+                                },
+                            )
+                        }
+                    }
+
+                    val ctx = androidx.compose.ui.platform.LocalContext.current
+                    if (ctx.packageName.endsWith(".preview")) {
+                        SettingsSection(title = "Component Showroom (Preview Only)") {
+                            SettingsRow(
+                                title = "Material Components Gallery",
+                                subtitle = "Explore official Google Android Views (v1.14.0)",
+                                showChevron = true,
+                                onClick = {
+                                    try {
+                                        val intent = android.content.Intent("com.openmausbot.companion.MATERIAL_GALLERY").apply {
+                                            setPackage(ctx.packageName)
+                                        }
+                                        ctx.startActivity(intent)
+                                    } catch (_: Exception) {}
                                 },
                             )
                         }
@@ -1150,111 +1185,121 @@ private fun SettingsProfileCard(
         label = "wavePhase",
     )
 
-    Row(
+    Card(
         modifier = modifier
             .fillMaxWidth()
-            .padding(horizontal = 20.dp)
-            .clip(RoundedCornerShape(22.dp))
-            .background(AppTheme.colors.surface)
-            .border(
-                width = 1.dp,
-                color = AppTheme.colors.border.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(22.dp),
-            )
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(28.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+        onClick = onClick,
     ) {
-        // Pastel avatar circle with animated fluid wave and initials
-        Box(
+        Row(
             modifier = Modifier
-                .size(54.dp)
-                .clip(CircleShape)
-                .background(avatarBg),
-            contentAlignment = Alignment.Center,
+                .fillMaxWidth()
+                .padding(18.dp),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            Canvas(modifier = Modifier.fillMaxSize()) {
-                val w = size.width
-                val h = size.height
-                val twoPi = (2.0 * PI).toFloat()
+            // Pastel avatar squircle with animated fluid wave and initials
+            Box(
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(18.dp))
+                    .background(avatarBg),
+                contentAlignment = Alignment.Center,
+            ) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val twoPi = (2.0 * PI).toFloat()
 
-                // Layer 1: Background gentle wave (slower, translucent depth)
-                val backWavePath = Path().apply {
-                    val baseY = h * 0.70f
-                    val amp = h * 0.045f
-                    val phase = wavePhase + 1.25f
-                    moveTo(0f, baseY + amp * sin(-phase))
-                    val step = 3f
-                    var x = step
-                    while (x < w) {
-                        val angle = twoPi * (x / (w * 0.85f)) - phase
-                        lineTo(x, baseY + amp * sin(angle))
-                        x += step
+                    // Layer 1: Background gentle wave (slower, translucent depth)
+                    val backWavePath = Path().apply {
+                        val baseY = h * 0.70f
+                        val amp = h * 0.045f
+                        val phase = wavePhase + 1.25f
+                        moveTo(0f, baseY + amp * sin(-phase))
+                        val step = 3f
+                        var x = step
+                        while (x < w) {
+                            val angle = twoPi * (x / (w * 0.85f)) - phase
+                            lineTo(x, baseY + amp * sin(angle))
+                            x += step
+                        }
+                        val endAngle = twoPi * (w / (w * 0.85f)) - phase
+                        lineTo(w, baseY + amp * sin(endAngle))
+                        lineTo(w, h)
+                        lineTo(0f, h)
+                        close()
                     }
-                    val endAngle = twoPi * (w / (w * 0.85f)) - phase
-                    lineTo(w, baseY + amp * sin(endAngle))
-                    lineTo(w, h)
-                    lineTo(0f, h)
-                    close()
-                }
-                drawPath(backWavePath, color = avatarWave.copy(alpha = 0.40f))
+                    drawPath(backWavePath, color = avatarWave.copy(alpha = 0.40f))
 
-                // Layer 2: Foreground animated rolling wave
-                val frontWavePath = Path().apply {
-                    val baseY = h * 0.73f
-                    val amp = h * 0.065f
-                    val phase = wavePhase
-                    moveTo(0f, baseY + amp * sin(-phase))
-                    val step = 3f
-                    var x = step
-                    while (x < w) {
-                        val angle = twoPi * (x / w) - phase
-                        lineTo(x, baseY + amp * sin(angle))
-                        x += step
+                    // Layer 2: Foreground animated rolling wave
+                    val frontWavePath = Path().apply {
+                        val baseY = h * 0.73f
+                        val amp = h * 0.065f
+                        val phase = wavePhase
+                        moveTo(0f, baseY + amp * sin(-phase))
+                        val step = 3f
+                        var x = step
+                        while (x < w) {
+                            val angle = twoPi * (x / w) - phase
+                            lineTo(x, baseY + amp * sin(angle))
+                            x += step
+                        }
+                        lineTo(w, baseY + amp * sin(twoPi - phase))
+                        lineTo(w, h)
+                        lineTo(0f, h)
+                        close()
                     }
-                    lineTo(w, baseY + amp * sin(twoPi - phase))
-                    lineTo(w, h)
-                    lineTo(0f, h)
-                    close()
+                    drawPath(frontWavePath, color = avatarWave)
                 }
-                drawPath(frontWavePath, color = avatarWave)
+                Text(
+                    text = initials,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = avatarText,
+                )
             }
-            Text(
-                text = initials,
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold,
-                color = avatarText,
-            )
-        }
 
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            Text(
-                text = userName,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = AppTheme.colors.textPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            Text(
-                text = userEmail,
-                fontSize = 13.5.sp,
-                color = AppTheme.colors.textSecondary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        }
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Text(
+                    text = userName,
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = userEmail.ifEmpty { "Connected Companion Account" },
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
 
-        Icon(
-            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-            contentDescription = null,
-            tint = AppTheme.colors.textTertiary.copy(alpha = 0.5f),
-            modifier = Modifier.size(20.dp),
-        )
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                modifier = Modifier.size(32.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                        contentDescription = "Open Account",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+            }
+        }
     }
 }
 
@@ -1271,39 +1316,50 @@ internal fun SettingsGroupContainer(
         modifier = modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Text(
-            text = title,
-            fontSize = 14.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = AppTheme.colors.textSecondary,
-            modifier = Modifier.padding(horizontal = 24.dp),
-        )
-        Column(
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 2.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(width = 3.5.dp, height = 15.dp)
+                    .clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primary),
+            )
+            Text(
+                text = title.uppercase(),
+                style = MaterialTheme.typography.labelLarge,
+                fontWeight = FontWeight.Bold,
+                color = MaterialTheme.colorScheme.primary,
+                letterSpacing = 1.1.sp,
+            )
+        }
+        Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(AppTheme.colors.surface)
-                .border(
-                    width = 1.dp,
-                    color = AppTheme.colors.border.copy(alpha = 0.5f),
-                    shape = RoundedCornerShape(22.dp),
-                ),
+                .padding(horizontal = 16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            ),
         ) {
-            content()
+            Column(modifier = Modifier.fillMaxWidth()) {
+                content()
+            }
         }
     }
 }
 
 /**
- * Subtle row divider matching iOS / modern pastel settings cards.
+ * Clean subtle divider inside Material 3 settings cards.
  */
 @Composable
 internal fun SettingsRowDivider() {
     HorizontalDivider(
-        modifier = Modifier.padding(start = 68.dp, end = 16.dp),
-        thickness = 0.5.dp,
-        color = AppTheme.colors.divider.copy(alpha = 0.6f),
+        modifier = Modifier.padding(horizontal = 16.dp),
+        thickness = 0.8.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
     )
 }
 
@@ -1592,7 +1648,8 @@ internal fun SettingsMascotIcon(
 }
 
 /**
- * Standard settings item row with colorful mini-mascot, title, subtitle, trailing value, and subtle chevron.
+ * Material 3 Expressive settings item row with colorful mini-mascot in a tonal squircle,
+ * authentic M3 typography, trailing value chip, and rounded chevron.
  */
 @Composable
 internal fun SettingsItemRow(
@@ -1605,65 +1662,91 @@ internal fun SettingsItemRow(
     busy: Boolean = false,
     onClick: () -> Unit,
 ) {
-    Row(
+    ListItem(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 60.dp)
-            .clickable(enabled = enabled, role = Role.Button, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        SettingsMascotIcon(
-            type = iconType,
-            modifier = Modifier.size(38.dp),
-        )
-
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
+            .clickable(enabled = enabled, role = Role.Button, onClick = onClick),
+        colors = ListItemDefaults.colors(
+            containerColor = Color.Transparent,
+        ),
+        leadingContent = {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                modifier = Modifier.size(44.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    SettingsMascotIcon(
+                        type = iconType,
+                        modifier = Modifier.size(28.dp),
+                    )
+                }
+            }
+        },
+        headlineContent = {
             Text(
                 text = title,
-                fontSize = 15.5.sp,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
-                color = if (enabled) AppTheme.colors.textPrimary else AppTheme.colors.textTertiary,
+                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f),
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
+        },
+        supportingContent = {
             Text(
                 text = subtitle,
-                fontSize = 13.sp,
-                color = AppTheme.colors.textSecondary,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-        }
+        },
+        trailingContent = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (trailingValue != null) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                    ) {
+                        Text(
+                            text = trailingValue,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                }
 
-        if (trailingValue != null) {
-            Text(
-                text = trailingValue,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Normal,
-                color = AppTheme.colors.textTertiary,
-            )
-        }
-
-        if (busy) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(16.dp),
-                strokeWidth = 2.dp,
-                color = AppTheme.colors.textTertiary,
-            )
-        } else {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                contentDescription = null,
-                tint = AppTheme.colors.textTertiary.copy(alpha = 0.5f),
-                modifier = Modifier.size(18.dp),
-            )
-        }
-    }
+                if (busy) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(18.dp),
+                        strokeWidth = 2.dp,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                } else {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        modifier = Modifier.size(28.dp),
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(16.dp),
+                            )
+                        }
+                    }
+                }
+            }
+        },
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1786,48 +1869,136 @@ internal fun SettingsLink(
 }
 
 @Composable
+private fun ThemePreviewCards(
+    currentMode: ThemeMode,
+    onSelect: (ThemeMode) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        ThemeMode.entries.forEach { mode ->
+            val isSelected = mode == currentMode
+            val borderColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+            val containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.15f) else MaterialTheme.colorScheme.surfaceContainerHigh
+
+            Surface(
+                onClick = { onSelect(mode) },
+                shape = RoundedCornerShape(18.dp),
+                color = containerColor,
+                border = androidx.compose.foundation.BorderStroke(if (isSelected) 2.dp else 1.dp, borderColor),
+                modifier = Modifier
+                    .weight(1f)
+                    .height(126.dp),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(8.dp),
+                    verticalArrangement = Arrangement.SpaceBetween,
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(68.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .background(
+                                when (mode) {
+                                    ThemeMode.LIGHT -> Color(0xFFF3F4F6)
+                                    ThemeMode.DARK -> Color(0xFF1E2124)
+                                    ThemeMode.SYSTEM -> Color(0xFF282B30)
+                                }
+                            )
+                            .padding(6.dp),
+                    ) {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                            modifier = Modifier.fillMaxSize(),
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.55f)
+                                    .height(6.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        when (mode) {
+                                            ThemeMode.LIGHT -> Color(0xFF006493)
+                                            ThemeMode.DARK -> Color(0xFF8ECEFF)
+                                            ThemeMode.SYSTEM -> Color(0xFF8ECEFF)
+                                        }
+                                    )
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.End)
+                                    .fillMaxWidth(0.7f)
+                                    .height(13.dp)
+                                    .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp, bottomStart = 6.dp, bottomEnd = 2.dp))
+                                    .background(
+                                        when (mode) {
+                                            ThemeMode.LIGHT -> Color(0xFF006493)
+                                            ThemeMode.DARK -> Color(0xFF8ECEFF)
+                                            ThemeMode.SYSTEM -> Color(0xFF8ECEFF)
+                                        }
+                                    )
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .align(Alignment.Start)
+                                    .fillMaxWidth(0.75f)
+                                    .height(13.dp)
+                                    .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp, bottomEnd = 6.dp, bottomStart = 2.dp))
+                                    .background(
+                                        when (mode) {
+                                            ThemeMode.LIGHT -> Color(0xFFE2E4E8)
+                                            ThemeMode.DARK -> Color(0xFF383C42)
+                                            ThemeMode.SYSTEM -> Color(0xFF383C42)
+                                        }
+                                    )
+                            )
+                        }
+                    }
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        if (isSelected) {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(13.dp),
+                            )
+                        }
+                        Text(
+                            text = mode.label,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 internal fun ChoiceRow(
     label: String,
     options: List<String>,
     selectedIndex: Int,
     onSelect: (Int) -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(AppSpacing.sm)) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = AppTheme.colors.textSecondary,
-        )
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(AppRadii.small))
-                .background(AppTheme.colors.surfaceRaised)
-                .padding(3.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
-        ) {
-            options.forEachIndexed { index, option ->
-                val selected = index == selectedIndex
-                Text(
-                    text = option,
-                    style = MaterialTheme.typography.titleSmall,
-                    color = if (selected) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(AppRadii.small - 3.dp))
-                        .background(if (selected) AppTheme.colors.surface else Color.Transparent)
-                        .selectable(
-                            selected = selected,
-                            role = Role.RadioButton,
-                            onClick = { onSelect(index) },
-                        )
-                        .padding(vertical = 9.dp),
-                )
-            }
-        }
-    }
+    SettingsChoiceRow(
+        label = label,
+        options = options,
+        selectedIndex = selectedIndex,
+        onSelect = onSelect,
+    )
 }
 
 @Composable

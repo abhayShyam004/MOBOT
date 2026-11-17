@@ -40,7 +40,7 @@ if (!SESSION_ROOT) {
 mkdirSync(SESSION_ROOT, { recursive: true });
 
 const DRIVER_BASE = `http://127.0.0.1:${DRIVER_PORT}`;
-const FRAME_BYTES = 2 * 1024 * 1024;
+const FRAME_BYTES = 16 * 1024 * 1024;
 const MAX_FRAMES = 50_000;
 // One tool result entering the model's context. A heavy page's text fits well
 // under this; the driver caps extraction at 60k chars regardless.
@@ -278,6 +278,10 @@ function handle(message: RpcMessage): void {
       .then(
         (result) => {
           if (shuttingDown) return;
+          if (result && typeof result === "object" && Array.isArray((result as any).content)) {
+            reply(id, result);
+            return;
+          }
           const failed = (result as { ok?: unknown }).ok === false && !("data" in (result as object));
           reply(id, textResult(result, failed));
         },

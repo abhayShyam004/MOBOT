@@ -173,7 +173,7 @@ internal fun TurnFailureCard(
             modifier = Modifier
                 .fillMaxWidth()
                 .clickable { showDiagnostics = !showDiagnostics },
-            verticalAlignment = Alignment.CenterVertically,
+            verticalAlignment = Alignment.Top,
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Box(
@@ -189,15 +189,33 @@ internal fun TurnFailureCard(
                     modifier = Modifier.size(15.dp),
                 )
             }
-            Text(
-                text = card.title,
-                style = MaterialTheme.typography.bodyMedium,
-                fontWeight = FontWeight.Medium,
-                color = colors.textPrimary,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+            Column(
                 modifier = Modifier.weight(1f),
-            )
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                Text(
+                    text = card.title,
+                    style = MaterialTheme.typography.bodyMedium,
+                    fontWeight = FontWeight.Medium,
+                    color = colors.textPrimary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // The headline names the failure; this says which budget ran
+                // out. Collapsed, this is the only place that sentence fits —
+                // and nobody should have to open "Details" to learn whether a
+                // dead network, a silent first token or a stalled stream
+                // stopped their turn.
+                if (!showDiagnostics && card.detail.isNotBlank()) {
+                    Text(
+                        text = card.detail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.textSecondary,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
             card.status?.let { StatusTag(it) }
             if (onRetry != null && FailureActions.retry(card.kind)) {
                 AppPill(text = "Retry", onClick = onRetry, tone = PillTone.Accent)

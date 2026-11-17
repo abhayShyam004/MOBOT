@@ -33,6 +33,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowLeft
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Warning
@@ -42,10 +44,12 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -70,6 +74,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import com.openmausbot.companion.R
@@ -134,6 +139,9 @@ fun MessageRow(
     /** A failed turn's "Provider settings". */
     openProviders: (() -> Unit)? = null,
     onPromptAction: ((String) -> Unit)? = null,
+    /** Pilot 2: Expressive Material 3 bottom sheets */
+    openApprovalSheet: ((OptionCard, Message) -> Unit)? = null,
+    openToolDetailsSheet: ((ToolActivity) -> Unit)? = null,
 ) {
     val session = LocalCompanion.current.session
     val scope = rememberCoroutineScope()
@@ -179,6 +187,8 @@ fun MessageRow(
                 changeModel = changeModel,
                 openProviders = openProviders,
                 onPromptAction = onPromptAction,
+                openApprovalSheet = openApprovalSheet,
+                openToolDetailsSheet = openToolDetailsSheet,
             )
 
             message.reactions?.takeIf { it.isNotEmpty() }?.let { reactions ->
@@ -451,8 +461,17 @@ private fun MessageContent(
     changeModel: (() -> Unit)?,
     openProviders: (() -> Unit)?,
     onPromptAction: ((String) -> Unit)? = null,
+    openApprovalSheet: ((OptionCard, Message) -> Unit)? = null,
+    openToolDetailsSheet: ((ToolActivity) -> Unit)? = null,
 ) {
     val session = LocalCompanion.current.session
+
+    // Native Chief of Staff Email Composer card
+    if (EmailPreviewCardRules.isEmailCard(message.card, message.text)) {
+        EmailPreviewCardView(chat, message, haptics, onPromptAction, openAttachment)
+        return
+    }
+
     when (message.kind) {
         Message.Kind.TEXT -> {
             message.structured?.let { structured ->
@@ -503,10 +522,12 @@ private fun MessageContent(
         } else Unit
         // A structured ask draws its own card: its answers are the model's
         // questions, not an allow/deny a tap could stand for.
-        Message.Kind.OPTIONS -> if (QuestionCardRules.drawsQuestionCard(message)) {
+        Message.Kind.OPTIONS -> if (EmailPreviewCardRules.isEmailCard(message.card, message.text)) {
+            EmailPreviewCardView(chat, message, haptics, onPromptAction, openAttachment)
+        } else if (QuestionCardRules.drawsQuestionCard(message)) {
             QuestionCardView(chat, message, haptics)
         } else {
-            CardView(chat, message, haptics)
+            CardView(chat, message, haptics, openApprovalSheet)
         }
         // An activity row that carries a failure is not a tool step: it is the
         // turn saying why it produced nothing, and it draws the card that
@@ -530,6 +551,7 @@ private fun MessageContent(
                     )
                 }
             },
+            openToolDetailsSheet = openToolDetailsSheet,
         )
         Message.Kind.SCREEN -> ScreenShot(chat.threadId, message)
         // An app the bot needs connected. The card acts on the message it is
@@ -603,6 +625,8 @@ private fun cleanAssistantChatText(text: String): String {
     cleaned = cleaned.replace(Regex("""\[image:\s*[^\]]+\]""", RegexOption.IGNORE_CASE), "")
     cleaned = cleaned.replace(Regex("""\[(?:download\s+the\s+[^\]]+|download\s+[^\]]+)\]\((?:attachment:[^\)]+|\/api\/attachments\/[^\)]+)\)""", RegexOption.IGNORE_CASE), "")
     cleaned = cleaned.replace(Regex("""\s*\*\([^\)]*peeking at the filename[^\)]*\)\*\s*""", RegexOption.IGNORE_CASE), "\n")
+    cleaned = cleaned.replace(Regex("""(?:Recovered after the app restarted|Recovered after restart|Resuming after restart)[^\n]*[\.\n]?""", RegexOption.IGNORE_CASE), "")
+    cleaned = sanitizeInternalPaths(cleaned)
     return cleaned.trim()
 }
 
@@ -617,33 +641,94 @@ private fun BotImageAttachment(
     openAttachment: ((DisplayedMessageAttachment, Message, DownloadedFile?) -> Unit)?,
 ) {
     val session = LocalCompanion.current.session
-    var bitmap by remember(attachment.path) { mutableStateOf<ImageBitmap?>(null) }
-    LaunchedEffect(attachment.path) {
-        val bytes = session.attachmentImage(attachment.path) ?: return@LaunchedEffect
-        bitmap = withContext(Dispatchers.IO) {
-            runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }.getOrNull()
+    var attempt by remember(attachment.path) { mutableStateOf(0) }
+    var state by remember(attachment.path) { mutableStateOf<ImageAttachmentState>(ImageAttachmentState.Loading) }
+
+    LaunchedEffect(attachment.path, attempt) {
+        state = ImageAttachmentState.Loading
+        val bytes = try {
+            session.attachmentImage(attachment.path)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            null
         }
+        val bitmap = bytes?.let {
+            withContext(Dispatchers.IO) {
+                runCatching { BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }.getOrNull()
+            }
+        }
+        state = bitmap?.let(ImageAttachmentState::Ready) ?: ImageAttachmentState.Failed
     }
-    val decoded = bitmap ?: return
-    Image(
-        bitmap = decoded,
-        contentDescription = attachment.name ?: "Image",
-        contentScale = ContentScale.Fit,
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
-            .clickable(enabled = openAttachment != null) {
-                openAttachment?.invoke(
-                    DisplayedMessageAttachment(
-                        kind = DisplayedMessageAttachment.Kind.IMAGE,
-                        name = attachment.name ?: "image.png",
-                        path = attachment.path.orEmpty(),
-                    ),
-                    message,
-                    null,
+
+    when (val current = state) {
+        ImageAttachmentState.Loading -> Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = 120.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(secondaryTint.copy(alpha = 0.08f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+        }
+
+        ImageAttachmentState.Failed -> Surface(
+            shape = RoundedCornerShape(14.dp),
+            color = secondaryTint.copy(alpha = 0.08f),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Row(
+                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = Icons.Filled.Warning,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(20.dp),
                 )
-            },
-    )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = attachment.name ?: "Image",
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text("Couldn't load this image", fontSize = 12.sp, color = secondaryTint)
+                }
+                TextButton(onClick = { attempt += 1 }) { Text("Retry") }
+            }
+        }
+
+        is ImageAttachmentState.Ready -> Image(
+            bitmap = current.image,
+            contentDescription = attachment.name ?: "Image",
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(14.dp))
+                .clickable(enabled = openAttachment != null) {
+                    openAttachment?.invoke(
+                        DisplayedMessageAttachment(
+                            kind = DisplayedMessageAttachment.Kind.IMAGE,
+                            name = attachment.name ?: "image.png",
+                            path = attachment.path,
+                        ),
+                        message,
+                        null,
+                    )
+                },
+        )
+    }
+}
+
+private sealed interface ImageAttachmentState {
+    data object Loading : ImageAttachmentState
+    data class Ready(val image: ImageBitmap) : ImageAttachmentState
+    data object Failed : ImageAttachmentState
 }
 
 /**
@@ -803,7 +888,11 @@ private fun TextBubble(
         horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.Bottom,
     ) {
-        val bubbleShape = RoundedCornerShape(18.dp)
+        val bubbleShape = if (mine) {
+            RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 4.dp)
+        } else {
+            RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 4.dp, bottomEnd = 20.dp)
+        }
 
         if (mine) {
             // User message: leave minimum 22% gutter on the left
@@ -904,26 +993,56 @@ private fun TextBubble(
                                     .padding(horizontal = 16.dp, vertical = 13.dp),
                                 verticalArrangement = Arrangement.spacedBy(4.dp),
                             ) {
-                                SelectionContainer {
-                                    CompositionLocalProvider(
-                                        LocalContentColor provides (if (AppTheme.isDark) Color(0xFFF0F0F2) else Color(0xFF1A1A1C))
-                                    ) {
-                                        MarkdownText(
-                                            source = assistantCleanText,
-                                            openLink = openLink?.let { open -> { url -> open(url, message) } },
-                                            openImage = { imagePath ->
-                                                openAttachment?.invoke(
-                                                    DisplayedMessageAttachment(
-                                                        kind = DisplayedMessageAttachment.Kind.IMAGE,
-                                                        name = imagePath.substringAfterLast('/'),
-                                                        path = imagePath,
-                                                    ),
-                                                    message,
-                                                    null,
-                                                )
-                                            },
-                                        )
+                                val previewCandidates = remember(assistantCleanText) {
+                                    com.openmausbot.companion.core.LinkUrls.all(assistantCleanText, 2)
+                                }
+                                var successfullyPreviewedUrls by remember(assistantCleanText) {
+                                    mutableStateOf(emptySet<String>())
+                                }
+                                val visibleMarkdownText = remember(assistantCleanText, successfullyPreviewedUrls) {
+                                    com.openmausbot.companion.core.LinkUrls.suppressPreviewedUrls(
+                                        assistantCleanText,
+                                        successfullyPreviewedUrls,
+                                    )
+                                }
+
+                                if (visibleMarkdownText.isNotBlank()) {
+                                    SelectionContainer {
+                                        CompositionLocalProvider(
+                                            LocalContentColor provides MaterialTheme.colorScheme.onSurface
+                                        ) {
+                                            MarkdownText(
+                                                source = visibleMarkdownText,
+                                                openLink = openLink?.let { open -> { url -> open(url, message) } },
+                                                openImage = { imagePath ->
+                                                    openAttachment?.invoke(
+                                                        DisplayedMessageAttachment(
+                                                            kind = DisplayedMessageAttachment.Kind.IMAGE,
+                                                            name = imagePath.substringAfterLast('/'),
+                                                            path = imagePath,
+                                                        ),
+                                                        message,
+                                                        null,
+                                                    )
+                                                },
+                                            )
+                                        }
                                     }
+                                }
+
+                                // When a link has a successfully rendered rich preview,
+                                // the preview card replaces the raw URL token in the bubble.
+                                previewCandidates.forEach { linkUrl ->
+                                    LinkPreviewCard(
+                                        url = linkUrl,
+                                        onOpen = openLink?.let { open -> { target: String -> open(target, message) } },
+                                        onPreviewSuccess = { successfulUrl ->
+                                            if (successfulUrl !in successfullyPreviewedUrls) {
+                                                successfullyPreviewedUrls = successfullyPreviewedUrls + successfulUrl
+                                            }
+                                        },
+                                        modifier = Modifier.padding(top = 2.dp),
+                                    )
                                 }
                                 if (message.at > 0 && standaloneFiles.isEmpty() && standaloneImages.isEmpty()) {
                                     Text(
@@ -936,14 +1055,23 @@ private fun TextBubble(
                             }
                         }
 
-                        // 2. Standalone non-image attachments (PDFs, files, documents)
-                        standaloneFiles.forEach { attachment ->
-                            BotFileAttachment(attachment, message, openAttachment)
-                        }
+                        val isPreview = LocalContext.current.packageName.endsWith(".preview")
+                        if (isPreview && (standaloneFiles.isNotEmpty() || standaloneImages.isNotEmpty())) {
+                            ExpressiveDeliverableLayout(
+                                message = message,
+                                attachments = standaloneFiles + standaloneImages,
+                                openAttachment = openAttachment,
+                            )
+                        } else {
+                            // 2. Standalone non-image attachments (PDFs, files, documents)
+                            standaloneFiles.forEach { attachment ->
+                                BotFileAttachment(attachment, message, openAttachment)
+                            }
 
-                        // 3. Standalone images (pictures generated/fetched, tap to preview full screen)
-                        standaloneImages.forEach { attachment ->
-                            BotImageAttachment(attachment, message, openAttachment)
+                            // 3. Standalone images (pictures generated/fetched, tap to preview full screen)
+                            standaloneImages.forEach { attachment ->
+                                BotImageAttachment(attachment, message, openAttachment)
+                            }
                         }
                     }
                 }
@@ -1239,16 +1367,21 @@ fun ToolExecutionCard(
     threadRef: ThreadRef? = null,
     openThread: ((ThreadRef) -> Unit)? = null,
     onErrorTap: (() -> Unit)? = null,
+    openToolDetailsSheet: ((ToolActivity) -> Unit)? = null,
 ) {
     val haptics = rememberHaptics()
     val clipboard = LocalClipboard.current
     val scope = rememberCoroutineScope()
+    val isPreview = LocalContext.current.packageName.endsWith(".preview")
     var expanded by remember(tool.name, tool.durationMs) { mutableStateOf(false) }
     var copied by remember { mutableStateOf(false) }
 
     val status = ActivityReceipt.status(tool.ok)
-    val isRunning = status == ActivityStatus.RUNNING
-    val isError = status == ActivityStatus.ERROR
+    val isRunning = ExpressiveActivityClassifier.isRunning(tool)
+    val isError = ExpressiveActivityClassifier.isFailed(tool)
+    val isCancelled = ExpressiveActivityClassifier.isCancelled(tool)
+    val isRetrying = ExpressiveActivityClassifier.isRetrying(tool)
+    val humanLabel = ExpressiveActivityClassifier.humanize(tool)
 
     val colors = AppTheme.colors
 
@@ -1290,12 +1423,16 @@ fun ToolExecutionCard(
     }
 
     val statusText = when {
+        isRetrying -> "Retrying"
         isRunning -> "Running"
+        isCancelled -> "Cancelled"
         isError -> "Failed"
         else -> "Complete"
     }
 
-    val hasDetails = !tool.output.isNullOrBlank() || !tool.error.isNullOrBlank() || !tool.spoken.isNullOrBlank() || threadRef != null || (isError && onErrorTap != null)
+    val hasDetails = !tool.output.isNullOrBlank() || !tool.error.isNullOrBlank() ||
+        !tool.spoken.isNullOrBlank() || !tool.label.isNullOrBlank() || threadRef != null ||
+        (isError && onErrorTap != null)
 
     Column(
         modifier = modifier
@@ -1309,7 +1446,11 @@ fun ToolExecutionCard(
                         role = Role.Button,
                         onClick = {
                             haptics.play(TactileAction.TOGGLE_ACTIVITY_RUN)
-                            expanded = !expanded
+                            if (isPreview && openToolDetailsSheet != null) {
+                                openToolDetailsSheet(tool)
+                            } else {
+                                expanded = !expanded
+                            }
                         },
                     )
                 } else {
@@ -1318,7 +1459,7 @@ fun ToolExecutionCard(
             )
             .padding(horizontal = 12.dp, vertical = 10.dp)
             .semantics(mergeDescendants = true) {
-                contentDescription = "Tool ${tool.name}, $statusText${durationText?.let { ", took $it" } ?: ""}"
+                contentDescription = "$humanLabel, ${statusText.lowercase()}${durationText?.let { ", took $it" } ?: ""}"
             },
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -1344,8 +1485,8 @@ fun ToolExecutionCard(
             }
 
             Text(
-                text = tool.name,
-                style = AppType.codeBold,
+                text = humanLabel,
+                style = AppType.bodyEmphasized,
                 color = colors.textPrimary,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -1412,12 +1553,31 @@ fun ToolExecutionCard(
                     .padding(top = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                // The summary is for people; the raw provider identifier and
+                // input stay here, where someone diagnosing a step expects
+                // them. This is the one surface allowed to be technical.
+                Text(
+                    text = "Tool · ${tool.name}",
+                    style = AppType.code,
+                    color = colors.textTertiary,
+                )
                 val spoken = tool.spoken
                 if (!spoken.isNullOrBlank()) {
                     Text(
                         text = spoken,
                         style = AppType.secondary,
                         color = colors.textSecondary,
+                    )
+                }
+
+                val input = tool.input
+                if (!input.isNullOrBlank()) {
+                    Text(
+                        text = input,
+                        style = AppType.code,
+                        color = colors.textSecondary,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
 
@@ -1506,19 +1666,29 @@ private fun ActivityChip(
     threadRef: ThreadRef? = null,
     openThread: ((ThreadRef) -> Unit)? = null,
     onErrorTap: (() -> Unit)? = null,
+    openToolDetailsSheet: ((ToolActivity) -> Unit)? = null,
 ) {
     if (tool == null) return
     val haptics = rememberHaptics()
+    val isPreview = LocalContext.current.packageName.endsWith(".preview")
     var expanded by remember(tool.name, tool.durationMs) { mutableStateOf(false) }
-    val isRunning = tool.ok == null
-    val isError = tool.ok == false
+    val isRunning = ExpressiveActivityClassifier.isRunning(tool)
+    val isError = ExpressiveActivityClassifier.isFailed(tool)
+    val isCancelled = ExpressiveActivityClassifier.isCancelled(tool)
+    val isRetrying = ExpressiveActivityClassifier.isRetrying(tool)
+    val humanLabel = ExpressiveActivityClassifier.humanize(tool)
     val durationText = tool.durationMs?.let { ms ->
         if (ms >= 1000) String.format(java.util.Locale.US, "%.1fs", ms / 1000f) else "${ms}ms"
     }
-    val label = when {
-        isRunning -> "Running ${tool.name}..."
-        isError -> "${tool.name} failed"
-        else -> "Ran ${tool.name}${durationText?.let { " · $it" } ?: ""}"
+    val label = buildString {
+        append(humanLabel)
+        when {
+            isRetrying -> append(" — retrying")
+            isRunning -> append("…")
+            isError -> append(" — failed")
+            isCancelled -> append(" — cancelled")
+        }
+        durationText?.let { append(" · $it") }
     }
 
     Column(
@@ -1538,19 +1708,30 @@ private fun ActivityChip(
                 )
                 .clickable(role = Role.Button) {
                     haptics.play(TactileAction.TOGGLE_ACTIVITY_RUN)
-                    expanded = !expanded
+                    if (isPreview && openToolDetailsSheet != null) {
+                        openToolDetailsSheet(tool)
+                    } else {
+                        expanded = !expanded
+                    }
                 }
                 .padding(horizontal = 12.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (isRunning) {
+            if (isRunning || isRetrying) {
                 CircularProgressIndicator(modifier = Modifier.size(13.dp), strokeWidth = 1.5.dp)
             } else if (isError) {
                 Icon(
                     imageVector = Icons.Filled.Warning,
                     contentDescription = null,
                     tint = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.size(14.dp),
+                )
+            } else if (isCancelled) {
+                Icon(
+                    imageVector = Icons.Filled.Close,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(14.dp),
                 )
             } else {
@@ -1574,6 +1755,7 @@ private fun ActivityChip(
                 threadRef = threadRef,
                 openThread = openThread,
                 onErrorTap = onErrorTap,
+                openToolDetailsSheet = openToolDetailsSheet,
             )
         }
     }
@@ -1679,21 +1861,142 @@ fun ActivityRunChip(items: List<Message>, openThread: ((ThreadRef) -> Unit)? = n
 /** The receipt's status dot, sized to sit level with the 13 sp name beside it. */
 private val ACTIVITY_DOT = 7.dp
 
+internal fun sanitizeInternalPaths(text: String): String {
+    if (text.isBlank()) return text
+    var res = text
+    // Replace full task-workspaces internal paths:
+    // e.g. /data/user/0/com.openmausbot.companion.preview/files/host/data/task-workspaces/386ebf45-0551-4d1a-ad67-b50a04918e7c/data/test.txt
+    // -> data/test.txt (or test.txt)
+    res = res.replace(Regex("""/data/(?:user/\d+|data)/[^/\s'"]+/files/host/(?:data/)?(?:task-workspaces|workspaces)/[a-f0-9-]+/?(?:data/)?(?:\./)?""", RegexOption.IGNORE_CASE), "")
+    // Replace any leftover app host internal paths:
+    res = res.replace(Regex("""/data/(?:user/\d+|data)/[^/\s'"]+/files/host/?""", RegexOption.IGNORE_CASE), "")
+    res = res.replace(Regex("""/data/(?:user/\d+|data)/[^/\s'"]+/?""", RegexOption.IGNORE_CASE), "")
+    // Replace UUIDs if they stand alone in paths or strings
+    res = res.replace(Regex("""[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}""", RegexOption.IGNORE_CASE), "workspace")
+    return res.trim()
+}
+
+internal fun humanizeApprovalTitle(rawTitle: String, rawSubtitle: String, tool: String?): String {
+    val normTool = (tool ?: rawTitle)
+        .removePrefix("mcp__android_computer__")
+        .removePrefix("mcp__android_browser__")
+        .removePrefix("mcp__openmausbot-phone__")
+        .removePrefix("mcp__")
+        .removePrefix("android_computer_")
+        .removePrefix("android_browser_")
+        .removePrefix("phone_")
+        .lowercase(java.util.Locale.US)
+        .trim()
+    val normSub = rawSubtitle.lowercase(java.util.Locale.US)
+
+    return when {
+        normTool.contains("session_search") || normSub.contains("session_search") -> "Search Project Activity"
+        normTool.contains("select_computer") || normSub.contains("select_computer") -> "Connect Computer Workspace"
+        normTool.contains("workspace_list") || normTool.contains("list_files") || normSub.contains("workspace_list") -> "Inspect Workspace"
+        normTool.contains("workspace_read") || normTool.contains("read_file") || (normSub.startsWith("read ") && !normSub.contains("screen")) -> "Read File"
+        normTool.contains("workspace_write") || normTool.contains("write_file") || normSub.startsWith("write ") -> "Create File"
+        normTool.contains("workspace_delete") || normTool.contains("delete_file") || normSub.startsWith("delete ") -> "Delete File"
+        normTool.contains("artifact_register") || normTool.contains("register_artifact") || normSub.contains("artifact_register") -> "Register Deliverable"
+        normTool.contains("read_screen") || normSub.contains("read_screen") -> "Inspect Screen"
+        normTool.contains("screenshot") || normSub.contains("screenshot") -> "Take Screenshot"
+        normTool.contains("gmail") || normSub.contains("gmail") -> {
+            if (normTool.contains("send") || normSub.contains("send")) "Send Email"
+            else if (normTool.contains("draft") || normSub.contains("draft")) "Create Email Draft"
+            else "Access Gmail"
+        }
+        normTool.contains("shell") || normTool.contains("bash") || normTool.contains("terminal") || normTool.contains("run_command") || normTool.contains("run_shell") || normSub.startsWith("run ") -> "Execute Command"
+        rawTitle.contains("/data/") || rawTitle.contains("task-workspaces") || rawTitle.contains("files/host") -> {
+            if (rawTitle.startsWith("Read", ignoreCase = true)) "Read File"
+            else if (rawTitle.startsWith("Write", ignoreCase = true)) "Create File"
+            else if (rawTitle.startsWith("Delete", ignoreCase = true)) "Delete File"
+            else "Execute Command"
+        }
+        rawTitle.isNotBlank() && !rawTitle.startsWith("{") && !rawTitle.contains("_") -> sanitizeInternalPaths(rawTitle)
+        else -> "Action Approval Required"
+    }
+}
+
+internal fun humanizeApprovalSubtitle(rawSubtitle: String, tool: String?): String {
+    val normTool = (tool ?: "")
+        .removePrefix("mcp__android_computer__")
+        .removePrefix("mcp__android_browser__")
+        .removePrefix("mcp__openmausbot-phone__")
+        .removePrefix("mcp__")
+        .removePrefix("android_computer_")
+        .removePrefix("android_browser_")
+        .removePrefix("phone_")
+        .lowercase(java.util.Locale.US)
+        .trim()
+    val lowerSub = rawSubtitle.lowercase(java.util.Locale.US)
+
+    return when {
+        normTool.contains("session_search") || lowerSub.contains("session_search") ->
+            "MOBOT wants to search your recent project files and session history."
+        normTool.contains("select_computer") || lowerSub.contains("select_computer") ->
+            "MOBOT wants to connect to your computer workspace."
+        normTool.contains("workspace_list") || lowerSub.contains("workspace_list") ->
+            "MOBOT wants to inspect the files in your workspace."
+        normTool.contains("workspace_read") || normTool.contains("read_file") || (lowerSub.startsWith("read ") && !lowerSub.contains("screen")) ->
+            "MOBOT wants to read a file in your workspace."
+        normTool.contains("workspace_write") || normTool.contains("write_file") || lowerSub.startsWith("write ") ->
+            "MOBOT wants to create or modify a file in your workspace."
+        normTool.contains("workspace_delete") || lowerSub.startsWith("delete ") ->
+            "MOBOT wants to delete a file in your workspace."
+        normTool.contains("artifact_register") || lowerSub.contains("artifact_register") ->
+            "MOBOT wants to register a generated deliverable."
+        normTool.contains("shell") || normTool.contains("bash") || normTool.contains("terminal") || normTool.contains("run_shell") || normTool.contains("run_command") || lowerSub.startsWith("run ") ->
+            "MOBOT wants to execute a terminal command in your workspace."
+        normTool.contains("read_screen") || lowerSub.contains("read_screen") ->
+            "MOBOT wants to inspect the current screen."
+        normTool.contains("screenshot") || lowerSub.contains("screenshot") ->
+            "MOBOT wants to take a screenshot of your screen."
+        normTool.contains("gmail") || lowerSub.contains("gmail") -> {
+            if (normTool.contains("send") || lowerSub.contains("send")) "MOBOT wants to send an email."
+            else if (normTool.contains("draft") || lowerSub.contains("draft")) "MOBOT wants to create an email draft."
+            else "MOBOT wants to access your Gmail account."
+        }
+        else -> {
+            val clean = formatCleanSubtitle(rawSubtitle)
+            if (clean.isNotBlank() && !clean.contains("\n") && clean.length <= 80) clean
+            else "MOBOT requires authorization before proceeding with this operation."
+        }
+    }
+}
+
 internal fun formatCleanSubtitle(raw: String): String {
-    val trimmed = raw.trim()
+    val sanitized = sanitizeInternalPaths(raw)
+    val trimmed = sanitized.trim()
     if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
         try {
             val json = org.json.JSONObject(trimmed)
             val parts = mutableListOf<String>()
             val keys = json.keys()
-            while (keys.hasNext()) {
-                val k = keys.next()
-                if (!k.startsWith("_") && k != "transport" && k != "connector") {
-                    parts.add("$k: ${json.opt(k)}")
+            if (keys != null) {
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    if (!k.startsWith("_") && k != "transport" && k != "connector") {
+                        val v = sanitizeInternalPaths(json.optString(k, ""))
+                        parts.add("$k: $v")
+                    }
                 }
+                if (parts.isNotEmpty()) return parts.joinToString(" • ")
             }
-            if (parts.isNotEmpty()) return parts.joinToString(" • ")
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
+
+        val inner = trimmed.removeSurrounding("{", "}").trim()
+        if (inner.isNotEmpty()) {
+            val pairs = inner.split(',').mapNotNull { pair ->
+                val kv = pair.split(':', limit = 2)
+                if (kv.size == 2) {
+                    val k = kv[0].trim().removeSurrounding("\"")
+                    val v = sanitizeInternalPaths(kv[1].trim().removeSurrounding("\""))
+                    if (!k.startsWith("_") && k != "transport" && k != "connector") {
+                        "$k: $v"
+                    } else null
+                } else null
+            }
+            if (pairs.isNotEmpty()) return pairs.joinToString(" • ")
+        }
     } else if (trimmed.contains("Requested permissions: {")) {
         try {
             val start = trimmed.indexOf('{')
@@ -1702,14 +2005,28 @@ internal fun formatCleanSubtitle(raw: String): String {
                 val json = org.json.JSONObject(trimmed.substring(start, end + 1))
                 val keys = mutableListOf<String>()
                 val it = json.keys()
-                while (it.hasNext()) keys.add(it.next())
+                if (it != null) {
+                    while (it.hasNext()) keys.add(it.next())
+                }
                 val prefix = trimmed.substring(0, start).trim().removeSuffix("—").trim()
                 val prefixStr = if (prefix.isNotEmpty()) "$prefix: " else ""
-                return "${prefixStr}Permissions: ${keys.joinToString(", ")}"
+                if (keys.isNotEmpty()) {
+                    return "${prefixStr}Permissions: ${keys.joinToString(", ")}"
+                }
             }
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
     return trimmed
+}
+
+internal fun formatApprovalDetail(rawSubtitle: String, tool: String?): String {
+    val sanitized = sanitizeInternalPaths(rawSubtitle)
+    val beforeArgs = sanitized.substringBefore("\n\nArguments:").substringBefore("\nArguments:").trim()
+    return if (beforeArgs.isNotBlank() && !beforeArgs.startsWith("{")) {
+        beforeArgs
+    } else {
+        humanizeApprovalSubtitle(rawSubtitle, tool)
+    }
 }
 
 /**
@@ -1717,12 +2034,121 @@ internal fun formatCleanSubtitle(raw: String): String {
  * companion exists for — a bot stopped, and only a person can let it continue.
  */
 @Composable
-private fun CardView(chat: Chat, message: Message, haptics: Haptics) {
+private fun CardView(
+    chat: Chat,
+    message: Message,
+    haptics: Haptics,
+    openApprovalSheet: ((OptionCard, Message) -> Unit)? = null,
+) {
     val card = message.card ?: return
     val session = LocalCompanion.current.session
     val scope = rememberCoroutineScope()
+    val isPreview = LocalContext.current.packageName.endsWith(".preview")
     var answering by remember(message.id) { mutableStateOf(false) }
     val skillRequest = card.skillRequest
+
+    if (isPreview) {
+        // Critical requirement 1: Resolved approval cards must disappear immediately
+        if (!card.isPending && (card.isPermission || card.requestId != null)) {
+            return
+        }
+
+        if (card.isPending) {
+            val humanTitle = humanizeApprovalTitle(card.title, card.subtitle, card.tool)
+            val humanSubtitle = humanizeApprovalSubtitle(card.subtitle, card.tool)
+            val isReadOnly = card.title.contains("Read", ignoreCase = true) ||
+                card.title.contains("Search", ignoreCase = true) ||
+                card.title.contains("Inspect", ignoreCase = true) ||
+                humanTitle.contains("Search", ignoreCase = true) ||
+                humanTitle.contains("Inspect", ignoreCase = true)
+
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f, fill = false),
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Lock,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(18.dp),
+                            )
+                            Text(
+                                text = humanTitle,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+
+                        val badgeText = if (isReadOnly) "Read-only" else "Action"
+                        val badgeBg = if (isReadOnly) Color(0xFF10B981).copy(alpha = 0.15f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+                        val badgeColor = if (isReadOnly) Color(0xFF10B981) else MaterialTheme.colorScheme.primary
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = badgeBg,
+                        ) {
+                            Text(
+                                text = badgeText,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Medium,
+                                color = badgeColor,
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = humanSubtitle,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+
+                    // Single action: "Review Request"
+                    FilledTonalButton(
+                        onClick = {
+                            haptics.play(TactileAction.TOGGLE_ACTIVITY_RUN)
+                            openApprovalSheet?.invoke(card, message)
+                        },
+                        modifier = Modifier.fillMaxWidth().height(42.dp),
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        ),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Lock,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "Review Request",
+                            style = MaterialTheme.typography.labelLarge,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+            }
+            return
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -1837,6 +2263,33 @@ private fun CardView(chat: Chat, message: Message, haptics: Haptics) {
         }
 
         if (card.isPending) {
+            if (isPreview && openApprovalSheet != null) {
+                FilledTonalButton(
+                    onClick = {
+                        haptics.play(TactileAction.TOGGLE_ACTIVITY_RUN)
+                        openApprovalSheet(card, message)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(42.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.filledTonalButtonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    ),
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Lock,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        "Review Details & Authorize",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                }
+            }
+
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 // The buttons are the card's own options, never a string
                 // invented here. Session maps the choice to allow/deny/answer.
@@ -1997,7 +2450,7 @@ private sealed interface ScreenShotState {
  */
 @Composable
 fun StreamingBubble(text: String?, reasoning: String?) {
-    val bubbleShape = RoundedCornerShape(18.dp)
+    val bubbleShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 4.dp, bottomEnd = 20.dp)
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
         Column(
             modifier = Modifier
@@ -2052,7 +2505,7 @@ fun WorkingBubble(name: String, color: String) {
     val tint = Color(MausPalette.argb(color))
     val label = LiveTail.workingLabel(name)
     val colors = AppTheme.colors
-    val bubbleShape = RoundedCornerShape(18.dp)
+    val bubbleShape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 4.dp, bottomEnd = 20.dp)
 
     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
         Row(

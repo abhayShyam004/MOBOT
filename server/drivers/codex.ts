@@ -38,6 +38,7 @@ import { codexDeveloperInstructions, syncCodexInstructions } from "./codex-instr
 import type { ApprovalMode } from "../../shared/approval-mode.ts";
 import { CodexNativeAuthController, readCodexSignIn } from "./codex-native-auth.ts";
 import { createCodexNativeRuntime } from "./codex-native-runtime.ts";
+import { resolveProviderTestEnvelope } from "../provider-test-envelope.ts";
 import { codexAccountEmail } from "./codex-identity.ts";
 import { classifyResumeFailure, mayReplay, recoveryPromptFor } from "../resume-recovery.ts";
 
@@ -595,9 +596,17 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
     // CLI (the Android harness) turns run through the ChatGPT backend with
     // the same OAuth tokens, so signing in yields a model provider that can
     // actually answer rather than a permanently unavailable one.
+    // Only a preview build supplies this (an adb global setting the app reads
+    // and the agent's shell cannot write); it can shorten the provider budgets
+    // and point at a private endpoint, never a public one. See
+    // server/provider-test-envelope.ts.
+    const providerTest = resolveProviderTestEnvelope();
     const nativeRuntime = createCodexNativeRuntime({
       environment: childEnv,
       models: () => models,
+      ...(providerTest.responsesUrl ? { responsesUrl: providerTest.responsesUrl } : {}),
+      ...(providerTest.timeoutPolicy ? { timeoutPolicy: providerTest.timeoutPolicy } : {}),
+      ...(providerTest.retryBudgetMs !== undefined ? { retryBudgetMs: providerTest.retryBudgetMs } : {}),
     });
     // One CLI probe, shared by create's capability decision and snapshot():
     // the binary's presence is a host fact that changes at install time, not
@@ -673,7 +682,18 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
       const approvalMode: ApprovalMode = turn.approvalMode ?? (config.fullAuto ? "full" : "ask");
       for (const [name, server] of Object.entries(turn.integrations?.custom ?? {})) {
         if ("url" in server) continue;
-        const reserved = Object.keys(server.env).find(isHarnessOwnedMcpEnvName);
+        // The harness itself stamps the calling bot and thread identities onto
+        // the computer/browser servers after reading the user's config (see
+        // server/index.ts), so those exact values are not user-supplied
+        // overrides and must not reject the server. Any other reserved name,
+        // or an identity that disagrees with this turn, still does.
+        const isHarnessServer = name === "android_browser" || name === "android_computer";
+        const reserved = Object.keys(server.env).find(
+          (key) => isHarnessOwnedMcpEnvName(key) && !(isHarnessServer && (
+            (key === "OMB_BOT_ID" && Boolean(turn.botId) && server.env[key] === turn.botId) ||
+            (name === "android_computer" && key === "OMB_THREAD_ID" && server.env[key] === turn.threadId)
+          )),
+        );
         if (reserved) {
           throw new Error(`Custom MCP server “${name}” cannot set reserved environment variable “${reserved}”`);
         }
@@ -1139,13 +1159,22 @@ export const CodexDriver: ProviderDriver<CodexConfig> = {
                 });
               }
             } else if (["commandExecution", "fileChange", "mcpToolCall", "webSearch"].includes(item.type)) {
+              const rawResult = item.type === "commandExecution"
+                ? item.aggregatedOutput
+                : item.type === "mcpToolCall"
+                  ? item.error ?? item.result
+                  : item.type === "fileChange"
+                    ? item.changes
+                    : item.action;
+              const rawStr = typeof rawResult === "string" ? rawResult : rawResult !== undefined ? JSON.stringify(rawResult) : undefined;
               emit({
                 ...base(threadId, turnId),
                 type: "item.completed",
                 itemType: "tool",
                 itemId: item.id,
                 ok: item.status !== "failed" && item.status !== "declined",
-                output: toolDetailPreview(item.type === "commandExecution" ? { output: item.aggregatedOutput, exitCode: item.exitCode } : item.type === "mcpToolCall" ? item.error ?? item.result : item.type === "fileChange" ? item.changes : item.action),
+                output: toolDetailPreview(item.type === "commandExecution" ? { output: item.aggregatedOutput, exitCode: item.exitCode } : rawResult),
+                ...(rawStr !== undefined ? { rawOutput: rawStr } : {}),
               });
             } else if (item.type === "reasoning") {
               emit({ ...base(threadId, turnId), type: "item.updated", itemType: "reasoning", tokens: null });

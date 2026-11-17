@@ -162,6 +162,7 @@ describe("a room debate continues without the person prompting each reply", { ti
 
     try {
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0001",
         text: "Debate the merits of covered bridges with each other.",
       })).status).toBe(202);
 

@@ -20,7 +20,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -31,11 +30,19 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
@@ -78,26 +85,32 @@ fun SettingsSubPage(
     Column(
         modifier = modifier
             .fillMaxSize()
-            .background(AppTheme.colors.background),
+            .background(MaterialTheme.colorScheme.background),
     ) {
         // Pinned Top Navigation Bar
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
+                .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            IconButton(
-                onClick = onBack,
-                modifier = Modifier.size(42.dp),
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .clickable(role = Role.Button, onClickLabel = "Back", onClick = onBack),
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = "Back",
-                    tint = AppTheme.colors.textPrimary,
-                    modifier = Modifier.size(22.dp),
-                )
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                        contentDescription = "Back",
+                        tint = MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.size(20.dp),
+                    )
+                }
             }
             if (topAction != null) {
                 topAction()
@@ -158,18 +171,15 @@ private fun SettingsSubPageHeader(
         ) {
             Text(
                 text = title,
-                fontSize = 32.sp,
-                lineHeight = 36.sp,
+                style = MaterialTheme.typography.headlineLarge,
                 fontWeight = FontWeight.Bold,
-                color = AppTheme.colors.textPrimary,
-                letterSpacing = (-0.5).sp,
+                color = MaterialTheme.colorScheme.onSurface,
             )
             if (subtitle != null) {
                 Text(
                     text = subtitle,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Normal,
-                    color = AppTheme.colors.textSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }
@@ -198,41 +208,51 @@ fun SettingsSection(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         if (title != null) {
-            Text(
-                text = title,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = AppTheme.colors.textSecondary,
-                modifier = Modifier.padding(horizontal = 24.dp),
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.padding(start = 24.dp, end = 24.dp, top = 8.dp, bottom = 2.dp),
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(width = 3.5.dp, height = 15.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primary),
+                )
+                Text(
+                    text = title.uppercase(),
+                    style = MaterialTheme.typography.labelLarge,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    letterSpacing = 1.1.sp,
+                )
+            }
         }
-        Column(
+        Card(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp)
-                .clip(RoundedCornerShape(22.dp))
-                .background(AppTheme.colors.surface)
-                .border(
-                    width = 1.dp,
-                    color = AppTheme.colors.border.copy(alpha = 0.5f),
-                    shape = RoundedCornerShape(22.dp),
-                ),
+                .padding(horizontal = 16.dp),
+            shape = RoundedCornerShape(24.dp),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+            ),
         ) {
-            content()
+            Column(modifier = Modifier.fillMaxWidth()) {
+                content()
+            }
         }
     }
 }
 
 /**
- * Standard settings row supporting:
- * - Leading icon or avatar badge
- * - Title and subtitle
- * - Trailing value text
+ * Material 3 Expressive settings preference row supporting:
+ * - Expressive leading icon inside a tonal squircle container
+ * - Title and supporting text
+ * - Trailing value chip
  * - Navigation chevron
- * - Switch toggle
- * - Checkmark selection indicator
- * - Destructive or disabled state
- * - Busy spinner
+ * - M3 Switch with checkmark thumb icon
+ * - Selection indicator
+ * - Destructive and disabled states
  */
 @Composable
 fun SettingsRow(
@@ -256,110 +276,147 @@ fun SettingsRow(
         Modifier
     }
 
-    Row(
+    ListItem(
         modifier = modifier
             .fillMaxWidth()
-            .heightIn(min = 60.dp)
-            .then(clickableModifier)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (leadingIcon != null) {
-            leadingIcon()
-        }
-
-        Column(
-            modifier = Modifier.weight(1f),
-            verticalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
+            .then(clickableModifier),
+        colors = ListItemDefaults.colors(
+            containerColor = Color.Transparent,
+        ),
+        leadingContent = if (leadingIcon != null) {
+            {
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    modifier = Modifier.size(42.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        leadingIcon()
+                    }
+                }
+            }
+        } else null,
+        headlineContent = {
             Text(
                 text = title,
-                fontSize = 15.5.sp,
+                style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.SemiBold,
                 color = when {
                     destructive -> MaterialTheme.colorScheme.error
-                    !enabled -> AppTheme.colors.textTertiary
-                    else -> AppTheme.colors.textPrimary
+                    !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
+                    else -> MaterialTheme.colorScheme.onSurface
                 },
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
-            if (subtitle != null) {
+        },
+        supportingContent = if (subtitle != null) {
+            {
                 Text(
                     text = subtitle,
-                    fontSize = 13.sp,
-                    color = AppTheme.colors.textSecondary,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
             }
-        }
+        } else null,
+        trailingContent = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (trailingValue != null) {
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                    ) {
+                        Text(
+                            text = trailingValue,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
+                        )
+                    }
+                }
 
-        if (trailingValue != null) {
-            Text(
-                text = trailingValue,
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Normal,
-                color = AppTheme.colors.textTertiary,
-            )
-        }
-
-        when {
-            busy -> {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(16.dp),
-                    strokeWidth = 2.dp,
-                    color = AppTheme.colors.textTertiary,
-                )
+                when {
+                    busy -> {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                    checked != null -> {
+                        Switch(
+                            checked = checked,
+                            onCheckedChange = onCheckedChange,
+                            enabled = enabled,
+                            thumbContent = if (checked) {
+                                { Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(SwitchDefaults.IconSize)) }
+                            } else null,
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+                                checkedTrackColor = MaterialTheme.colorScheme.primary,
+                                uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+                                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            ),
+                        )
+                    }
+                    selected == true -> {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.size(28.dp),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Selected",
+                                    tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                        }
+                    }
+                    showChevron -> {
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            modifier = Modifier.size(28.dp),
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                        }
+                    }
+                }
             }
-            checked != null -> {
-                Switch(
-                    checked = checked,
-                    onCheckedChange = onCheckedChange,
-                    enabled = enabled,
-                    colors = SwitchDefaults.colors(
-                        checkedThumbColor = Color.White,
-                        checkedTrackColor = Color(0xFF1E88E5),
-                        uncheckedThumbColor = AppTheme.colors.textSecondary,
-                        uncheckedTrackColor = AppTheme.colors.surfaceRaised,
-                    ),
-                )
-            }
-            selected == true -> {
-                Icon(
-                    imageVector = Icons.Default.Check,
-                    contentDescription = "Selected",
-                    tint = Color(0xFF1E88E5),
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-            showChevron -> {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = AppTheme.colors.textTertiary.copy(alpha = 0.7f),
-                    modifier = Modifier.size(20.dp),
-                )
-            }
-        }
-    }
-}
-
-/**
- * Clean indented row divider matching Settings specifications.
- */
-@Composable
-fun SettingsDivider(indent: Dp = 68.dp) {
-    HorizontalDivider(
-        modifier = Modifier.padding(start = indent, end = 16.dp),
-        thickness = 0.5.dp,
-        color = AppTheme.colors.divider.copy(alpha = 0.6f),
+        },
     )
 }
 
 /**
- * Segmented selection row (e.g., Light / System / Dark, permission modes, etc.)
+ * Clean subtle divider inside Material 3 settings cards.
+ */
+@Composable
+fun SettingsDivider(indent: Dp = 16.dp) {
+    HorizontalDivider(
+        modifier = Modifier.padding(horizontal = indent),
+        thickness = 0.8.dp,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+    )
+}
+
+/**
+ * Material 3 Expressive segmented button choice row.
  */
 @Composable
 fun SettingsChoiceRow(
@@ -376,46 +433,36 @@ fun SettingsChoiceRow(
         if (label != null) {
             Text(
                 text = label,
-                fontSize = 14.sp,
+                style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.SemiBold,
-                color = AppTheme.colors.textSecondary,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(14.dp))
-                .background(AppTheme.colors.surfaceRaised)
-                .padding(3.dp),
-            horizontalArrangement = Arrangement.spacedBy(3.dp),
+        SingleChoiceSegmentedButtonRow(
+            modifier = Modifier.fillMaxWidth(),
         ) {
             options.forEachIndexed { index, option ->
-                val selected = index == selectedIndex
-                Text(
-                    text = option,
-                    fontSize = 14.sp,
-                    fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-                    color = if (selected) AppTheme.colors.textPrimary else AppTheme.colors.textSecondary,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(11.dp))
-                        .background(if (selected) AppTheme.colors.surface else Color.Transparent)
-                        .selectable(
-                            selected = selected,
-                            role = Role.RadioButton,
-                            onClick = { onSelect(index) },
-                        )
-                        .padding(vertical = 10.dp),
-                )
+                SegmentedButton(
+                    selected = index == selectedIndex,
+                    onClick = { onSelect(index) },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                    icon = {
+                        SegmentedButtonDefaults.Icon(active = index == selectedIndex)
+                    },
+                    colors = SegmentedButtonDefaults.colors(
+                        activeContainerColor = MaterialTheme.colorScheme.primaryContainer,
+                        activeContentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    ),
+                ) {
+                    Text(text = option, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
         }
     }
 }
 
 /**
- * Card surface for standalone settings content, statistics, or custom forms.
+ * Material 3 Expressive Card surface for standalone settings content.
  */
 @Composable
 fun SettingsCard(
@@ -424,35 +471,38 @@ fun SettingsCard(
     subtitle: String? = null,
     content: @Composable (ColumnScope.() -> Unit)? = null,
 ) {
-    Column(
+    Card(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(22.dp))
-            .background(AppTheme.colors.surface)
-            .border(
-                width = 1.dp,
-                color = AppTheme.colors.border.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(22.dp),
-            )
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+            .padding(horizontal = 16.dp),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        ),
     ) {
-        if (title != null) {
-            Text(
-                text = title,
-                fontSize = 15.5.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = AppTheme.colors.textPrimary,
-            )
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            if (title != null) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            content?.invoke(this)
         }
-        if (subtitle != null) {
-            Text(
-                text = subtitle,
-                fontSize = 13.sp,
-                color = AppTheme.colors.textSecondary,
-            )
-        }
-        content?.invoke(this)
     }
 }
 
@@ -469,29 +519,24 @@ fun SettingsSearchBar(
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(AppTheme.colors.surface)
-            .border(
-                width = 1.dp,
-                color = AppTheme.colors.border.copy(alpha = 0.5f),
-                shape = RoundedCornerShape(16.dp),
-            )
-            .padding(horizontal = 14.dp, vertical = 11.dp),
+            .clip(RoundedCornerShape(20.dp))
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         Icon(
             imageVector = Icons.Default.Search,
             contentDescription = "Search",
-            tint = AppTheme.colors.textTertiary,
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.size(20.dp),
         )
         Box(modifier = Modifier.weight(1f)) {
             if (query.isEmpty()) {
                 Text(
                     text = placeholder,
-                    color = AppTheme.colors.textTertiary,
-                    fontSize = 14.5.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 15.sp,
                 )
             }
             BasicTextField(
@@ -499,10 +544,10 @@ fun SettingsSearchBar(
                 onValueChange = onQueryChange,
                 singleLine = true,
                 textStyle = TextStyle(
-                    color = AppTheme.colors.textPrimary,
-                    fontSize = 14.5.sp,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontSize = 15.sp,
                 ),
-                cursorBrush = SolidColor(AppTheme.colors.textPrimary),
+                cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -514,7 +559,7 @@ fun SettingsSearchBar(
                 Icon(
                     imageVector = Icons.Default.Close,
                     contentDescription = "Clear",
-                    tint = AppTheme.colors.textTertiary,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(16.dp),
                 )
             }

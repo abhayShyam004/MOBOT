@@ -600,6 +600,46 @@ describe('DeviceCapabilityRegistry (Phase P)', () => {
       }
     });
 
+    it('does not let a greeting prefix swallow a substantive request', () => {
+      const resolve = (objective: string, activeBotName?: string) => registry.matchCapability({
+        objective,
+        contextKeywords: [],
+        requiredDataFreshness: 'static',
+        targetDevice: 'android_local',
+        activeBotId: 'bot-greeting-audit',
+        ...(activeBotName ? { activeBotName } : {}),
+      });
+
+      for (const greeting of ['yo', 'hey', 'hello', "what's up"]) {
+        expect(resolve(greeting).chosenModality).toBe('direct_answer');
+      }
+      // A named greeting is still a greeting when the name is the active bot's.
+      expect(resolve('yo panko', 'Panko').chosenModality).toBe('direct_answer');
+
+      // The greeting prefix is framing, not the request: adding one must not
+      // change the modality of the request behind it.
+      for (const request of [
+        'explain quantum physics',
+        'hey can you explain quantum physics',
+        'yo explain quantum physics',
+      ]) {
+        expect(resolve(request).chosenModality).toBe('direct_answer');
+      }
+
+      const equivalentRequests: Array<[string, string]> = [
+        ['hey can you explain quantum physics', 'can you explain quantum physics'],
+        ['yo explain quantum physics', 'explain quantum physics'],
+        ['hello, explain quantum physics', 'explain quantum physics'],
+        ['hey write a Python script', 'write a Python script'],
+        ['yo, search for recent research papers', 'search for recent research papers'],
+      ];
+      for (const [prefixed, bare] of equivalentRequests) {
+        const resolution = resolve(prefixed);
+        expect(resolution.chosenModality, prefixed).toBe(resolve(bare).chosenModality);
+        expect(resolution.justification, prefixed).not.toContain('Conversational greeting');
+      }
+    });
+
     it('3. Behavioral Test (mobot_54_phases_prompt.md:802): Ask "What were the top tech headlines today?"; verify system automatically routes to search/browser rather than direct generation', async () => {
       const canonicalQuery = 'What were the top tech headlines today?';
 

@@ -1177,16 +1177,20 @@ export class ConversationalAppBuilder {
       this.projectManager.writeFile(projectId, "style.css", newCss);
     }
 
-    // Recommit revision in git
+    // Record the revision where possible; do not hide Git failures from the user.
+    let commitWarning = "";
     try {
       this.projectManager.gitCommit(projectId, `Revise: ${revisionInstruction}`);
-    } catch {}
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      commitWarning = ` The revision is not committed to Git: ${detail}`;
+    }
 
     // Restart preview
     const preview = await this.projectManager.startPreview(projectId);
 
     return {
-      message: `Updated "${project.name}" based on your feedback: "${revisionInstruction}". Preview is refreshed at ${preview.url}.`,
+      message: `Updated "${project.name}" based on your feedback: "${revisionInstruction}". Preview is refreshed at ${preview.url}.${commitWarning}`,
       status: "preview_ready",
       previewUrl: preview.url,
       actions: ["Preview", "Open in Browser", "Deploy", "Further Revisions"],

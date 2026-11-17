@@ -1,7 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { execFileSync } from "node:child_process";
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -113,6 +113,41 @@ describe("android-computer MCP server (stdio contract)", () => {
     expect(result.isError).toBe(true);
     return JSON.parse(result.content[0].text);
   }
+
+  /**
+   * A project build is spawned by this process (ProjectManager), not by the bot
+   * terminal — and the harness starts this process with
+   * `PATH = nativeLibraryDir:/system/bin` (HarnessHost.kt), where nothing is
+   * named `npm`. Spawned that way, `build_run` answered "npm: not found" while
+   * `run_shell` worked, so the lifecycle could create a project and write its
+   * files but never build or test it. The adapter now puts the runtime it
+   * publishes on its own PATH, and this pins that: running under the dev host's
+   * PATH instead would hide the defect, because the host has npm of its own.
+   */
+  it("resolves npm for a build the lifecycle spawns, with the harness PATH", async () => {
+    child.kill("SIGKILL");
+    const systemBin = join(workspace, "fake-system-bin");
+    mkdirSync(systemBin, { recursive: true });
+    spawnAdapter({ PATH: systemBin });
+    await initialize();
+
+    await call("project_create", { name: "Npm Path Probe", id: "npm-path-probe", initGit: false });
+
+    // The contract: a build's child process inherits a PATH that carries the
+    // runtime the adapter published, which is the only reason npm resolves on a
+    // device. Asserting the child's own PATH pins that; the dev host's PATH
+    // cannot stand in for it, because the host resolves npm on its own.
+    const probe = await call("build_run", {
+      projectId: "npm-path-probe",
+      command: `node -e "console.log('CHILD_PATH=' + process.env.PATH)"`,
+    });
+    expect(probe.exitCode, `stderr: ${probe.stderr}`).toBe(0);
+    expect(String(probe.stdout)).toContain(join(workspace, ".omb-bin"));
+
+    const build = await call("build_run", { projectId: "npm-path-probe", command: "npm run build" });
+    expect(build.exitCode, `stderr: ${build.stderr}`).toBe(0);
+    expect(String(build.stdout)).toContain("Build verified");
+  });
 
   it("initializes and lists the full tool catalog", async () => {
     await initialize();
@@ -289,6 +324,165 @@ describe("android-computer MCP server (stdio contract)", () => {
     const result = await call("run_command", { command: "sleep", args: ["30"], timeoutMs: 500 });
     expect(result.timedOut).toBe(true);
     expect(Date.now() - started).toBeLessThan(10_000);
+  }, 20_000);
+
+  it("applies real resource ceilings to every shell command", async () => {
+    await initialize();
+    // `ulimit` is the one part of this boundary the kernel enforces; pin the
+    // numbers so a later prelude edit cannot silently drop them to unlimited.
+    // `-p` is the process limit Android's shell understands; `-u` is rejected
+    // outright there, so a `-u` line was silently skipped and the fork-bomb
+    // ceiling the docs promised never existed. The host running this suite
+    // may already cap processes below 4096, which is stricter, not a failure.
+    expect(SHELL_ULIMITS.some((line) => line.startsWith("ulimit -p 4096"))).toBe(true);
+    expect(SHELL_ULIMITS.some((line) => line.includes("ulimit -u"))).toBe(false);
+    const limits = await call("run_shell", { command: "ulimit -t; ulimit -f; ulimit -p; ulimit -c" });
+    const [cpu, file, procs, cores] = String(limits.stdout).split("\n");
+    expect([cpu, file, cores]).toEqual(["300", "1048576", "0"]);
+    expect(Number(procs)).toBeGreaterThan(0);
+    expect(Number(procs)).toBeLessThanOrEqual(4096);
+  });
+
+  it("refuses a command that names the app's credential store", async () => {
+    await initialize();
+    // A directory outside the workspace that holds a provider auth file, the
+    // shape of files/host/home on the phone. The refusal must hold even though
+    // `cat` is a routine program and even after a person taps Allow — it is
+    // enforced in the tool, where the model's text cannot reach.
+    const privateDir = mkdtempSync(join(tmpdir(), "omb-private-"));
+    mkdirSync(join(privateDir, ".codex"), { recursive: true });
+    writeFileSync(join(privateDir, ".codex", "auth.json"), '{"token":"sk-not-a-real-credential"}\n');
+    try {
+      const refused = await callErr("run_shell", { command: `cat ${privateDir}/.codex/auth.json` });
+      expect(refused.error).toMatch(/private credential store/i);
+      expect(JSON.stringify(refused)).not.toContain("sk-not-a-real-credential");
+      // The argv-spawned tool is the same reach with no shell, so it is guarded too.
+      const viaArgv = await callErr("run_command", { command: "cat", args: [`${privateDir}/.codex/auth.json`] });
+      expect(viaArgv.error).toMatch(/private credential store/i);
+
+      // Work inside the workspace stays ordinary, including a file that is
+      // merely NAMED like a credential (a project fixture).
+      const fixture = await call("run_shell", { command: "mkdir -p fixtures && echo '{}' > fixtures/auth.json && cat fixtures/auth.json" });
+      expect(fixture.exitCode).toBe(0);
+      expect(String(fixture.stdout).trim()).toBe("{}");
+      // Reading outside the workspace but not a credential is allowed here and
+      // asked about one layer up (tool-approval.ts), not refused.
+      writeFileSync(join(privateDir, "notes.txt"), "plain\n");
+      const outside = await call("run_shell", { command: `cat ${privateDir}/notes.txt` });
+      expect(String(outside.stdout).trim()).toBe("plain");
+    } finally {
+      rmSync(privateDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("refuses to delete files outside the workspace", async () => {
+    await initialize();
+    const outsideDir = mkdtempSync(join(tmpdir(), "omb-outside-"));
+    writeFileSync(join(outsideDir, "keep.txt"), "important\n");
+    try {
+      const refused = await callErr("run_shell", { command: `rm -rf ${outsideDir}` });
+      expect(refused.error).toMatch(/outside this task's workspace/i);
+      expect(existsSync(join(outsideDir, "keep.txt"))).toBe(true);
+    } finally {
+      rmSync(outsideDir, { recursive: true, force: true });
+    }
+    // The task's own directory is still the task's to clean up.
+    mkdirSync(join(workspace, "dist"), { recursive: true });
+    const own = await call("run_shell", { command: "rm -rf dist && test ! -d dist && echo removed" });
+    expect(String(own.stdout).trim()).toBe("removed");
+  }, 20_000);
+
+  it("refuses a workspace symlink that resolves to the credential store", async () => {
+    await initialize();
+    // Measured on the phone: `cat link-cred` named no path and returned the
+    // provider's auth file. The link is inside the workspace and every word in
+    // the command is ordinary; only resolving it shows where it goes.
+    const privateDir = mkdtempSync(join(tmpdir(), "omb-private-link-"));
+    mkdirSync(join(privateDir, ".codex"), { recursive: true });
+    writeFileSync(join(privateDir, ".codex", "auth.json"), '{"token":"sk-not-a-real-credential"}\n');
+    symlinkSync(join(privateDir, ".codex", "auth.json"), join(workspace, "link-cred"));
+    try {
+      const refused = await callErr("run_shell", { command: "cat link-cred" });
+      expect(refused.error).toMatch(/private credential store/i);
+      expect(JSON.stringify(refused)).not.toContain("sk-not-a-real-credential");
+      const viaArgv = await callErr("run_command", { command: "cat", args: ["link-cred"] });
+      expect(viaArgv.error).toMatch(/private credential store/i);
+      // A symlink that stays in the workspace is still ordinary work.
+      writeFileSync(join(workspace, "inside.txt"), "own file\n");
+      symlinkSync("inside.txt", join(workspace, "link-inside"));
+      expect(String((await call("run_shell", { command: "cat link-inside" })).stdout).trim()).toBe("own file");
+    } finally {
+      rmSync(privateDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("refuses to delete a sibling project, which used to count as the workspace", async () => {
+    // Projects live beside the task's workspace. Including that whole tree in
+    // the shell's roots meant `rm -rf <projects>/other` was "inside the
+    // workspace", so one task could delete another project's source.
+    child.kill("SIGKILL");
+    await new Promise((resolve) => child.once("exit", resolve));
+    const projectsDir = mkdtempSync(join(tmpdir(), "omb-projects-"));
+    mkdirSync(join(projectsDir, "other"), { recursive: true });
+    writeFileSync(join(projectsDir, "other", "notes.txt"), "another project\n");
+    spawnAdapter({ OMB_PROJECTS_DIR: projectsDir });
+    await initialize();
+    try {
+      const refused = await callErr("run_shell", { command: `rm -rf ${projectsDir}/other` });
+      expect(refused.error).toMatch(/outside this task's workspace/i);
+      expect(existsSync(join(projectsDir, "other", "notes.txt"))).toBe(true);
+      // Reading it is a question for a person one layer up (tool-approval), not
+      // a credential: project trees hold fixtures, not the app's secrets.
+      const read = await call("run_shell", { command: `cat ${projectsDir}/other/notes.txt` });
+      expect(String(read.stdout).trim()).toBe("another project");
+    } finally {
+      rmSync(projectsDir, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("refuses to empty another project through a workspace directory symlink", async () => {
+    await initialize();
+    // Measured on the phone: `rm -rf link-dir/` named only a workspace entry
+    // and emptied the project the link pointed at. Toybox follows a trailing
+    // slash, and the shell expands `link-dir/*` into the target's children, so
+    // the deletion is judged on the resolved directory.
+    const outside = mkdtempSync(join(tmpdir(), "omb-other-project-"));
+    writeFileSync(join(outside, "keep.txt"), "another project's source\n");
+    symlinkSync(outside, join(workspace, "link-dir"));
+    try {
+      for (const command of ["rm -rf link-dir/", "rm -rf link-dir/*", "cd link-dir && rm -rf *"]) {
+        const refused = await callErr("run_shell", { command });
+        expect(refused.error, command).toMatch(/outside this task's workspace/i);
+        expect(existsSync(join(outside, "keep.txt")), command).toBe(true);
+      }
+      // Removing the link itself does not touch the target and stays allowed.
+      expect((await call("run_shell", { command: "rm -f link-dir" })).ok).toBe(true);
+      expect(existsSync(join(outside, "keep.txt"))).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("kills children the shell backgrounded when the call is cancelled", async () => {
+    await initialize();
+    // A plain child.kill stops `sh`; the `sleep` it backgrounded is a separate
+    // process and keeps running, which is a turn still executing after the
+    // person cancelled it. The spawn is a process-group leader, so the kill
+    // reaches the whole tree.
+    const result = await call("run_shell", { command: "sleep 30 & echo $! > bg.pid; wait", timeoutMs: 500 });
+    expect(result.timedOut).toBe(true);
+    const pid = Number(readFileSync(join(workspace, "bg.pid"), "utf8").trim());
+    expect(Number.isFinite(pid)).toBe(true);
+    let alive = true;
+    for (let attempt = 0; attempt < 40 && alive; attempt += 1) {
+      try {
+        process.kill(pid, 0);
+        await new Promise((r) => setTimeout(r, 50));
+      } catch {
+        alive = false;
+      }
+    }
+    expect(alive).toBe(false);
   }, 20_000);
 
   it("caps oversized tool output while keeping the frame valid JSON", async () => {
@@ -769,6 +963,7 @@ async function readJsonBody(request: IncomingMessage): Promise<Record<string, un
 }
 
 import {
+  SHELL_ULIMITS,
   parseAndroidUiHierarchy,
   serializeAndroidGesture,
   validateGestureActionSafety,

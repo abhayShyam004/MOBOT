@@ -772,10 +772,10 @@ private fun AvailableConnectorCard(
         modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(20.dp))
-            .background(AppTheme.colors.surface)
+            .background(MaterialTheme.colorScheme.surfaceContainer)
             .border(
                 width = 1.dp,
-                color = AppTheme.colors.border.copy(alpha = 0.5f),
+                color = MaterialTheme.colorScheme.outlineVariant,
                 shape = RoundedCornerShape(20.dp),
             )
             .clickable(role = Role.Button, onClick = onClick)
@@ -861,12 +861,12 @@ fun ConnectedServiceDetailScreen(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = 20.dp)
-                .clip(RoundedCornerShape(24.dp))
-                .background(AppTheme.colors.surface)
+                .clip(RoundedCornerShape(20.dp))
+                .background(MaterialTheme.colorScheme.surfaceContainer)
                 .border(
                     width = 1.dp,
-                    color = AppTheme.colors.border.copy(alpha = 0.5f),
-                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant,
+                    shape = RoundedCornerShape(20.dp),
                 )
                 .padding(22.dp),
         ) {

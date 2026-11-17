@@ -214,7 +214,7 @@ describe("a room turn belongs to the room", () => {
         setup: { bulletin: "", defaultResponder: { kind: "everyone" } },
       })).body.group;
       roomId = room.id;
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "status?" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0001",  text: "status?" })).status).toBe(202);
 
       await expect.poll(async () => {
         const current = await groupState(room.id);
@@ -244,7 +244,7 @@ describe("a room turn belongs to the room", () => {
         setup: { bulletin: "", defaultResponder: { kind: "everyone" } },
       })).body.group;
       roomId = room.id;
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "take the wheel" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0002",  text: "take the wheel" })).status).toBe(202);
       // the room must actually own the bot before it asks for hands
       await expect.poll(async () => (await groupState(room.id))?.busyBotId, { timeout: 20_000 }).toBe(bot.id);
 

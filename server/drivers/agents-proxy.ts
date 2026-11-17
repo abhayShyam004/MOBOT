@@ -34,6 +34,7 @@
 //   OMB_COMMS_TOKEN  shared secret for the localhost-only internal endpoints
 //   OMB_TURN_DEPTH   this turn's comms depth (the harness refuses recursion)
 import readline from "node:readline";
+import { randomUUID } from "node:crypto";
 
 import { CREDENTIAL_TARGETS, isCredentialTargetId } from "../../shared/credential-request.ts";
 import { normalizeCronSchedule } from "../../shared/routine-schedule.ts";
@@ -59,6 +60,19 @@ let createdThisTurn = 0;
 // so the refusal reaches the model without a round trip.
 const MAX_ROOM_POSTS_PER_TURN = 3;
 let roomPostsThisTurn = 0;
+// The root the harness mints for this turn, when it provides one. Falling back
+// to a per-process id is safe for identity within the process; across one the
+// worst case is a conflict refusal, never a second message.
+const TURN_ROOT =
+  (process.env.OMB_TURN_GENERATION ?? "").trim().replace(/[^A-Za-z0-9_-]/g, "").slice(0, 40)
+  || randomUUID().replace(/-/g, "");
+// Allocated per logical post, and only when a new identity is handed out.
+let roomPostOrdinal = 0;
+/** Identities whose delivery ended ambiguously (no answer, or a 5xx), keyed by
+ * what was being posted. A retry of that same post reuses its identity so the
+ * harness can answer with the original receipt; anything the harness proved
+ * (a 2xx or a 4xx) is dropped, because the outcome is already known. */
+const pendingRoomPostSends = new Map<string, string>();
 // A thread is a real turn with its own run. Five in one turn is a plan
 // ("one per pull request"); more than that is a model that has stopped
 // deciding. The harness holds the same ceiling; this copy exists so the
@@ -1095,20 +1109,56 @@ async function callTool(name: string, args: Json): Promise<{ text: string; isErr
     if (!groupId || !message) {
       return { text: "post_to_room needs group_id (from list_rooms) and message.", isError: true };
     }
-    if (roomPostsThisTurn >= MAX_ROOM_POSTS_PER_TURN) {
+    // One identity per logical post. A retry after an ambiguous delivery
+    // reuses it, so the harness answers with the original receipt instead of
+    // appending a second message; a post the caller actually made again is a
+    // new post and gets a new identity. The JSON-RPC id is not usable here: a
+    // transport may renumber a retried call, and an identity that changes on
+    // retry dedupes nothing.
+    const fingerprint = `${groupId}\u0000${message}`;
+    const retrySendId = pendingRoomPostSends.get(fingerprint);
+    if (!retrySendId && roomPostsThisTurn >= MAX_ROOM_POSTS_PER_TURN) {
       return {
         text: `You have already posted ${MAX_ROOM_POSTS_PER_TURN} times this turn, which is the limit. Do not retry — finish your turn and say anything further to the user directly.`,
         isError: true,
       };
     }
-    const r = await api("/api/internal/post-to-room", {
-      method: "POST",
-      body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, groupId, message }),
-    });
-    if (r.error) return { text: String(r.error), isError: true };
-    roomPostsThisTurn += 1;
+    const sendId = retrySendId ?? `mcp.${TURN_ROOT}.${++roomPostOrdinal}`;
+    let response: { ok: boolean; status: number; body: Json };
+    try {
+      response = await apiResponse("/api/internal/post-to-room", {
+        method: "POST",
+        body: JSON.stringify({ fromBotId: BOT_ID, fromThreadId: THREAD_ID, groupId, message, sendId }),
+      });
+    } catch (error) {
+      // No answer at all: the post may or may not have landed, so the identity
+      // stays pending and a retry asks the harness about this exact post.
+      pendingRoomPostSends.set(fingerprint, sendId);
+      return {
+        text: `Could not reach the harness to post in the room (${error instanceof Error ? error.message : String(error)}). Tell the user it is not posted.`,
+        isError: true,
+      };
+    }
+    // The harness answers some refusals with 200 and `{ error }` (a denied
+    // approval card is one), so the body is part of what makes a post refused.
+    const refusalText = typeof response.body.error === "string" ? response.body.error : "";
+    if (!response.ok || refusalText) {
+      if (response.status >= 500) {
+        // The harness failed, not the request: the append may already be durable.
+        pendingRoomPostSends.set(fingerprint, sendId);
+      } else {
+        // Anything else is the harness proving it did nothing with this post.
+        pendingRoomPostSends.delete(fingerprint);
+      }
+      return { text: refusalText || `HTTP ${response.status}`, isError: true };
+    }
+    // Committed, or a replay of a committed post: this identity is settled.
+    pendingRoomPostSends.delete(fingerprint);
+    // A retried call is the same logical post: it must not spend another slot
+    // of the turn's posting cap.
+    if (!retrySendId) roomPostsThisTurn += 1;
     return {
-      text: `Posted in ${r.roomName ?? "the room"}. Nobody's turn was started, so expect no reply — tell the user it is posted.`,
+      text: `Posted in ${response.body.roomName ?? "the room"}. Nobody's turn was started, so expect no reply — tell the user it is posted.`,
     };
   }
   if (name === "ask_bot") {

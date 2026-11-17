@@ -99,6 +99,29 @@ describe("readThreadEvents", () => {
     expect(page.total).toEqual({ runtime: 3, native: 2 });
   });
 
+  it("retains a valid tool readiness report and drops an incomplete one", () => {
+    const eventsDir = tmp();
+    const nativeDir = tmp();
+    const server = {
+      server: "composio", ok: false, stage: "tools/list",
+      durationMs: 1200, timeoutMs: 30_000, toolCount: 0,
+      code: "rpc_-32000", error: "MCP request failed; inspect the configured integration",
+    };
+    writeFileSync(
+      join(eventsDir, "t1.ndjson"),
+      line(runtime({
+        eventId: "incomplete", type: "tool.readiness", createdAt: "1",
+        servers: [{ server: "composio" }], toolCount: 0, providerStarted: true,
+      })) +
+        line(runtime({
+          eventId: "valid", type: "tool.readiness", createdAt: "2",
+          servers: [server], toolCount: 0, providerStarted: true,
+        })),
+    );
+    const page = readThreadEvents({ eventsDir, nativeDir, threadId: "t1" });
+    expect(page.entries.map((entry) => (entry.data as { eventId?: string }).eventId)).toEqual(["valid"]);
+  });
+
   // A structured ask replays with the model's own questions on it. A card
   // built from a half-decoded one would offer options that were never
   // offered, so a malformed payload is dropped whole rather than trimmed.

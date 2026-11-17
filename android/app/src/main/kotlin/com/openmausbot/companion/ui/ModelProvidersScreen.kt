@@ -141,12 +141,12 @@ fun ModelProvidersScreen(onBack: () -> Unit) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .clip(RoundedCornerShape(22.dp))
-                        .background(AppTheme.colors.surface)
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(MaterialTheme.colorScheme.surfaceContainer)
                         .border(
                             width = 1.dp,
-                            color = AppTheme.colors.border.copy(alpha = 0.5f),
-                            shape = RoundedCornerShape(22.dp),
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                            shape = RoundedCornerShape(20.dp),
                         )
                         .padding(20.dp),
                     verticalAlignment = Alignment.CenterVertically,

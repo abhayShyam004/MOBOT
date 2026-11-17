@@ -43,7 +43,7 @@ it("gives a room turn the memory_update guidance, not the file-tools one", async
       name: "Garden room", memberIds: [lead.id, helper.id],
       setup: { bulletin: "", defaultResponder: { kind: "member", botId: lead.id } },
     }) as { group: { id: string } };
-    await api("POST", `/api/groups/${group.id}/messages`, { text: "Lead, what day is the garden watered?" });
+    await api("POST", `/api/groups/${group.id}/messages`, {sendId: "test_room_send_0001",  text: "Lead, what day is the garden watered?" });
     await expect.poll(() => {
       const text = dump()?.systemPrompt ?? "";
       return text.includes("Reply to the conversation above as") || JSON.stringify(dump()?.prompt ?? "").includes("Reply to the conversation above as");

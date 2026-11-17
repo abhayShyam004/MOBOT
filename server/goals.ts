@@ -759,9 +759,44 @@ export class GoalManager {
   getJobForGoal(goalId: string): PersistentAgentJob | null {
     return sharedPersistentJobManager.getJob(`job-${goalId}`) ?? sharedPersistentJobManager.getJob(goalId);
   }
+
+  ingestCanonicalGoal(record: CanonicalGoalRecord): void {
+    const existingIndex = this.canonicalGoals.findIndex((g) => g.id === record.id);
+    const sanitized = validateAndSanitizeCanonicalGoal(record);
+    if (!sanitized) return;
+    if (existingIndex >= 0) {
+      this.canonicalGoals[existingIndex] = sanitized;
+    } else {
+      this.canonicalGoals.push(sanitized);
+    }
+    this.save();
+  }
+
+  reconcileWithJobs(reconstructedGoals: CanonicalGoalRecord[]): void {
+    let changed = false;
+    for (const rg of reconstructedGoals) {
+      const sanitized = validateAndSanitizeCanonicalGoal(rg);
+      if (!sanitized) continue;
+      const idx = this.canonicalGoals.findIndex((g) => g.id === sanitized.id);
+      if (idx >= 0) {
+        this.canonicalGoals[idx] = sanitized;
+        changed = true;
+      } else {
+        this.canonicalGoals.push(sanitized);
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.save();
+    }
+  }
 }
 
 export const sharedGoalManager = new GoalManager();
+sharedPersistentJobManager.setGoalAdmissionHandler((goal) => sharedGoalManager.ingestCanonicalGoal(goal));
+if (sharedPersistentJobManager.getReconstructedGoals().length > 0) {
+  sharedGoalManager.reconcileWithJobs(sharedPersistentJobManager.getReconstructedGoals());
+}
 
 export {
   type JobState,

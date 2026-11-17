@@ -43,6 +43,11 @@ describe("permission-policy", () => {
       expect(classifyTool("workspace_write").domain).toBe("filesystem");
       expect(classifyTool("artifact_create").domain).toBe("filesystem");
       expect(classifyTool("project_create").domain).toBe("filesystem");
+      expect(classifyTool("project_start").domain).toBe("filesystem");
+      expect(classifyTool("project_lifecycle_status").domain).toBe("filesystem");
+      expect(classifyTool("project_step_complete").domain).toBe("filesystem");
+      expect(classifyTool("project_criterion_verify").domain).toBe("filesystem");
+      expect(classifyTool("project_finish").domain).toBe("filesystem");
       expect(classifyTool("verify_file").domain).toBe("filesystem");
       expect(classifyTool("resource_extract_pdf_text").domain).toBe("filesystem");
       expect(classifyTool("resource_artifact_info").domain).toBe("filesystem");
@@ -107,6 +112,21 @@ describe("permission-policy", () => {
       const res = checkToolPermission("unknown_backdoor");
       expect(res.allowed).toBe(false);
       expect(res.reason).toContain("blocked by security policy");
+    });
+
+    it("lets a tool the turn actually mounted through to the approval layer", () => {
+      // A configured MCP server names its own tools (`github_create_issue`,
+      // `fx_write`), so the classifier knows none of them. Denying them made
+      // every custom server unusable; the card — not a silent refusal — is the
+      // boundary for the person's own server.
+      const mounted = checkToolPermission("fx_write", undefined, {}, { mountedTool: true });
+      expect(mounted.allowed).toBe(true);
+      // The flag is the caller's proof, and nothing else gets it for free.
+      expect(checkToolPermission("fx_write", undefined, {}).allowed).toBe(false);
+      // A known domain is still governed by the person's settings: claiming to
+      // be mounted does not override "Terminal … is disabled".
+      expect(checkToolPermission("Bash", { terminal: "denied" }, {}, { mountedTool: true }).allowed).toBe(false);
+      expect(checkToolPermission("workspace_write", { filesystem: "denied" }, {}, { mountedTool: true }).allowed).toBe(false);
     });
 
     it("enforces terminal permission states", () => {

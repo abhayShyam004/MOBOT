@@ -156,28 +156,19 @@ class PhoneDriverServer private constructor(
         }
     }
 
-    private fun isBitmapBlankOrBlack(bitmap: Bitmap): Boolean {
-        val width = bitmap.width
-        val height = bitmap.height
-        if (width <= 0 || height <= 0) return true
-        val sampleStepX = maxOf(1, width / 20)
-        val sampleStepY = maxOf(1, height / 20)
-        var allZero = true
-        var maxLuminance = 0
-        for (y in 0 until height step sampleStepY) {
-            for (x in 0 until width step sampleStepX) {
-                val pixel = bitmap.getPixel(x, y)
-                val r = (pixel shr 16) and 0xff
-                val g = (pixel shr 8) and 0xff
-                val b = pixel and 0xff
-                val lum = (r * 299 + g * 587 + b * 114) / 1000
-                if (lum > maxLuminance) maxLuminance = lum
-                if (r != 0 || g != 0 || b != 0) {
-                    allZero = false
+    private fun logHopTiming(hop: String, durationMs: Long, meta: Map<String, Any?> = emptyMap()) {
+        try {
+            val file = File("/sdcard/Download/mobot_timing.log")
+            val json = JSONObject().apply {
+                put("timestamp", java.time.Instant.now().toString())
+                put("hop", hop)
+                put("durationMs", durationMs)
+                for ((k, v) in meta) {
+                    put(k, v)
                 }
             }
-        }
-        return allZero || maxLuminance < 2
+            file.appendText(json.toString() + "\n")
+        } catch (_: Exception) {}
     }
 
     private fun parseRequestBody(session: IHTTPSession): Pair<JSONObject?, String?> {
@@ -360,7 +351,10 @@ class PhoneDriverServer private constructor(
                 err("ERR_ACCESSIBILITY_DISABLED: Accessibility service is not enabled in Android Settings.", "ACCESSIBILITY_DISABLED")
             )
         }
+        val start = System.currentTimeMillis()
         val hierarchy = CompanionAccessibilityService.dumpHierarchy()
+        val dur = System.currentTimeMillis() - start
+        logHopTiming("TREE_DUMP", dur, mapOf("nodes" to hierarchy.optInt("nodeCount", 0), "package" to hierarchy.optString("currentPackage", "")))
         hierarchy.put("ok", true)
         return reply(Response.Status.OK, hierarchy)
     }
@@ -392,9 +386,12 @@ class PhoneDriverServer private constructor(
         val targetText = body.optString("text", "").takeIf { it.isNotBlank() }
         val targetId = body.optString("id", "").takeIf { it.isNotBlank() }
         val exact = body.optBoolean("exact", false)
+        val tapStart = System.currentTimeMillis()
 
         if (targetText != null || targetId != null) {
             val result = CompanionAccessibilityService.clickNode(targetId, targetText, exact)
+            val tapDur = System.currentTimeMillis() - tapStart
+            logHopTiming("ACTION_TAP", tapDur, mapOf("type" to "node", "target" to (targetText ?: targetId), "result" to result.javaClass.simpleName))
             return when (result) {
                 is CompanionAccessibilityService.ClickResult.Success -> reply(Response.Status.OK, JSONObject().apply {
                     put("ok", true)
@@ -449,6 +446,8 @@ class PhoneDriverServer private constructor(
                 "long_press" -> CompanionAccessibilityService.longPressCoordinates(x, y)
                 else -> CompanionAccessibilityService.clickCoordinates(x, y)
             }
+            val tapDur = System.currentTimeMillis() - tapStart
+            logHopTiming("ACTION_TAP", tapDur, mapOf("type" to "coordinates", "gesture" to gestureType, "success" to success))
             if (success) {
                 return reply(Response.Status.OK, JSONObject().apply {
                     put("ok", true)
@@ -587,11 +586,11 @@ class PhoneDriverServer private constructor(
         }
 
         val rawBmp = capturedBitmap!!
-        if (isBitmapBlankOrBlack(rawBmp)) {
+        if (BitmapFrameCheck.isBlankOrBlack(rawBmp)) {
             rawBmp.recycle()
             return reply(
                 Response.Status.OK,
-                err("ERR_SCREEN_CAPTURE_BLANK: Screen capture produced an all-black or blank frame", "ERR_SCREEN_CAPTURE_BLANK")
+                err("ERR_SCREEN_CAPTURE_BLANK: Screen capture produced a blank, uniform, or all-black frame", "ERR_SCREEN_CAPTURE_BLANK")
             )
         }
 
@@ -730,7 +729,10 @@ class PhoneDriverServer private constructor(
 
         val pkg = resolveTargetPackage(rawInput)
 
+        val launchStart = System.currentTimeMillis()
         val launched = CompanionAccessibilityService.launchApp(context, pkg)
+        val launchDur = System.currentTimeMillis() - launchStart
+        logHopTiming("ACTION_LAUNCH", launchDur, mapOf("pkg" to pkg, "launched" to launched))
         if (!launched) {
             return reply(
                 Response.Status.OK,
@@ -754,6 +756,23 @@ class PhoneDriverServer private constructor(
                 break
             }
         }
+
+        // Wait for window content to populate if foreground switched
+        if (settled) {
+            val contentStart = System.currentTimeMillis()
+            while (System.currentTimeMillis() - contentStart < 1500) {
+                val nodeCount = CompanionAccessibilityService.dumpHierarchy().optInt("nodeCount", 0)
+                if (nodeCount > 25) break
+                try {
+                    Thread.sleep(100)
+                } catch (_: InterruptedException) {
+                    break
+                }
+            }
+        }
+
+        val verifyDur = System.currentTimeMillis() - start
+        logHopTiming("VERIFICATION", verifyDur, mapOf("pkg" to pkg, "settled" to settled, "currentFg" to currentFg))
 
         val accessibilityReady = CompanionAccessibilityService.isReady()
         if (!settled) {

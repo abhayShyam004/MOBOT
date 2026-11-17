@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import type { ActionResultReceipt, ActionResultStatus } from "./types.ts";
+import { deriveDeploymentVerdict, mayClaimDeployed, type DeploymentEvidence } from "../deployment-status.ts";
 
 /** In-memory store of action receipts keyed by threadId and turnId */
 const receiptsByThread = new Map<string, ActionResultReceipt[]>();
@@ -11,10 +12,26 @@ export function recordActionReceipt(receipt: ActionResultReceipt): ActionResultR
   return receipt;
 }
 
+export function bindTurnReceipts(threadId: string, fromTurnId: string, toTurnId: string): void {
+  const receipts = receiptsByThread.get(threadId);
+  if (!receipts) return;
+  for (const r of receipts) {
+    if (r.turnId === fromTurnId) {
+      r.turnId = toTurnId;
+    }
+  }
+}
+
 export function getActionReceipts(threadId: string, turnId?: string): ActionResultReceipt[] {
   const all = receiptsByThread.get(threadId) || [];
   if (turnId) {
-    return all.filter((r) => !r.turnId || r.turnId === turnId);
+    const matched = all.filter((r) => !r.turnId || r.turnId === turnId);
+    if (matched.length > 0) return matched;
+    // Fallback: If receipt was recorded under a dispatch claim (e.g. claim-...),
+    // allow matching recent dispatch claims on this thread within last 5 minutes.
+    const recentClaims = all.filter((r) => r.turnId?.startsWith("claim-") && Date.now() - (r.attemptedAt || 0) < 300_000);
+    if (recentClaims.length > 0) return recentClaims;
+    return [];
   }
   return all;
 }
@@ -100,12 +117,19 @@ export function checkLivePhoneControlAvailability(driverPort?: string): PhoneCon
   };
 }
 
+/** A success claim lives inside one sentence. Bounding the gap between the
+ * verb and its object keeps a *quoted* example from being read as a claim:
+ * the system prompt says never to write things like "I set your alarm...",
+ * and an unbounded gap let that quotation reach an unrelated later "reminder"
+ * and replace the bot's whole reply with a canned refusal. */
+const CLAIM_GAP = "[^.!?\\n]{0,120}";
+
 /** Patterns indicating assistant claim of action success */
 const CALENDAR_SUCCESS_PATTERNS = [
-  /\b(?:i(?:'ve| have)?\s+(?:successfully\s+)?(?:scheduled|created|added))\b.*?\b(?:meeting|event|calendar|sync)\b/i,
-  /\b(?:event|meeting)\b.*?\b(?:has been|is|was)(?:\s+\w+)?\s+(?:scheduled|created|added)\b/i,
-  /\bcalendar\b.*?\bevent\s+(?:successfully\s+)?created\b/i,
-  /\b(?:scheduled|created|added)\b.*?\b(?:calendar|meeting|event)\b/i,
+  new RegExp(`\\b(?:i(?:'ve| have)?\\s+(?:successfully\\s+)?(?:scheduled|created|added))\\b${CLAIM_GAP}\\b(?:meeting|event|calendar|sync)\\b`, "i"),
+  new RegExp(`\\b(?:event|meeting)\\b${CLAIM_GAP}\\b(?:has been|is|was)(?:\\s+\\w+)?\\s+(?:scheduled|created|added)\\b`, "i"),
+  new RegExp(`\\bcalendar\\b${CLAIM_GAP}\\bevent\\s+(?:successfully\\s+)?created\\b`, "i"),
+  new RegExp(`\\b(?:scheduled|created|added)\\b${CLAIM_GAP}\\b(?:calendar|meeting|event)\\b`, "i"),
 ];
 
 const PHONE_ACCESS_CLAIM_PATTERNS = [
@@ -114,13 +138,22 @@ const PHONE_ACCESS_CLAIM_PATTERNS = [
   /\bi(?:'ve| have)?\s+(?:opened|launched)\s+whatsapp\b/i,
   /\bi(?:'ve| have)?\s+(?:taken|captured)\s+(?:a\s+)?screenshot\b/i,
   /\bhere(?:'s| is)\s+(?:the|your)\s+screenshot\b/i,
-  /\bcopied\b.*?\bwhatsapp\b/i,
+  new RegExp(`\\bcopied\\b${CLAIM_GAP}\\bwhatsapp\\b`, "i"),
 ];
 
 const REMINDER_SUCCESS_PATTERNS = [
-  /\b(?:i(?:'ve| have)?\s+(?:set|scheduled|delivered))\b.*?\breminder\b/i,
-  /\breminder\b.*?\b(?:is set|has been set|scheduled for|delivered)\b/i,
+  new RegExp(`\\b(?:i(?:'ve| have)?\\s+(?:set|scheduled|delivered))\\b${CLAIM_GAP}\\breminder\\b`, "i"),
+  new RegExp(`\\breminder\\b${CLAIM_GAP}\\b(?:is set|has been set|scheduled for|delivered)\\b`, "i"),
   /\bi will remind you\b/i,
+];
+
+const DEPLOYMENT_SUCCESS_PATTERNS = [
+  /\b(?:i(?:'ve| have)?\s+(?:successfully\s+)?(?:deployed|published|hosted))\b/i,
+  /\b(?:has been|was|is)\s+(?:successfully\s+)?(?:deployed|published|hosted)\b/i,
+  /\bproject\s+is\s+(?:now\s+)?(?:live|deployed|accessible\s+online)\b/i,
+  /\bdeployment\s+(?:is\s+complete|succeeded|was successful)\b/i,
+  /\byour\s+app\s+is\s+(?:now\s+)?(?:live|deployed|available\s+at)\b/i,
+  /\bsuccessfully\s+deployed\s+to\b/i,
 ];
 
 export interface TruthfulnessCheckResult {
@@ -185,12 +218,19 @@ export function verifyAndEnforceTurnTruthfulness(options: {
   const claimsPhoneAccess = PHONE_ACCESS_CLAIM_PATTERNS.some((pat) => pat.test(assistantText));
   if (claimsPhoneAccess) {
     const phoneReceipt = getLatestReceipt(threadId, "device.phone_control", turnId);
+    const browserReceipt =
+      getLatestReceipt(threadId, "browser.screenshot", turnId) ||
+      getLatestReceipt(threadId, "browser", turnId);
     const driverStatus = checkLivePhoneControlAvailability();
 
     // Check general capability claim ("Can you access my phone?")
     const isGeneralCapabilityClaim =
       /\byes,?\s+(?:i can\s+)?(?:access|control)\s+(?:your\s+)?phone\b/i.test(assistantText) ||
       /\bi can\s+(?:tap|type|open apps|take screenshots|control your phone)\b/i.test(assistantText);
+
+    const isBrowserTarget =
+      (options.userText && /(?:https?:\/\/|www\.|\b[a-z0-9-]+\.(?:com|org|net|io|dev|app|edu|gov|co)\b|website|webpage|page|url|browser|site)\b/i.test(options.userText)) ||
+      /\b(?:page|webpage|website|url|browser|https?:\/\/)\b/i.test(assistantText);
 
     if (isGeneralCapabilityClaim) {
       if (!driverStatus.operational) {
@@ -199,7 +239,16 @@ export function verifyAndEnforceTurnTruthfulness(options: {
         correctedText =
           `I cannot currently access or control your phone. Phone control is unavailable in this session (${driverStatus.reason || "automation driver offline"}). I cannot tap, type, inspect other apps, or automate device actions without active driver support.`;
       }
-    } else if (/whatsapp|screenshot/i.test(assistantText)) {
+    } else if (browserReceipt && browserReceipt.status === "SUCCEEDED") {
+      // Browser screenshot succeeded! Verify artifact exists on disk if path provided.
+      const path = browserReceipt.evidence?.artifactPath;
+      if (path && !existsSync(path)) {
+        violations.push("Screenshot claimed but artifact file does not exist on disk");
+        correctedText = "Screenshot capture failed: no valid screenshot file was generated.";
+        dominantStatus = "FAILED";
+      }
+      // Valid genuine browser screenshot delivery! No violation!
+    } else if (/whatsapp/i.test(assistantText) || !isBrowserTarget) {
       if (!phoneReceipt || phoneReceipt.status !== "SUCCEEDED") {
         const status: ActionResultStatus = phoneReceipt ? phoneReceipt.status : (driverStatus.operational ? "NOT_ATTEMPTED" : "UNAVAILABLE");
         dominantStatus = status;
@@ -225,6 +274,12 @@ export function verifyAndEnforceTurnTruthfulness(options: {
             dominantStatus = "FAILED";
           }
         }
+      }
+    } else if (isBrowserTarget && /screenshot/i.test(assistantText)) {
+      if (!browserReceipt || browserReceipt.status !== "SUCCEEDED") {
+        violations.push("Browser screenshot claimed without successful browser capture receipt");
+        correctedText = "I was unable to capture a screenshot of the requested webpage.";
+        dominantStatus = "FAILED";
       }
     }
   }
@@ -286,6 +341,25 @@ export function verifyAndEnforceTurnTruthfulness(options: {
         dominantStatus = "FAILED";
         correctedText = `Browser search was attempted, but screenshot attachment delivery failed (${browserReceipt.error?.message || "could not store image"}).`;
       }
+    }
+  }
+
+  // 5. Deployment Truthfulness Check
+  const claimsDeployment = DEPLOYMENT_SUCCESS_PATTERNS.some((pat) => pat.test(assistantText));
+  if (claimsDeployment) {
+    const deployReceipt =
+      getLatestReceipt(threadId, "deployment.deploy", turnId) ||
+      getLatestReceipt(threadId, "project.deploy", turnId);
+    const evidence = (deployReceipt?.evidence as unknown as DeploymentEvidence) || {
+      built: false,
+      tested: false,
+      attempted: false,
+    };
+    const verdict = deriveDeploymentVerdict(evidence);
+    if (!mayClaimDeployed(verdict)) {
+      violations.push(`Deployment claim rejected: status is ${verdict.state}; independent remote check required`);
+      dominantStatus = verdict.state === "failed" ? "FAILED" : "NOT_ATTEMPTED";
+      correctedText = verdict.summary;
     }
   }
 

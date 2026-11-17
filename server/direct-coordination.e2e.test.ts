@@ -493,8 +493,6 @@ it("runs the owed direct follow-up while the same bot works in another thread", 
   f.save();
   await f.cli("send", "--bot", f.chief.id, "--task", f.chief.activeTaskId, "--text", "Assign the check, then open an independent job that runs long.");
   const chiefTasks = async () => (await f.api("/api/bots")).bots.find((bot: any) => bot.id === f.chief.id).tasks;
-  // The self-opened job stays mid-turn at its gate: the whole-bot busy flag
-  // is held up by a thread that has nothing to do with this coordination.
   await expect.poll(async () => (await chiefTasks()).find((task: any) => task.title === "Independent hold")?.busy, { timeout: 20_000 }).toBe(true);
   // The owed follow-up belongs to this conversation alone: it must dispatch
   // even while the bot stays busy in its sibling thread.

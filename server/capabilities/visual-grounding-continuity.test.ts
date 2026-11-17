@@ -120,7 +120,7 @@ describe("Case E: Multi-Turn Visual Grounding, Evidence Persistence & Contradict
     expect(providerPayload[0]?.image_url).toContain("data:image/png;base64,");
 
     // Verify grounding note is present in provider prompt text
-    expect(result.text).toContain("[Visual Context: The image (mystery-outline.png)");
+    expect(result.text).toContain("[Visual Context: mystery-outline.png (generated or shown by you earlier).");
     expect(result.text).toContain("Never claim that the image is unavailable or tell the user to resend it");
   });
 

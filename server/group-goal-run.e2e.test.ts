@@ -298,6 +298,7 @@ describe("goal-driven channel runs", () => {
       }).toBe(true);
 
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0001",
         text: "Complete this goal after your current work",
         mode: "goal",
       })).status).toBe(202);
@@ -383,6 +384,7 @@ describe("goal-driven channel runs", () => {
       }).toBe(true);
 
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0002",
         text: "Research and resolve the team question",
         mode: "goal",
       })).status).toBe(202);
@@ -483,7 +485,7 @@ describe("goal-driven channel runs", () => {
 
       // ordinary chat: the round parks on the busy lead — visibly working,
       // nobody named as speaker, one neutral note, and no skip
-      expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Ordinary room chat" })).status).toBe(202);
+      expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0001",  text: "Ordinary room chat" })).status).toBe(202);
       await expect.poll(async () => {
         const state = (await api("GET", "/api/bots?messages=30")).body;
         const current = state.groups.find((group: { id: string }) => group.id === room.id);
@@ -504,6 +506,7 @@ describe("goal-driven channel runs", () => {
       }).toEqual({ working: false, directBusy: true, waiting: true, skipped: false, replies: 0 });
 
       expect((await api("POST", `/api/groups/${room.id}/messages`, {
+        sendId: "test_room_send_0003",
         text: "Wait and run this as a goal",
         mode: "goal",
       })).status).toBe(202);
@@ -1015,6 +1018,7 @@ describe("goal-driven channel runs", () => {
       setup: { bulletin: "", defaultResponder: { kind: "member", botId: looper.id } },
     })).body.group;
     expect((await api("POST", `/api/groups/${room.id}/messages`, {
+      sendId: "test_room_send_0004",
       text: "Keep trying forever",
       mode: "goal",
     })).status).toBe(202);
@@ -1039,6 +1043,7 @@ describe("goal-driven channel runs", () => {
     })).body.group;
 
     expect((await api("POST", `/api/groups/${room.id}/messages`, {
+      sendId: "test_room_send_0005",
       text: "Do not claim this succeeded",
       mode: "goal",
     })).status).toBe(202);
@@ -1059,13 +1064,13 @@ describe("goal-driven channel runs", () => {
       memberIds: [bot.id],
       setup: { bulletin: "", defaultResponder: { kind: "mentions" } },
     })).body.group;
-    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "hello", mode: "forever" })).status).toBe(400);
+    expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0002",  text: "hello", mode: "forever" })).status).toBe(400);
     const body = { text: "quiet note", mode: "chat", sendId: "mode_send_1234567890" };
     expect((await api("POST", `/api/groups/${room.id}/messages`, body)).status).toBe(202);
     expect((await api("POST", `/api/groups/${room.id}/messages`, { ...body, mode: "goal" })).status).toBe(409);
 
     const dm = (await api("GET", "/api/bots?messages=0")).body.groups.find((group: { dm?: boolean }) => group.dm);
-    if (dm) expect((await api("POST", `/api/groups/${dm.id}/messages`, { text: "goal", mode: "goal" })).status).toBe(400);
+    if (dm) expect((await api("POST", `/api/groups/${dm.id}/messages`, {sendId: "test_room_send_0003",  text: "goal", mode: "goal" })).status).toBe(400);
   });
 
   it("automatically dispatches channel messages queued during a running turn", async () => {

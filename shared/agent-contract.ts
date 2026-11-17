@@ -12,6 +12,8 @@
  * 4. Contract prompt compilation is deterministic, zero-emoji, and secret-free.
  */
 
+import { resolveBotIdentity } from "./bot-identity.ts";
+
 export type AgentRolePreset =
   | "joke_teller"
   | "study_buddy"
@@ -561,9 +563,20 @@ export function resolveAgentContract(bot: ContractResolutionCandidate): AgentCon
 
   const basePreset = matchedPreset ?? GENERAL_AGENT_PRESET;
 
-  // Custom role title fallback
-  const customTitle = bot.title?.trim() || basePreset.roleTitle;
-  const customPurpose = bot.description?.trim() || basePreset.identity.purpose;
+  const botIdentity = resolveBotIdentity(bot);
+
+  // Custom role title fallback (using normalized title from botIdentity to avoid exposing typos)
+  const customTitle = (botIdentity.hasCustomIdentity ? botIdentity.title : bot.title?.trim())
+    || basePreset.roleTitle;
+
+  const customPurpose = bot.description?.trim()
+    || (botIdentity.hasCustomIdentity ? botIdentity.purpose : basePreset.identity.purpose);
+  const customMission = botIdentity.hasCustomIdentity
+    ? botIdentity.coreMission
+    : basePreset.identity.coreMission;
+  const customStance = botIdentity.hasCustomIdentity
+    ? botIdentity.behavioralStance
+    : basePreset.identity.behavioralStance;
 
   return {
     ...basePreset,
@@ -572,6 +585,14 @@ export function resolveAgentContract(bot: ContractResolutionCandidate): AgentCon
       ...basePreset.identity,
       name: bot.name,
       purpose: customPurpose,
+      coreMission: customMission,
+      behavioralStance: customStance,
+    },
+    outputDelivery: {
+      ...basePreset.outputDelivery,
+      toneProfile: botIdentity.hasCustomIdentity
+        ? botIdentity.communicationStyle.tone
+        : basePreset.outputDelivery.toneProfile,
     },
   };
 }

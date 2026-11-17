@@ -141,6 +141,11 @@ export const HELD_NOTE = {
     "This changes the provider sandbox, so only Full access can approve it automatically.",
   "approval.held.undeliveredFull": "Full access couldn't deliver this approval.",
   "approval.held.undelivered": "Approve for me couldn't answer this one.",
+  // A bulk deletion is the one thing Full access does not skip, so the sandbox
+  // sentence above would be false on its card — and would invite someone to
+  // "fix" it by enabling Full access.
+  "approval.held.bulk":
+    "This deletes a whole tree, so it always stops for you — Full access does not skip it.",
 } as const;
 
 export type HeldNoteKey = keyof typeof HELD_NOTE;
@@ -153,8 +158,11 @@ export function approvalHeldNote(context: {
   permission: boolean;
   tool?: string;
   summary?: string;
+  /** The command deletes a tree; no mode auto-approves that. */
+  massDeletion?: boolean;
 }): HeldNoteKey | undefined {
   if (!context.permission) return undefined;
+  if (context.massDeletion) return "approval.held.bulk";
   if (context.source === "explicit-approval-block") {
     if (context.tool && isReadOnlyTool(context.tool, context.summary)) {
       return "approval.held.native";
@@ -172,6 +180,7 @@ export function approvalHeldReason(context: {
   permission: boolean;
   tool?: string;
   summary?: string;
+  massDeletion?: boolean;
 }): string | undefined {
   const key = approvalHeldNote(context);
   return key && HELD_NOTE[key];

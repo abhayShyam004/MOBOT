@@ -404,12 +404,12 @@ posixOnly("mid-turn steering e2e", () => {
     const getGroup = async () =>
       (await api("GET", "/api/bots?messages=30")).body.groups.find((g: any) => g.id === room.id);
 
-    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "first room turn" })).status).toBe(202);
+    expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0001",  text: "first room turn" })).status).toBe(202);
     await waitFor(async () => (await getGroup())?.busyBotId === created.id, "the room turn to start");
     await waitFor(async () => (await getGroup())?.messages.some((m: any) => m.card), "the room question card");
 
     // Enter still queues in rooms: the send lands as a queued chip, not a turn
-    const queued = await api("POST", `/api/groups/${room.id}/messages`, { text: "steer these room words" });
+    const queued = await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0002",  text: "steer these room words" });
     expect(queued.status).toBe(202);
     expect(queued.body).toMatchObject({ ok: true, queued: true });
     expect((await getGroup())?.messages.some((m: any) => m.text === "steer these room words")).toBe(false);
@@ -447,9 +447,9 @@ posixOnly("mid-turn steering e2e", () => {
     const getGroup = async () =>
       (await api("GET", "/api/bots?messages=30")).body.groups.find((g: any) => g.id === room.id);
 
-    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "first" })).status).toBe(202);
+    expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0003",  text: "first" })).status).toBe(202);
     await waitFor(async () => (await getGroup())?.busyBotId === created.id, "the hung room turn to start");
-    const queued = await api("POST", `/api/groups/${room.id}/messages`, { text: "second" });
+    const queued = await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0004",  text: "second" });
     expect(queued.status).toBe(202);
     expect(queued.body).toMatchObject({ ok: true, queued: true });
 

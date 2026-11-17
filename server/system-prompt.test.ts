@@ -20,6 +20,7 @@ import {
   ROUTINE_EXECUTION_PROMPT,
   WEBHOOK_PROMPT,
   ANDROID_COMPUTER_SYSTEM_PROMPT,
+  GENERAL_AGENT_RELIABILITY_PROMPT,
   SIGN_IN_PROMPT,
   CAPABILITY_GUIDANCE_PROMPT,
   RESPONSE_INTELLIGENCE_PROMPT,
@@ -80,6 +81,16 @@ describe("buildSystemPrompt", () => {
     expect(soul.text).toBe(soulSystemPrompt("Be brief. é"));
     expect(soul.bytes).toBe(Buffer.byteLength(soul.text, "utf8"));
     expect(built.text).toBe("You are Kiwi." + soul.text + " Your memory file is X.");
+  });
+
+  it("deduplicates prompt sections when an invariant block is already present in another section", () => {
+    const built = buildSystemPrompt("You are Kiwi.", "", [
+      { id: "reliability", label: "Reliability", text: GENERAL_AGENT_RELIABILITY_PROMPT },
+      { id: "android-computer", label: "Android Computer", text: ANDROID_COMPUTER_SYSTEM_PROMPT },
+    ]);
+    expect(built.sections.map((s) => s.id)).toEqual(["persona", "android-computer"]);
+    const count = (built.text.match(/GENERAL AGENT RELIABILITY & VERIFICATION INVARIANTS:/g) || []).length;
+    expect(count).toBe(1);
   });
 });
 

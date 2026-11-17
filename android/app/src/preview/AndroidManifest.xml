@@ -7,6 +7,18 @@
         <activity android:name=".PairingLinkActivity" tools:node="remove" />
         <activity android:name=".ShareReceiveActivity" tools:node="remove" />
 
+        <!-- Material Component Gallery (Preview showroom only, isolated from production) -->
+        <activity
+            android:name="com.openmausbot.companion.gallery.MaterialGalleryActivity"
+            android:label="Material Components Showroom"
+            android:theme="@style/Theme.MaterialGallery"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.openmausbot.companion.MATERIAL_GALLERY" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
         <!-- Device-test adversary for the separate-UID signer: a second process
              of the same UID that tries to take the signing authority without an
              enrollment challenge. Preview flavor only; absent from the shipped

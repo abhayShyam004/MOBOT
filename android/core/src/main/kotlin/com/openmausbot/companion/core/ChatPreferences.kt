@@ -89,7 +89,16 @@ sealed interface TranscriptRow {
         override val head: Message get() = items.first()
         override val id: String get() = "run.${head.id}"
         override val endAt: Double get() = items.last().at
-        val running: Boolean get() = items.any { it.tool?.ok == null }
+        /** A settled cancellation leaves `ok` null just as a live step does
+         * on old records; `state` is what tells them apart on new ones. */
+        val running: Boolean get() = items.any { item ->
+            val tool = item.tool ?: return@any false
+            when (tool.state) {
+                "queued", "running", "retrying" -> true
+                "succeeded", "failed", "cancelled" -> false
+                else -> tool.ok == null
+            }
+        }
     }
 }
 
@@ -124,7 +133,9 @@ internal fun previewText(message: Message): String = when (message.kind) {
     }
     // A failure row previews as its headline rather than the chip's own
     // "error: …" phrasing: the roster row is about the bot, not about a log.
-    Message.Kind.ACTIVITY -> message.failure?.title ?: message.tool?.name.orEmpty()
+    Message.Kind.ACTIVITY -> message.failure?.title
+        ?: message.tool?.label
+        ?: message.tool?.name.orEmpty()
     Message.Kind.SCREEN -> "Screenshot"
     // The request itself is the preview: what the bot is blocked on.
     Message.Kind.CONNECTOR -> message.connector?.let { "Connect ${it.label}" }.orEmpty()
@@ -132,6 +143,93 @@ internal fun previewText(message: Message): String = when (message.kind) {
         ?: message.structured?.components?.firstOrNull()?.title
         ?: "Structured response"
     Message.Kind.UNKNOWN -> message.text.orEmpty()
+}
+
+/**
+ * The rows the conversation itself shows.
+ *
+ * Tool receipts belong to the activity log, not to the answer, so they are folded away here —
+ * with one exception that was never a tool step at all: a row carrying [Message.failure] is the
+ * only account of why a turn produced nothing. Dropping it, as the chat used to, left the person
+ * reading "the error above explains why" with no error above it.
+ */
+fun conversationRows(rows: List<TranscriptRow>): List<TranscriptRow> {
+    val filtered = rows.filter { row ->
+        when (row) {
+            is TranscriptRow.Single -> row.message.kind != Message.Kind.ACTIVITY || row.message.failure != null
+            is TranscriptRow.ActivityRun -> false
+        }
+    }
+
+    // One email, one persistent card:
+    // If multiple messages contain an emailComposer card with the same composerId,
+    // only preserve the active card on the newest message. Obsolete historical snapshot rows
+    // are stripped so users see exactly one canonical card.
+    val latestComposerMessageId = mutableMapOf<String, String>()
+    filtered.forEach { row ->
+        if (row is TranscriptRow.Single) {
+            val compId = row.message.card?.emailComposer?.composerId
+            if (!compId.isNullOrEmpty()) {
+                latestComposerMessageId[compId] = row.message.id
+            }
+        }
+    }
+
+    val rowsWithDeDupedCards = filtered.mapNotNull { row ->
+        if (row is TranscriptRow.Single) {
+            val compId = row.message.card?.emailComposer?.composerId
+            if (!compId.isNullOrEmpty() && latestComposerMessageId[compId] != row.message.id) {
+                val text = row.message.text
+                if (text.isNullOrBlank() || text == "Draft saved to Gmail." || text.startsWith("Email sent via Gmail") || text == "Updated email draft:") {
+                    null
+                } else {
+                    TranscriptRow.Single(row.message.copy(card = null))
+                }
+            } else {
+                row
+            }
+        } else {
+            row
+        }
+    }
+
+    // Suppress obsolete contradictory failure narration when followed by a successful
+    // email composer action in the thread, while preserving genuinely separate failed attempts.
+    return rowsWithDeDupedCards.filterIndexed { index, row ->
+        if (row is TranscriptRow.Single && isContradictoryEmailFailureNarration(row.message.text)) {
+            val hasFollowingSuccessfulComposer = rowsWithDeDupedCards.subList(index + 1, rowsWithDeDupedCards.size).any { laterRow ->
+                if (laterRow is TranscriptRow.Single) {
+                    val comp = laterRow.message.card?.emailComposer
+                    comp != null && comp.status.lowercase() != "failed"
+                } else false
+            }
+            !hasFollowingSuccessfulComposer
+        } else {
+            true
+        }
+    }
+}
+
+private fun isContradictoryEmailFailureNarration(text: String?): Boolean {
+    if (text.isNullOrBlank()) return false
+    val lower = text.lowercase()
+    val mentionsEmail = lower.contains("email") || lower.contains("gmail") || lower.contains("draft")
+    val mentionsUnavailable = lower.contains("unavailable") ||
+            lower.contains("no capability") ||
+            lower.contains("don't have capability") ||
+            lower.contains("do not have capability") ||
+            lower.contains("cannot send") ||
+            lower.contains("unable to send") ||
+            lower.contains("can't send") ||
+            lower.contains("not able to send") ||
+            lower.contains("cannot prepare") ||
+            lower.contains("unable to prepare") ||
+            lower.contains("cannot access") ||
+            lower.contains("don't have access") ||
+            lower.contains("do not have access") ||
+            lower.contains("no access to") ||
+            lower.contains("not supported")
+    return mentionsEmail && mentionsUnavailable
 }
 
 /**

@@ -29,14 +29,11 @@ const queues = new Map<string, ChannelQueueEntry>(); // threadId -> waiting send
 export function restoreChannelMessages(): void {
   queues.clear();
   for (const row of chatFollowups("channel")) {
-    if (row.status !== "pending" && row.status !== "dispatching" && row.status !== "interrupted") continue;
+    if (row.status !== "pending") continue;
     const entry = queues.get(row.threadId) ?? { groupId: row.ownerId, items: [] };
     if (entry.groupId !== row.ownerId) throw new Error("queued task belongs to another channel");
     entry.items.push({ ...row.payload, id: row.id, mode: row.payload.mode ?? "chat" });
     queues.set(row.threadId, entry);
-    if (row.status !== "pending") {
-      settleChatFollowups([row.id], "pending");
-    }
   }
 }
 

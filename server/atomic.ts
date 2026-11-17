@@ -6,6 +6,7 @@
 // that fails to parse on next boot and is silently treated as empty state.
 import { randomUUID } from "node:crypto";
 import { closeSync, fsyncSync, openSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 /** Windows refuses a rename onto an existing path while anything else holds a
  * handle to either file, and a virus scanner or the search indexer opening a
@@ -61,6 +62,18 @@ export function writeFileAtomic(path: string, data: string, options: { mode?: nu
     closeSync(fd);
     fd = null;
     renameWithRetry(tmp, path);
+
+    // Parent-directory fsync to ensure rename durability
+    try {
+      const dirFd = openSync(dirname(path), "r");
+      try {
+        fsyncSync(dirFd);
+      } finally {
+        closeSync(dirFd);
+      }
+    } catch {
+      // Best-effort directory fsync across platforms
+    }
   } catch (e) {
     if (fd !== null) {
       try {

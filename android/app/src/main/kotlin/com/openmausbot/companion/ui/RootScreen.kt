@@ -252,6 +252,14 @@ fun CompanionRoot(
         tapCoordinator.onPending(session, target, onPendingTargetConsumed)
     }
 
+    var activeRootPreview by remember { mutableStateOf(com.openmausbot.companion.MainActivity.pendingPreview.value) }
+    val pendingPreviewTarget by com.openmausbot.companion.MainActivity.pendingPreview.collectAsState()
+    LaunchedEffect(pendingPreviewTarget) {
+        val target = pendingPreviewTarget ?: return@LaunchedEffect
+        activeRootPreview = target
+        com.openmausbot.companion.MainActivity.pendingPreview.value = null
+    }
+
     // The theme is the person's choice, read from the same store Settings writes
     // to, so switching it in Appearance redraws the whole app on the next frame
     // and survives the next launch.
@@ -379,6 +387,16 @@ fun CompanionRoot(
                     pendingShare?.let { share ->
                         ShareSheet(pending = share, onDismiss = environment.shareInbox::consume)
                     }
+                    activeRootPreview?.let { preview ->
+                        InAppBrowserSurface(
+                            destination = Destination.Browser(
+                                url = preview.first,
+                                title = preview.second ?: "App Preview",
+                                isPreview = true,
+                            ),
+                            onClose = { activeRootPreview = null },
+                        )
+                    }
                 }
             }
             // Pairing failures are shown inline on the pairing form, where the
@@ -386,7 +404,7 @@ fun CompanionRoot(
             // The paired world raises its own dialog (with the navigation the
             // "Configure model" remedy needs), so this plain one only covers
             // the unpaired/onboarding routes.
-            if (route != OnboardingRoute.PAIRING && route != OnboardingRoute.CHATS) {
+            if (activeRootPreview == null && route != OnboardingRoute.PAIRING && route != OnboardingRoute.CHATS) {
                 ActionErrorDialog(session, navigator = null)
             }
             val currentCode = runCatching {
@@ -517,6 +535,8 @@ private fun PairedScreen(
 ) {
     val navigator = rememberCompanionNavigator(bondGeneration)
     val environment = LocalCompanion.current
+
+
 
     LaunchedEffect(pendingFirstBot) {
         val bot = pendingFirstBot ?: return@LaunchedEffect

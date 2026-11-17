@@ -1,9 +1,10 @@
 // Image attachments: pasted/dropped images become files under
 // ~/.openmausbot/attachments so every CLI engine can open them by path —
 // the app never ships image bytes through the prompt itself.
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import {
   createReadStream,
+  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -702,3 +703,238 @@ function mimeForExt(ext: string): string {
       return "application/octet-stream";
   }
 }
+
+// ── Artifact Download Signature & Cross-Device Access ───────────────
+let cachedArtifactSigningSecret: string | null = null;
+
+export function getArtifactSigningSecret(): string {
+  if (cachedArtifactSigningSecret) return cachedArtifactSigningSecret;
+  const secretPath = join(DATA_DIR, ".artifact-secret");
+  try {
+    if (existsSync(secretPath)) {
+      const stored = readFileSync(secretPath, "utf8").trim();
+      if (stored.length >= 32) {
+        cachedArtifactSigningSecret = stored;
+        return stored;
+      }
+    }
+  } catch {}
+  const generated = randomBytes(32).toString("hex");
+  try {
+    ensureAttachmentsDir();
+    writeFileSync(secretPath, generated, { mode: 0o600 });
+  } catch {}
+  cachedArtifactSigningSecret = generated;
+  return generated;
+}
+
+export function __resetArtifactSigningSecretForTests(customSecret?: string): void {
+  cachedArtifactSigningSecret = customSecret ?? null;
+}
+
+export const DEFAULT_SIGNED_URL_EXPIRY_MS = process.env.SIGNED_ARTIFACT_EXPIRY_MS
+  ? parseInt(process.env.SIGNED_ARTIFACT_EXPIRY_MS, 10)
+  : 15 * 60 * 1000; // 15 minutes default
+export const MAX_SIGNED_URL_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours maximum cap
+
+export function validateApplicationBaseUrl(rawUrl?: string): string | null {
+  if (!rawUrl || typeof rawUrl !== "string") return null;
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+export interface CreateSignedArtifactUrlParams {
+  filename: string;
+  ownerSessionId?: string;
+  artifactId?: string;
+  sha256?: string;
+  expiresInMs?: number;
+  baseUrl?: string;
+  secret?: string;
+}
+
+export interface SignedArtifactUrl {
+  filename: string;
+  artifactId: string;
+  sha256: string;
+  ownerSessionId: string;
+  expires: number;
+  signature: string;
+  downloadPath: string;
+  downloadUrl: string;
+}
+
+export function buildArtifactSigningPayload(
+  version: "v2" | "v1",
+  params: {
+    artifactId?: string;
+    sha256?: string;
+    filename: string;
+    ownerSessionId: string;
+    expires: number;
+  }
+): string {
+  if (version === "v2") {
+    return `artifact-dl:v2:${params.artifactId ?? ""}:${params.sha256 ?? ""}:${params.filename}:${params.ownerSessionId}:${params.expires}`;
+  }
+  return `artifact-dl:v1:${params.filename}:${params.ownerSessionId}:${params.expires}`;
+}
+
+export function createSignedArtifactUrl(
+  filenameOrOptions: string | CreateSignedArtifactUrlParams,
+  ownerSessionIdPos: string = "public",
+  expiresInMsPos: number = DEFAULT_SIGNED_URL_EXPIRY_MS,
+  secretPos: string = getArtifactSigningSecret()
+): SignedArtifactUrl {
+  let filename: string;
+  let ownerSessionId: string = "public";
+  let artifactId: string = "";
+  let sha256: string = "";
+  let requestedExpiryMs = DEFAULT_SIGNED_URL_EXPIRY_MS;
+  let secret = secretPos;
+  let rawBaseUrl: string | undefined = process.env.APP_BASE_URL || process.env.PUBLIC_BASE_URL;
+
+  if (typeof filenameOrOptions === "object" && filenameOrOptions !== null) {
+    filename = filenameOrOptions.filename;
+    if (filenameOrOptions.ownerSessionId) ownerSessionId = filenameOrOptions.ownerSessionId;
+    if (filenameOrOptions.artifactId) artifactId = filenameOrOptions.artifactId;
+    if (filenameOrOptions.sha256) sha256 = filenameOrOptions.sha256;
+    if (filenameOrOptions.expiresInMs !== undefined) requestedExpiryMs = filenameOrOptions.expiresInMs;
+    if (filenameOrOptions.secret) secret = filenameOrOptions.secret;
+    if (filenameOrOptions.baseUrl) rawBaseUrl = filenameOrOptions.baseUrl;
+  } else {
+    filename = filenameOrOptions;
+    if (ownerSessionIdPos) ownerSessionId = ownerSessionIdPos;
+    if (expiresInMsPos !== undefined) requestedExpiryMs = expiresInMsPos;
+    if (secretPos) secret = secretPos;
+  }
+
+  // Enforce configured short expiry with a strict ceiling
+  const clampedExpiryMs = requestedExpiryMs <= 0
+    ? requestedExpiryMs
+    : Math.min(requestedExpiryMs, MAX_SIGNED_URL_EXPIRY_MS);
+  const expires = Date.now() + clampedExpiryMs;
+
+  const payload = buildArtifactSigningPayload("v2", {
+    artifactId,
+    sha256,
+    filename,
+    ownerSessionId,
+    expires,
+  });
+
+  const signature = createHmac("sha256", secret).update(payload).digest("hex");
+  const downloadPath = `/api/attachments/${filename}?expires=${expires}&sig=${signature}`;
+  const validatedBaseUrl = validateApplicationBaseUrl(rawBaseUrl);
+  const downloadUrl = validatedBaseUrl ? `${validatedBaseUrl}${downloadPath}` : downloadPath;
+
+  return {
+    filename,
+    artifactId,
+    sha256,
+    ownerSessionId,
+    expires,
+    signature,
+    downloadPath,
+    downloadUrl,
+  };
+}
+
+export interface VerifyArtifactTokenParams {
+  filename: string;
+  ownerSessionId?: string;
+  artifactId?: string;
+  sha256?: string;
+  expiresStr: string | null;
+  sig: string | null;
+  secret?: string;
+  now?: number;
+}
+
+export function verifyArtifactDownloadToken(
+  paramsOrFilename: string | VerifyArtifactTokenParams,
+  ownerSessionIdPos: string = "public",
+  expiresStrPos: string | null = null,
+  sigPos: string | null = null,
+  secretPos: string = getArtifactSigningSecret(),
+  nowPos: number = Date.now(),
+  artifactIdPos: string = "",
+  sha256Pos: string = ""
+): { ok: true } | { ok: false; status: 401 | 403; error: string } {
+  let filename: string;
+  let ownerSessionId: string = "public";
+  let artifactId: string = "";
+  let sha256: string = "";
+  let expiresStr: string | null = null;
+  let sig: string | null = null;
+  let secret: string = secretPos;
+  let now: number = nowPos;
+
+  if (typeof paramsOrFilename === "object" && paramsOrFilename !== null) {
+    filename = paramsOrFilename.filename;
+    if (paramsOrFilename.ownerSessionId) ownerSessionId = paramsOrFilename.ownerSessionId;
+    if (paramsOrFilename.artifactId) artifactId = paramsOrFilename.artifactId;
+    if (paramsOrFilename.sha256) sha256 = paramsOrFilename.sha256;
+    expiresStr = paramsOrFilename.expiresStr;
+    sig = paramsOrFilename.sig;
+    if (paramsOrFilename.secret) secret = paramsOrFilename.secret;
+    if (paramsOrFilename.now !== undefined) now = paramsOrFilename.now;
+  } else {
+    filename = paramsOrFilename;
+    if (ownerSessionIdPos) ownerSessionId = ownerSessionIdPos;
+    expiresStr = expiresStrPos;
+    sig = sigPos;
+    if (secretPos) secret = secretPos;
+    if (nowPos !== undefined) now = nowPos;
+    if (artifactIdPos) artifactId = artifactIdPos;
+    if (sha256Pos) sha256 = sha256Pos;
+  }
+
+  if (!expiresStr || !sig) {
+    return { ok: false, status: 401, error: "missing download signature or expiration timestamp" };
+  }
+  const expires = Number(expiresStr);
+  if (!Number.isFinite(expires) || now > expires) {
+    return { ok: false, status: 401, error: "download link expired" };
+  }
+
+  // Try v2 signature first (immutable artifactId + sha256 in HMAC payload)
+  const expectedV2 = createHmac("sha256", secret)
+    .update(buildArtifactSigningPayload("v2", { artifactId, sha256, filename, ownerSessionId, expires }))
+    .digest("hex");
+
+  // Strict hex format check: an HMAC-SHA256 signature must be exactly 64 valid hex characters.
+  // Prevents Node.js Buffer.from(..., "hex") from silently truncating trailing non-hex characters.
+  const sigHex = sig.trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(sigHex)) {
+    return { ok: false, status: 403, error: "forbidden: invalid download signature" };
+  }
+
+  // Constant-time signature comparison using crypto.timingSafeEqual
+  const leftBuf = Buffer.from(sigHex, "hex");
+  const rightV2Buf = Buffer.from(expectedV2, "hex");
+
+  if (leftBuf.length === rightV2Buf.length && leftBuf.length === 32 && timingSafeEqual(leftBuf, rightV2Buf)) {
+    return { ok: true };
+  }
+
+  // Fallback check for v1 signature for backward compatibility
+  const expectedV1 = createHmac("sha256", secret)
+    .update(buildArtifactSigningPayload("v1", { filename, ownerSessionId, expires }))
+    .digest("hex");
+  const rightV1Buf = Buffer.from(expectedV1, "hex");
+
+  if (leftBuf.length === rightV1Buf.length && leftBuf.length === 32 && timingSafeEqual(leftBuf, rightV1Buf)) {
+    return { ok: true };
+  }
+
+  return { ok: false, status: 403, error: "forbidden: invalid download signature" };
+}
+

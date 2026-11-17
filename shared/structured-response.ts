@@ -1611,6 +1611,17 @@ export function validateStructuredResponse(input: unknown): ValidationResult {
         }
         const actionUrl = sanitizeUrl(res?.actionUrl || res?.sourceUrl || res?.url);
         const sourceUrl = sanitizeUrl(res?.sourceUrl || res?.url || res?.actionUrl);
+        // The protocol's own illustration ("https://verified-destination-url")
+        // is a shape, not a destination: its host is a single label that goes
+        // nowhere. A card button must lead somewhere real, so a payload built
+        // from the example values is not a card. Without this, any reply that
+        // quotes the instructions — a bot explaining its own prompt, or the
+        // fake engine echoing a turn verbatim — is rendered as a fake card.
+        const destination = actionUrl || sourceUrl;
+        if (destination && isIllustrativeDestination(destination)) {
+          errors.push(`Component '${compId}' (result) points at an illustrative, non-destination URL.`);
+          break;
+        }
         const source = sanitizeString(res?.source || res?.company || res?.retailer || res?.brand);
         let sourceDomain = sanitizeString(res?.sourceDomain);
         if (!sourceDomain && sourceUrl) {
@@ -2256,6 +2267,21 @@ function sanitizeColor(val: unknown): string | undefined {
   if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(trimmed)) return trimmed;
   if (/^(rgb|hsl)a?\(.+?\)$/.test(trimmed)) return trimmed;
   return undefined;
+}
+
+/** True for the protocol's placeholder destinations (single-label hosts such
+ * as "verified-destination-url"). Real cards point at a registrable domain,
+ * an IP address, or one of our own /api/ paths. */
+function isIllustrativeDestination(raw: string): boolean {
+  if (raw.startsWith("/api/")) return false;
+  try {
+    const host = new URL(raw).hostname.toLowerCase();
+    if (host.startsWith("[")) return false; // IPv6 literal
+    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(host)) return false; // IPv4 literal
+    return !host.includes(".");
+  } catch {
+    return true;
+  }
 }
 
 function sanitizeUrl(val: unknown): string | undefined {

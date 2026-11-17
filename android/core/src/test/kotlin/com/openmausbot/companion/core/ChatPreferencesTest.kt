@@ -15,12 +15,18 @@ class ChatPreferencesTest {
         text = "hello",
     )
 
-    private fun activity(id: String, at: Double = 1.0, ok: Boolean? = true): Message = Message(
+    private fun activity(
+        id: String,
+        at: Double = 1.0,
+        ok: Boolean? = true,
+        state: String? = null,
+        label: String? = null,
+    ): Message = Message(
         id = id,
         role = Message.Role.BOT,
         kind = Message.Kind.ACTIVITY,
         at = at,
-        tool = ToolActivity(name = "run", ok = ok),
+        tool = ToolActivity(name = "run", ok = ok, state = state, label = label),
     )
 
     /** The activity row a settled failed turn leaves: a chip plus the card. */
@@ -98,6 +104,36 @@ class ChatPreferencesTest {
             ActivityDetail.REDUCED,
         ).single()
         assertTrue(assertIs<TranscriptRow.ActivityRun>(row).running)
+    }
+
+    @Test
+    fun aSettledCancellationIsNotShownAsStillRunning() {
+        val row = transcriptRows(
+            listOf(
+                activity("a", at = 1.0, ok = true, state = "succeeded"),
+                activity("b", at = 2.0, ok = null, state = "cancelled"),
+            ),
+            ActivityDetail.REDUCED,
+        ).single()
+        assertFalse(assertIs<TranscriptRow.ActivityRun>(row).running)
+    }
+
+    @Test
+    fun aRetryingRowStillCountsAsRunning() {
+        val row = transcriptRows(
+            listOf(activity("a", at = 1.0, ok = null, state = "retrying")),
+            ActivityDetail.REDUCED,
+        ).single()
+        assertTrue(assertIs<TranscriptRow.Single>(row).message.tool?.state == "retrying")
+    }
+
+    @Test
+    fun activityPreviewsUseTheCanonicalLabelNotTheRegistryKey() {
+        val message = activity("a", ok = true, label = "Starting the project")
+        assertEquals(
+            "Starting the project",
+            rosterPreview(listOf(message), ActivityDetail.REDUCED),
+        )
     }
 
     @Test

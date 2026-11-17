@@ -100,6 +100,7 @@ android {
         targetSdk = 37
         versionCode = appVersionCode
         versionName = appVersionName
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     // The embedded host runtime (~90 MB per ABI of native binaries) makes the
@@ -298,6 +299,10 @@ dependencies {
     implementation("androidx.camera:camera-view:1.5.0")
     implementation("com.google.mlkit:barcode-scanning:17.3.0")
 
+    // Material Component Gallery (Preview showroom only, isolated from production)
+    add("previewImplementation", "com.google.android.material:material:1.14.0")
+    add("previewImplementation", "androidx.appcompat:appcompat:1.7.0")
+
     testImplementation("org.jetbrains.kotlin:kotlin-test-junit:2.2.21")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2")
     testImplementation("junit:junit:4.13.2")
@@ -317,4 +322,10 @@ dependencies {
     testImplementation("androidx.compose.ui:ui-test-junit4")
     debugImplementation(composeBom)
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
+    androidTestImplementation("com.squareup.okhttp3:okhttp:4.12.0")
 }

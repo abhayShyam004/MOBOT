@@ -12,6 +12,8 @@ import { dirname, join, resolve } from "node:path";
 import { writeFileAtomic } from "./atomic.ts";
 import { DATA_DIR } from "./config.ts";
 import { snapshot, restore } from "./checkpoints.ts";
+import type { CanonicalGoalRecord } from "./goals.ts";
+import type { OutcomeAdmissionInput, OutcomeAdmissionResult } from "./outcome/outcome-types.ts";
 
 /**
  * Official Roadmap Phase 21 Formal Data Contract: Persistent Agent Jobs
@@ -30,6 +32,8 @@ export interface PersistentAgentJob {
   jobId: string;
   botId: string;
   threadId: string;
+  turnId?: string;
+  stableCardId?: string;
   title: string;
   objective: string;
   state: JobState;
@@ -48,6 +52,41 @@ export const ERR_INVALID_JOB_TRANSITION = "ERR_INVALID_JOB_TRANSITION";
 export const ERR_JOB_ALREADY_CLAIMED = "ERR_JOB_ALREADY_CLAIMED";
 export const ERR_JOB_VALIDATION_FAILED = "ERR_JOB_VALIDATION_FAILED";
 export const ERR_STALE_WORKER_FENCE = "ERR_STALE_WORKER_FENCE";
+export const ERR_WAL_CORRUPTION = "ERR_WAL_CORRUPTION";
+export const ERR_UNSUPPORTED_SANDBOX_ENVIRONMENT = "ERR_UNSUPPORTED_SANDBOX_ENVIRONMENT";
+export const ERR_AGGREGATE_STORAGE_LIMIT_EXCEEDED = "ERR_AGGREGATE_STORAGE_LIMIT_EXCEEDED";
+
+export class UnsupportedSandboxEnvironmentError extends Error {
+  readonly code = ERR_UNSUPPORTED_SANDBOX_ENVIRONMENT;
+  readonly reason?: string;
+  constructor(message: string, reason?: string) {
+    super(message);
+    this.name = "UnsupportedSandboxEnvironmentError";
+    this.reason = reason;
+  }
+}
+
+export class AggregateStorageLimitExceededError extends Error {
+  readonly code = ERR_AGGREGATE_STORAGE_LIMIT_EXCEEDED;
+  readonly bytesUsed?: number;
+  readonly byteLimit?: number;
+  constructor(message: string, bytesUsed?: number, byteLimit?: number) {
+    super(message);
+    this.name = "AggregateStorageLimitExceededError";
+    this.bytesUsed = bytesUsed;
+    this.byteLimit = byteLimit;
+  }
+}
+
+export class WalCorruptionError extends Error {
+  readonly code = ERR_WAL_CORRUPTION;
+  readonly details?: Record<string, unknown>;
+  constructor(message = "Write-Ahead Log (WAL) corrupted or invalid sequence", details?: Record<string, unknown>) {
+    super(message);
+    this.name = "WalCorruptionError";
+    this.details = details;
+  }
+}
 
 export class CorruptJobCheckpointError extends Error {
   readonly code = ERR_CORRUPT_JOB_CHECKPOINT;
@@ -92,13 +131,30 @@ export class StaleWorkerFenceError extends Error {
   readonly jobId: string;
   readonly expectedGeneration: number;
   readonly receivedGeneration: number;
-  constructor(jobId: string, expectedGeneration: number, receivedGeneration: number) {
-    super(`Stale worker fencing error for job ${jobId}: active generation is ${expectedGeneration}, but write attempt used ${receivedGeneration}`);
+  constructor(jobId: string, expectedGeneration: number, receivedGeneration: number, customMessage?: string) {
+    super(customMessage ?? `Stale worker fencing error for job ${jobId}: active generation is ${expectedGeneration}, but write attempt used ${receivedGeneration}`);
     this.name = "StaleWorkerFenceError";
     this.jobId = jobId;
     this.expectedGeneration = expectedGeneration;
     this.receivedGeneration = receivedGeneration;
   }
+}
+
+export interface FencingToken {
+  jobId: string;
+  workerId: string;
+  fencingGeneration: number;
+  leaseExpiresAtMs?: number;
+}
+
+export interface SupervisorCapability {
+  readonly supervisorId: string;
+  readonly token: string;
+  readonly issuedAtMs: number;
+}
+
+export function isOutcomeJob(job: PersistentAgentJob): boolean {
+  return Boolean(job.turnId || job.stableCardId);
 }
 
 export class JobValidationError extends Error {
@@ -116,6 +172,8 @@ export class JobValidationError extends Error {
  */
 export interface JobJournalEntry {
   id: string;
+  sequenceNumber?: number;
+  checksum?: string;
   jobId: string;
   fromState: JobState;
   toState: JobState;
@@ -127,6 +185,7 @@ export interface JobJournalEntry {
   workerId?: string;
   fencingGeneration?: number;
   jobSnapshot?: PersistentAgentJob;
+  goalSnapshot?: CanonicalGoalRecord;
 }
 
 /**
@@ -191,6 +250,8 @@ export function validatePersistentAgentJob(val: unknown, baseDir = CHECKPOINTS_B
   if (typeof j.jobId !== "string" || !j.jobId.trim() || j.jobId.includes("/") || j.jobId.includes("\\")) return false;
   if (typeof j.botId !== "string" || !j.botId.trim() || j.botId.includes("/") || j.botId.includes("\\")) return false;
   if (typeof j.threadId !== "string" || !j.threadId.trim() || j.threadId.includes("/") || j.threadId.includes("\\")) return false;
+  if (j.turnId !== undefined && (typeof j.turnId !== "string" || !j.turnId.trim())) return false;
+  if (j.stableCardId !== undefined && (typeof j.stableCardId !== "string" || !j.stableCardId.trim())) return false;
 
   // Content bounds
   if (typeof j.title !== "string" || !j.title.trim() || j.title.length > 256) return false;
@@ -281,6 +342,10 @@ export class PersistentJobManager {
   private readonly clock: () => number;
   private jobs: Map<string, PersistentAgentJob> = new Map();
   private workerClaims: Map<string, WorkerClaim> = new Map();
+  private reconstructedGoals: Map<string, CanonicalGoalRecord> = new Map();
+  private lastSequenceNumber = 0;
+  private goalAdmissionHandler?: (goal: CanonicalGoalRecord) => void;
+  private readonly supervisorCapabilities = new Set<string>();
 
   constructor(options?: {
     file?: string;
@@ -288,12 +353,14 @@ export class PersistentJobManager {
     checkpointsDir?: string;
     leasesFile?: string;
     clock?: () => number;
+    onGoalAdmission?: (goal: CanonicalGoalRecord) => void;
   }) {
     this.file = options?.file ?? join(DATA_DIR, "jobs.json");
     this.journalFile = options?.journalFile ?? join(DATA_DIR, "job-journal.jsonl");
     this.checkpointsDir = options?.checkpointsDir ?? CHECKPOINTS_BASE_DIR();
     this.leasesFile = options?.leasesFile ?? join(dirname(this.file), "worker-leases.json");
     this.clock = options?.clock ?? Date.now;
+    this.goalAdmissionHandler = options?.onGoalAdmission;
     this.load();
     this.loadLeases();
     this.syncStateWithJournal();
@@ -348,12 +415,25 @@ export class PersistentJobManager {
     } catch {}
   }
 
-  private appendJournal(entry: Omit<JobJournalEntry, "id">): JobJournalEntry {
+  private computeEntryChecksum(entry: Record<string, unknown>): string {
+    const { checksum: _discard, ...canonical } = entry;
+    const sortedKeys = Object.keys(canonical).sort();
+    const sortedObj: Record<string, unknown> = {};
+    for (const k of sortedKeys) {
+      sortedObj[k] = canonical[k];
+    }
+    return createHash("sha256").update(JSON.stringify(sortedObj)).digest("hex");
+  }
+
+  private appendJournal(entry: Omit<JobJournalEntry, "id" | "sequenceNumber" | "checksum">): JobJournalEntry {
     mkdirSync(dirname(this.journalFile), { recursive: true });
+    this.lastSequenceNumber += 1;
     const fullEntry: JobJournalEntry = {
       id: randomUUID(),
+      sequenceNumber: this.lastSequenceNumber,
       ...entry,
     };
+    fullEntry.checksum = this.computeEntryChecksum(fullEntry as unknown as Record<string, unknown>);
     const line = JSON.stringify(fullEntry) + "\n";
     const fd = openSync(this.journalFile, "a", 0o600);
     try {
@@ -368,6 +448,8 @@ export class PersistentJobManager {
   public reload(): void {
     this.jobs.clear();
     this.workerClaims.clear();
+    this.reconstructedGoals.clear();
+    this.lastSequenceNumber = 0;
     this.load();
     this.loadLeases();
     this.syncStateWithJournal();
@@ -377,65 +459,164 @@ export class PersistentJobManager {
     return this.recoverFromJournal();
   }
 
+  public getReconstructedGoals(): CanonicalGoalRecord[] {
+    return Array.from(this.reconstructedGoals.values()).map((g) => ({ ...g }));
+  }
+
+  public setGoalAdmissionHandler(handler: (goal: CanonicalGoalRecord) => void): void {
+    this.goalAdmissionHandler = handler;
+  }
+
   private recoverFromJournal(): number {
     if (!existsSync(this.journalFile)) return 0;
     let recoveredCount = 0;
-    try {
-      const lines = readFileSync(this.journalFile, "utf8").split("\n").filter((l) => l.trim().length > 0);
-      for (const line of lines) {
-        try {
-          const entry = JSON.parse(line) as JobJournalEntry;
-          if (entry.jobSnapshot && validatePersistentAgentJob(entry.jobSnapshot, this.checkpointsDir)) {
-            this.jobs.set(entry.jobId, { ...entry.jobSnapshot });
-            recoveredCount++;
-          } else {
-            const existing = this.jobs.get(entry.jobId);
-            if (existing) {
-              existing.state = entry.toState;
-              existing.currentMilestoneIndex = entry.milestoneIndex;
-              existing.progressPercent = entry.progressPercent;
-              existing.updatedAtMs = entry.timestampMs;
-              if (entry.fencingGeneration) existing.fencingGeneration = entry.fencingGeneration;
-              if (entry.toState === "COMPLETED") existing.completedAtMs = entry.timestampMs;
-              if (entry.toState === "FAILED" && entry.reason) existing.failureReason = entry.reason;
-            } else {
-              const recoveredJob: PersistentAgentJob = {
-                jobId: entry.jobId,
-                botId: "worker",
-                threadId: entry.jobId,
-                title: `Recovered Job ${entry.jobId}`,
-                objective: "Reconstructed from transaction journal",
-                state: entry.toState,
-                progressPercent: entry.progressPercent,
-                currentMilestoneIndex: entry.milestoneIndex,
-                checkpointPayloadPath: getSafeCheckpointPath(entry.jobId, entry.milestoneIndex, this.checkpointsDir),
-                createdAtMs: entry.timestampMs,
-                updatedAtMs: entry.timestampMs,
-                completedAtMs: entry.toState === "COMPLETED" ? entry.timestampMs : undefined,
-                failureReason: entry.toState === "FAILED" ? entry.reason : undefined,
-                fencingGeneration: entry.fencingGeneration ?? 1,
-              };
-              this.jobs.set(entry.jobId, recoveredJob);
-              recoveredCount++;
-            }
-          }
-        } catch {
-          // Skip torn final line or corrupted trailing entry safely
+    const content = readFileSync(this.journalFile, "utf8");
+    const rawLines = content.split("\n").filter((l) => l.trim().length > 0);
+    if (rawLines.length === 0) return 0;
+
+    let maxSeq = 0;
+    for (let i = 0; i < rawLines.length; i++) {
+      const line = rawLines[i]!;
+      const isTrailing = (i === rawLines.length - 1);
+      let entry: JobJournalEntry;
+      try {
+        entry = JSON.parse(line) as JobJournalEntry;
+      } catch (err) {
+        if (isTrailing) {
+          console.warn("PersistentJobManager: Discarding torn trailing record at EOF", err);
+          break;
+        } else {
+          throw new WalCorruptionError(`Torn or corrupt record in middle of WAL at line ${i + 1}`, { lineIndex: i });
         }
       }
-      if (this.jobs.size > 0) {
-        this.save();
+
+      // Checksum validation
+      if (entry.checksum) {
+        const expectedChecksum = this.computeEntryChecksum(entry as unknown as Record<string, unknown>);
+        if (entry.checksum !== expectedChecksum) {
+          if (isTrailing) {
+            console.warn("PersistentJobManager: Checksum mismatch on trailing record at EOF, discarding");
+            break;
+          } else {
+            throw new WalCorruptionError(`WAL checksum mismatch at line ${i + 1}`, { lineIndex: i, entryId: entry.id });
+          }
+        }
       }
-    } catch (err) {
-      console.warn("PersistentJobManager: Failed recovering from journal", err);
+
+      // Monotonic sequence number validation
+      if (typeof entry.sequenceNumber === "number") {
+        if (entry.sequenceNumber <= maxSeq) {
+          if (isTrailing) {
+            console.warn("PersistentJobManager: Non-monotonic sequence number on trailing record at EOF, discarding");
+            break;
+          } else {
+            throw new WalCorruptionError(`Non-monotonic WAL sequence number at line ${i + 1}: got ${entry.sequenceNumber}, expected > ${maxSeq}`, { lineIndex: i, sequenceNumber: entry.sequenceNumber });
+          }
+        }
+        maxSeq = entry.sequenceNumber;
+      }
+
+      // Reconstruct goal snapshot if present
+      if (entry.goalSnapshot && entry.goalSnapshot.id) {
+        this.reconstructedGoals.set(entry.goalSnapshot.id, { ...entry.goalSnapshot });
+      }
+
+      // Reconstruct job
+      if (entry.jobSnapshot && validatePersistentAgentJob(entry.jobSnapshot, this.checkpointsDir)) {
+        this.jobs.set(entry.jobId, { ...entry.jobSnapshot });
+        recoveredCount++;
+      } else {
+        const existing = this.jobs.get(entry.jobId);
+        if (existing) {
+          existing.state = entry.toState;
+          existing.currentMilestoneIndex = entry.milestoneIndex;
+          existing.progressPercent = entry.progressPercent;
+          existing.updatedAtMs = entry.timestampMs;
+          if (entry.fencingGeneration) existing.fencingGeneration = entry.fencingGeneration;
+          if (entry.toState === "COMPLETED") existing.completedAtMs = entry.timestampMs;
+          if (entry.toState === "FAILED" && entry.reason) existing.failureReason = entry.reason;
+        } else {
+          const recoveredJob: PersistentAgentJob = {
+            jobId: entry.jobId,
+            botId: "worker",
+            threadId: entry.jobId,
+            title: `Recovered Job ${entry.jobId}`,
+            objective: "Reconstructed from transaction journal",
+            state: entry.toState,
+            progressPercent: entry.progressPercent,
+            currentMilestoneIndex: entry.milestoneIndex,
+            checkpointPayloadPath: getSafeCheckpointPath(entry.jobId, entry.milestoneIndex, this.checkpointsDir),
+            createdAtMs: entry.timestampMs,
+            updatedAtMs: entry.timestampMs,
+            completedAtMs: entry.toState === "COMPLETED" ? entry.timestampMs : undefined,
+            failureReason: entry.toState === "FAILED" ? entry.reason : undefined,
+            fencingGeneration: entry.fencingGeneration ?? 1,
+          };
+          this.jobs.set(entry.jobId, recoveredJob);
+          recoveredCount++;
+        }
+      }
+    }
+
+    this.lastSequenceNumber = Math.max(this.lastSequenceNumber, maxSeq);
+
+    if (this.jobs.size > 0) {
+      this.save();
     }
     return recoveredCount;
   }
 
   private syncStateWithJournal(): void {
-    if (this.jobs.size === 0 && existsSync(this.journalFile)) {
+    if (existsSync(this.journalFile)) {
       this.recoverFromJournal();
     }
+  }
+
+  assertWorkerLeaseActive(token: FencingToken): void {
+    this.load();
+    this.loadLeases();
+    const job = this.jobs.get(token.jobId);
+    if (!job) throw new JobValidationError(`Job not found: ${token.jobId}`, "jobId");
+    const claim = this.workerClaims.get(token.jobId);
+    const now = this.clock();
+    if (!claim || claim.workerId !== token.workerId || claim.fencingGeneration !== token.fencingGeneration || claim.leaseExpiresAtMs <= now) {
+      throw new StaleWorkerFenceError(
+        token.jobId,
+        claim?.fencingGeneration ?? job.fencingGeneration ?? 1,
+        token.fencingGeneration,
+        `Worker ${token.workerId} (generation ${token.fencingGeneration}) does not hold active unexpired lease for job ${token.jobId}`
+      );
+    }
+  }
+
+  mintSupervisorCapability(supervisorId = "supervisor"): SupervisorCapability {
+    const token = randomUUID();
+    this.supervisorCapabilities.add(token);
+    return {
+      supervisorId,
+      token,
+      issuedAtMs: this.clock(),
+    };
+  }
+
+  revokeSupervisorCapability(token: string): boolean {
+    return this.supervisorCapabilities.delete(token);
+  }
+
+  verifySupervisorCapability(auth?: unknown): { ok: boolean; supervisorId?: string; error?: string } {
+    if (!auth || typeof auth !== "object") {
+      return { ok: false, error: "Missing supervisor authorization capability" };
+    }
+    const candidate = auth as Partial<SupervisorCapability>;
+    if (!candidate.token || typeof candidate.token !== "string" || !this.supervisorCapabilities.has(candidate.token)) {
+      return { ok: false, error: "Invalid, forged, or revoked supervisor authorization token" };
+    }
+    return { ok: true, supervisorId: candidate.supervisorId || "supervisor" };
+  }
+
+  isOutcomeJob(jobId: string): boolean {
+    const job = this.jobs.get(jobId);
+    return job ? isOutcomeJob(job) : false;
   }
 
   renewLease(jobId: string, workerId: string, fencingGeneration: number, extensionMs = DEFAULT_LEASE_DURATION_MS): void {
@@ -444,24 +625,51 @@ export class PersistentJobManager {
     const job = this.jobs.get(jobId);
     if (!job) throw new JobValidationError(`Job not found: ${jobId}`, "jobId");
     const activeClaim = this.workerClaims.get(jobId);
+    const now = this.clock();
     if (!activeClaim || activeClaim.workerId !== workerId || activeClaim.fencingGeneration !== fencingGeneration) {
       throw new StaleWorkerFenceError(jobId, activeClaim?.fencingGeneration ?? job.fencingGeneration ?? 1, fencingGeneration);
     }
-    activeClaim.leaseExpiresAtMs = this.clock() + extensionMs;
+    // Strict hardening: Prevent renewLease from resurrecting expired claims
+    if (activeClaim.leaseExpiresAtMs <= now) {
+      throw new StaleWorkerFenceError(
+        jobId,
+        activeClaim.fencingGeneration,
+        fencingGeneration,
+        `Cannot renew expired lease: claim for worker ${workerId} expired at ${activeClaim.leaseExpiresAtMs} (now: ${now})`
+      );
+    }
+    activeClaim.leaseExpiresAtMs = now + extensionMs;
     this.saveLeases();
   }
 
-  releaseLease(jobId: string, workerId?: string): void {
-    if (workerId) {
-      const claim = this.workerClaims.get(jobId);
-      if (claim && claim.workerId === workerId) {
-        this.workerClaims.delete(jobId);
-        this.saveLeases();
+  releaseLease(jobId: string, workerId?: string, fencingGeneration?: number): void {
+    this.load();
+    this.loadLeases();
+    const job = this.jobs.get(jobId);
+    const claim = this.workerClaims.get(jobId);
+    if (!claim) return;
+
+    const isOutcome = job ? isOutcomeJob(job) : false;
+    if (isOutcome || workerId !== undefined || fencingGeneration !== undefined) {
+      if (!workerId || fencingGeneration === undefined) {
+        throw new StaleWorkerFenceError(
+          jobId,
+          claim.fencingGeneration,
+          0,
+          "Both workerId and fencingGeneration are required to release lease"
+        );
       }
-    } else {
-      this.workerClaims.delete(jobId);
-      this.saveLeases();
+      if (claim.workerId !== workerId || claim.fencingGeneration !== fencingGeneration) {
+        throw new StaleWorkerFenceError(
+          jobId,
+          claim.fencingGeneration,
+          fencingGeneration,
+          `Cannot release lease: claim belongs to worker ${claim.workerId} (gen ${claim.fencingGeneration}), release attempted by ${workerId} (gen ${fencingGeneration})`
+        );
+      }
     }
+    this.workerClaims.delete(jobId);
+    this.saveLeases();
   }
 
   private computeChecksum(data: Record<string, unknown>): string {
@@ -471,6 +679,178 @@ export class PersistentJobManager {
   // ───────────────────────────────────────────────
   // Public Lifecycle & State Machine Operations
   // ───────────────────────────────────────────────
+
+  admitOutcomeJob(input: OutcomeAdmissionInput): OutcomeAdmissionResult {
+    const startMs = Date.now();
+    const now = this.clock();
+    const jobId = input.jobId ?? `job_${randomUUID()}`;
+
+    if (this.jobs.has(jobId)) {
+      throw new JobValidationError(`Job with ID ${jobId} already exists`, "jobId");
+    }
+
+    const goalId = jobId.startsWith("job_") ? jobId.replace("job_", "goal_") : `goal_${jobId}`;
+    const rawMilestones = input.milestones && input.milestones.length > 0
+      ? input.milestones
+      : [{ title: `Execute objective: ${input.objective.trim()}` }];
+
+    const canonicalMilestones: Array<{
+      id: string;
+      title: string;
+      status: "pending" | "active" | "completed" | "failed";
+      verifiedAt?: number;
+    }> = rawMilestones.map((m, idx) => ({
+      id: randomUUID(),
+      title: m.title.trim(),
+      status: (idx === 0 ? "active" : "pending") as "pending" | "active" | "completed" | "failed",
+    }));
+
+    const canonicalGoal: CanonicalGoalRecord = {
+      id: goalId,
+      botId: input.botId,
+      originatingPrompt: input.objective.trim(),
+      formalObjective: input.objective.trim(),
+      constraints: (input.constraints || []).map((c) => c.trim()),
+      successCriteria: (input.successCriteria || []).map((s) => s.trim()),
+      milestones: canonicalMilestones,
+      activeMilestoneIndex: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const checkpointPayloadPath = getSafeCheckpointPath(jobId, 0, this.checkpointsDir);
+    const stableCardId = input.stableCardId ?? `card_outcome_${jobId}`;
+
+    const job: PersistentAgentJob = {
+      jobId,
+      botId: input.botId,
+      threadId: input.threadId,
+      turnId: input.turnId,
+      stableCardId,
+      title: input.title.trim(),
+      objective: input.objective.trim(),
+      state: "QUEUED",
+      progressPercent: 0,
+      currentMilestoneIndex: 0,
+      checkpointPayloadPath,
+      createdAtMs: now,
+      updatedAtMs: now,
+      fencingGeneration: 1,
+    };
+
+    if (!validatePersistentAgentJob(job, this.checkpointsDir)) {
+      throw new JobValidationError("Admitted job violates canonical schema", "job");
+    }
+
+    // Step 1: Persist initial milestone checkpoint to disk and fsync
+    this.writeCheckpointPayload(jobId, 0, {
+      jobId,
+      botId: input.botId,
+      milestoneIndex: 0,
+      milestoneTitle: canonicalMilestones[0]?.title ?? "Initial Objective Setup",
+      progressPercent: 0,
+      state: "QUEUED",
+      timestampMs: now,
+      checksum: this.computeChecksum(input.initialData ?? {}),
+      data: input.initialData ?? {},
+    });
+
+    // Step 2: Append authoritative WAL creation record containing BOTH job and goal snapshots
+    this.appendJournal({
+      jobId,
+      fromState: "QUEUED",
+      toState: "QUEUED",
+      timestampMs: now,
+      milestoneIndex: 0,
+      progressPercent: 0,
+      fencingGeneration: 1,
+      reason: "Authoritative admission of outcome job and canonical goal",
+      jobSnapshot: { ...job },
+      goalSnapshot: { ...canonicalGoal },
+    });
+
+    // Step 3: Register in memory
+    this.jobs.set(jobId, job);
+    this.reconstructedGoals.set(goalId, canonicalGoal);
+
+    // Step 4: Projections update
+    this.save();
+    if (this.goalAdmissionHandler) {
+      try {
+        this.goalAdmissionHandler(canonicalGoal);
+      } catch (err) {
+        console.warn("PersistentJobManager: Failed syncing goal admission handler", err);
+      }
+    }
+
+    return {
+      job: { ...job },
+      goal: { ...canonicalGoal },
+      admissionDurationMs: Date.now() - startMs,
+    };
+  }
+
+  writeCheckpointPayloadFenced(input: {
+    jobId: string;
+    milestoneIndex: number;
+    payload: JobCheckpointPayload;
+    workerId: string;
+    fencingGeneration: number;
+  }): string {
+    this.load();
+    this.loadLeases();
+    const job = this.jobs.get(input.jobId);
+    if (!job) throw new JobValidationError(`Job not found: ${input.jobId}`, "jobId");
+
+    const now = this.clock();
+    const claim = this.workerClaims.get(input.jobId);
+    if (!claim || claim.workerId !== input.workerId || claim.fencingGeneration !== input.fencingGeneration || claim.leaseExpiresAtMs <= now) {
+      throw new StaleWorkerFenceError(input.jobId, claim?.fencingGeneration ?? job.fencingGeneration ?? 1, input.fencingGeneration);
+    }
+
+    return this.writeCheckpointPayload(input.jobId, input.milestoneIndex, input.payload);
+  }
+
+  updateJobProgressCardFenced(input: {
+    jobId: string;
+    workerId: string;
+    fencingGeneration: number;
+    progressPercent?: number;
+    message?: string;
+    patchMessageFn?: (threadId: string, cardId: string, patch: Record<string, unknown>) => void;
+  }): { ok: boolean; progressPercent: number; message: string } {
+    this.load();
+    this.loadLeases();
+    const job = this.jobs.get(input.jobId);
+    if (!job) throw new JobValidationError(`Job not found: ${input.jobId}`, "jobId");
+
+    const now = this.clock();
+    const claim = this.workerClaims.get(input.jobId);
+    if (!claim || claim.workerId !== input.workerId || claim.fencingGeneration !== input.fencingGeneration || claim.leaseExpiresAtMs <= now) {
+      throw new StaleWorkerFenceError(input.jobId, claim?.fencingGeneration ?? job.fencingGeneration ?? 1, input.fencingGeneration);
+    }
+
+    if (input.progressPercent !== undefined) {
+      job.progressPercent = Math.min(100, Math.max(0, input.progressPercent));
+    }
+    job.updatedAtMs = now;
+    this.save();
+
+    const cardId = job.stableCardId ?? `card_outcome_${job.jobId}`;
+    if (input.patchMessageFn) {
+      input.patchMessageFn(job.threadId, cardId, {
+        progressPercent: job.progressPercent,
+        message: input.message ?? `Progress: ${job.progressPercent}%`,
+        updatedAtMs: now,
+      });
+    }
+
+    return {
+      ok: true,
+      progressPercent: job.progressPercent,
+      message: input.message ?? `Progress: ${job.progressPercent}%`,
+    };
+  }
 
   createJob(input: CreateJobInput): PersistentAgentJob {
     const now = this.clock();
@@ -545,7 +925,7 @@ export class PersistentJobManager {
       throw new JobAlreadyClaimedError(jobId, activeClaim.workerId);
     }
 
-    const isLeaseTakeover = job.state === "RUNNING" && Boolean(activeClaim && activeClaim.leaseExpiresAtMs <= now);
+    const isLeaseTakeover = job.state === "RUNNING" && Boolean(activeClaim && (activeClaim.leaseExpiresAtMs <= now || activeClaim.workerId === workerId));
     if (!isLeaseTakeover && !isPermittedTransition(job.state, "RUNNING")) {
       throw new InvalidJobTransitionError(job.state, "RUNNING");
     }
@@ -587,15 +967,36 @@ export class PersistentJobManager {
     const job = this.jobs.get(jobId);
     if (!job) throw new JobValidationError(`Job not found: ${jobId}`, "jobId");
 
-    if (fencingGeneration !== undefined && job.fencingGeneration !== undefined && fencingGeneration !== job.fencingGeneration) {
-      throw new StaleWorkerFenceError(jobId, job.fencingGeneration, fencingGeneration);
+    const now = this.clock();
+    const claim = this.workerClaims.get(jobId);
+    const isOutcome = isOutcomeJob(job);
+
+    if (isOutcome) {
+      if (!workerId || fencingGeneration === undefined) {
+        throw new StaleWorkerFenceError(
+          jobId,
+          claim?.fencingGeneration ?? job.fencingGeneration ?? 1,
+          0,
+          "Mandatory fencing credentials (workerId and fencingGeneration) required to pause outcome job"
+        );
+      }
+    }
+
+    if (workerId || fencingGeneration !== undefined) {
+      if (!claim || claim.workerId !== workerId || (fencingGeneration !== undefined && claim.fencingGeneration !== fencingGeneration) || claim.leaseExpiresAtMs <= now) {
+        throw new StaleWorkerFenceError(
+          jobId,
+          claim?.fencingGeneration ?? job.fencingGeneration ?? 1,
+          fencingGeneration ?? 0,
+          `Stale worker fence violation on pauseForUser for job ${jobId}`
+        );
+      }
     }
 
     if (!isPermittedTransition(job.state, "PAUSED_FOR_USER")) {
       throw new InvalidJobTransitionError(job.state, "PAUSED_FOR_USER");
     }
 
-    const now = this.clock();
     let gitHash: string | undefined;
 
     // Flush current safe workspace checkpoint if cwd provided
@@ -685,9 +1086,20 @@ export class PersistentJobManager {
     return { ...job };
   }
 
-  blockDependency(jobId: string, reason: string): PersistentAgentJob {
-    const job = this.jobs.get(jobId);
+  blockDependency(jobId: string, reason: string, fencingToken?: FencingToken): PersistentAgentJob {
+    this.load();
+    this.loadLeases();
+    let job = this.jobs.get(jobId);
     if (!job) throw new JobValidationError(`Job not found: ${jobId}`, "jobId");
+
+    if (isOutcomeJob(job)) {
+      if (!fencingToken) {
+        throw new StaleWorkerFenceError(jobId, job.fencingGeneration ?? 1, 0, "Fencing token required to block dependency for outcome job");
+      }
+      this.assertWorkerLeaseActive(fencingToken);
+      // Re-fetch job in case assertWorkerLeaseActive refreshed this.jobs from disk
+      job = this.jobs.get(jobId)!;
+    }
 
     if (!isPermittedTransition(job.state, "BLOCKED_DEPENDENCY")) {
       throw new InvalidJobTransitionError(job.state, "BLOCKED_DEPENDENCY");
@@ -697,6 +1109,7 @@ export class PersistentJobManager {
     const prevState = job.state;
     job.state = "BLOCKED_DEPENDENCY";
     job.updatedAtMs = now;
+    this.jobs.set(jobId, job);
 
     // WAL: append journal and flush FIRST
     this.appendJournal({
@@ -706,6 +1119,7 @@ export class PersistentJobManager {
       timestampMs: now,
       milestoneIndex: job.currentMilestoneIndex,
       progressPercent: job.progressPercent,
+      workerId: fencingToken?.workerId,
       fencingGeneration: job.fencingGeneration,
       reason,
       jobSnapshot: { ...job },
@@ -715,9 +1129,32 @@ export class PersistentJobManager {
     return { ...job };
   }
 
-  unblockDependency(jobId: string): PersistentAgentJob {
+  unblockDependency(jobId: string, auth?: SupervisorCapability): PersistentAgentJob {
+    this.load();
+    this.loadLeases();
     const job = this.jobs.get(jobId);
     if (!job) throw new JobValidationError(`Job not found: ${jobId}`, "jobId");
+
+    const isOutcome = isOutcomeJob(job);
+    let verifiedSupervisorId: string | undefined;
+
+    if (isOutcome) {
+      const verification = this.verifySupervisorCapability(auth);
+      if (!verification.ok) {
+        throw new StaleWorkerFenceError(
+          jobId,
+          job.fencingGeneration ?? 1,
+          0,
+          `Unauthorized dependency unblock: outcome jobs require valid supervisor capability token (${verification.error})`
+        );
+      }
+      verifiedSupervisorId = verification.supervisorId;
+
+      // Invalidate old worker authority durably by advancing generation and clearing claims
+      job.fencingGeneration = (job.fencingGeneration ?? 1) + 1;
+      this.workerClaims.delete(jobId);
+      this.saveLeases();
+    }
 
     if (!isPermittedTransition(job.state, "RUNNING")) {
       throw new InvalidJobTransitionError(job.state, "RUNNING");
@@ -737,7 +1174,7 @@ export class PersistentJobManager {
       milestoneIndex: job.currentMilestoneIndex,
       progressPercent: job.progressPercent,
       fencingGeneration: job.fencingGeneration,
-      reason: "Dependency unblocked",
+      reason: verifiedSupervisorId ? `[${verifiedSupervisorId}] Dependency unblocked` : "Dependency unblocked",
       jobSnapshot: { ...job },
     });
 
@@ -760,8 +1197,16 @@ export class PersistentJobManager {
     const job = this.jobs.get(input.jobId);
     if (!job) throw new JobValidationError(`Job not found: ${input.jobId}`, "jobId");
 
-    if (job.state !== "RUNNING") {
-      throw new JobValidationError(`Cannot advance milestone while job is in ${job.state} state`, "state");
+    const isOutcome = isOutcomeJob(job);
+    if (isOutcome) {
+      if (!input.workerId || input.fencingGeneration === undefined) {
+        throw new StaleWorkerFenceError(
+          input.jobId,
+          job.fencingGeneration ?? 1,
+          0,
+          "Mandatory fencing credentials (workerId and fencingGeneration) required to advance outcome job"
+        );
+      }
     }
 
     // Fencing check
@@ -770,11 +1215,15 @@ export class PersistentJobManager {
     }
 
     const now = this.clock();
-    if (input.workerId) {
+    if (input.workerId || input.fencingGeneration !== undefined) {
       const claim = this.workerClaims.get(input.jobId);
-      if (claim && (claim.workerId !== input.workerId || claim.leaseExpiresAtMs < now)) {
+      if (!claim || claim.workerId !== input.workerId || (input.fencingGeneration !== undefined && claim.fencingGeneration !== input.fencingGeneration) || claim.leaseExpiresAtMs <= now) {
         throw new StaleWorkerFenceError(input.jobId, claim?.fencingGeneration ?? job.fencingGeneration ?? 1, input.fencingGeneration ?? 0);
       }
+    }
+
+    if (job.state !== "RUNNING") {
+      throw new JobValidationError(`Cannot advance milestone while job is in ${job.state} state`, "state");
     }
 
     if (input.milestoneIndex < job.currentMilestoneIndex) {
@@ -841,15 +1290,33 @@ export class PersistentJobManager {
     const job = this.jobs.get(jobId);
     if (!job) throw new JobValidationError(`Job not found: ${jobId}`, "jobId");
 
+    const isOutcome = isOutcomeJob(job);
+    if (isOutcome) {
+      if (!workerId || fencingGeneration === undefined) {
+        throw new StaleWorkerFenceError(
+          jobId,
+          job.fencingGeneration ?? 1,
+          0,
+          "Mandatory fencing credentials (workerId and fencingGeneration) required to complete outcome job"
+        );
+      }
+    }
+
     if (fencingGeneration !== undefined && job.fencingGeneration !== undefined && fencingGeneration !== job.fencingGeneration) {
       throw new StaleWorkerFenceError(jobId, job.fencingGeneration, fencingGeneration);
+    }
+
+    const now = this.clock();
+    if (workerId || fencingGeneration !== undefined) {
+      const claim = this.workerClaims.get(jobId);
+      if (!claim || claim.workerId !== workerId || (fencingGeneration !== undefined && claim.fencingGeneration !== fencingGeneration) || claim.leaseExpiresAtMs <= now) {
+        throw new StaleWorkerFenceError(jobId, claim?.fencingGeneration ?? job.fencingGeneration ?? 1, fencingGeneration ?? 0);
+      }
     }
 
     if (!isPermittedTransition(job.state, "COMPLETED")) {
       throw new InvalidJobTransitionError(job.state, "COMPLETED");
     }
-
-    const now = this.clock();
     const prevState = job.state;
     job.state = "COMPLETED";
     job.progressPercent = 100;
@@ -897,8 +1364,28 @@ export class PersistentJobManager {
     const job = this.jobs.get(jobId);
     if (!job) throw new JobValidationError(`Job not found: ${jobId}`, "jobId");
 
+    const isOutcome = isOutcomeJob(job);
+    if (isOutcome && !failureReason.startsWith(ERR_CORRUPT_JOB_CHECKPOINT)) {
+      if (!workerId || fencingGeneration === undefined) {
+        throw new StaleWorkerFenceError(
+          jobId,
+          job.fencingGeneration ?? 1,
+          0,
+          "Mandatory fencing credentials (workerId and fencingGeneration) required to fail outcome job"
+        );
+      }
+    }
+
     if (fencingGeneration !== undefined && job.fencingGeneration !== undefined && fencingGeneration !== job.fencingGeneration) {
       throw new StaleWorkerFenceError(jobId, job.fencingGeneration, fencingGeneration);
+    }
+
+    const now = this.clock();
+    if (workerId || fencingGeneration !== undefined) {
+      const claim = this.workerClaims.get(jobId);
+      if (!claim || claim.workerId !== workerId || (fencingGeneration !== undefined && claim.fencingGeneration !== fencingGeneration) || claim.leaseExpiresAtMs <= now) {
+        throw new StaleWorkerFenceError(jobId, claim?.fencingGeneration ?? job.fencingGeneration ?? 1, fencingGeneration ?? 0);
+      }
     }
 
     if (!isPermittedTransition(job.state, "FAILED")) {
@@ -909,8 +1396,6 @@ export class PersistentJobManager {
     const sanitizedReason = failureReason
       .replace(/Bearer\s+[A-Za-z0-9._-]+/gi, "Bearer [REDACTED]")
       .replace(/sk-[A-Za-z0-9_-]+/gi, "sk-[REDACTED]");
-
-    const now = this.clock();
     const prevState = job.state;
     job.state = "FAILED";
     job.failureReason = sanitizedReason;
@@ -937,7 +1422,13 @@ export class PersistentJobManager {
     return { ...job };
   }
 
-  cancelJob(jobId: string, reason = "User cancelled job"): PersistentAgentJob {
+  cancelJob(
+    jobId: string,
+    reason = "User cancelled job",
+    auth?: { authorizedBy: "user" | "supervisor"; workerId?: string; fencingGeneration?: number }
+  ): PersistentAgentJob {
+    this.load();
+    this.loadLeases();
     const job = this.jobs.get(jobId);
     if (!job) throw new JobValidationError(`Job not found: ${jobId}`, "jobId");
 
@@ -949,6 +1440,9 @@ export class PersistentJobManager {
     const prevState = job.state;
     job.state = "CANCELLED";
     job.updatedAtMs = now;
+
+    // Invalidate old worker authority durably by incrementing fencing generation
+    job.fencingGeneration = (job.fencingGeneration ?? 1) + 1;
 
     this.workerClaims.delete(jobId);
     this.saveLeases();
@@ -962,7 +1456,7 @@ export class PersistentJobManager {
       milestoneIndex: job.currentMilestoneIndex,
       progressPercent: job.progressPercent,
       fencingGeneration: job.fencingGeneration,
-      reason,
+      reason: auth?.authorizedBy ? `[${auth.authorizedBy}] ${reason}` : reason,
       jobSnapshot: { ...job },
     });
 
@@ -1057,7 +1551,7 @@ export class PersistentJobManager {
    * Roll back corrupt checkpoint to the previous valid milestone snapshot.
    * Leverages server/checkpoints.ts restore() for workspace files when applicable.
    */
-  async rollbackToPreviousMilestone(jobId: string, cwd?: string): Promise<{
+  async rollbackToPreviousMilestone(jobId: string, cwd?: string, auth?: { authorizedBy: "supervisor" | "recovery" }): Promise<{
     ok: boolean;
     job?: PersistentAgentJob;
     restoredMilestoneIndex?: number;
@@ -1096,6 +1590,10 @@ export class PersistentJobManager {
           job.checkpointPayloadPath = prevPath;
           job.state = "PAUSED_FOR_USER"; // Safe pause so user can inspect restored milestone
           job.updatedAtMs = now;
+          // Invalidate any worker authority durably by advancing generation and clearing claims
+          job.fencingGeneration = (job.fencingGeneration ?? 1) + 1;
+          this.workerClaims.delete(jobId);
+          this.saveLeases();
           this.save();
 
           this.appendJournal({
@@ -1106,7 +1604,10 @@ export class PersistentJobManager {
             milestoneIndex: idx,
             progressPercent: prevPayload.progressPercent,
             checkpointHash: prevPayload.gitCheckpointHash,
-            reason: `Rolled back from corrupt milestone ${currentIndex} to safe milestone ${idx} (${prevPayload.milestoneTitle})`,
+            fencingGeneration: job.fencingGeneration,
+            reason: auth?.authorizedBy
+              ? `[${auth.authorizedBy}] Rolled back from corrupt milestone ${currentIndex} to safe milestone ${idx} (${prevPayload.milestoneTitle})`
+              : `Rolled back from corrupt milestone ${currentIndex} to safe milestone ${idx} (${prevPayload.milestoneTitle})`,
           });
 
           return {

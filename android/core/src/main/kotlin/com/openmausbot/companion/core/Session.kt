@@ -1186,10 +1186,15 @@ class Session(
     // MARK: - Actions
 
     suspend fun send(text: String, to: Chat) {
+        // One identity per logical send, minted before the request runs: any
+        // retry of this exact send — a failed turn's Retry, a reconnection —
+        // carries the same id, so the harness replays the original receipt
+        // instead of appending the words twice.
+        val sendId = UUID.randomUUID().toString()
         perform {
             val receipt = when (to) {
-                is Chat.BotChat -> it.sendToBot(to.bot.id, text, to.threadId)
-                is Chat.RoomChat -> it.sendToRoom(to.room.id, text, to.threadId)
+                is Chat.BotChat -> it.sendToBot(to.bot.id, text, to.threadId, sendId)
+                is Chat.RoomChat -> it.sendToRoom(to.room.id, text, to.threadId, sendId)
             }
             record(receipt, text, to.threadId)
         }
@@ -1202,8 +1207,11 @@ class Session(
      * edit route), the way the desktop's Regenerate does: the failed attempt
      * stays reachable as an earlier version of the conversation and nothing is
      * duplicated on screen. A room has no per-message fork, so there the same
-     * words are simply sent again — a visible duplicate is the honest cost of
-     * retrying inside a shared conversation.
+     * words are simply sent again — under the source line's own sendId, which
+     * is what makes that re-send idempotent: the harness replays the original
+     * receipt for a send it already took instead of appending a second copy.
+     * A line without a recorded identity (a computer too old to stamp sends)
+     * can only be retried as a new send, and it gets a new one.
      *
      * Returns whether the harness took it. A refusal travels through
      * [actionError], like every other action's.
@@ -1214,7 +1222,8 @@ class Session(
         perform {
             when (chat) {
                 is Chat.BotChat -> it.edit(chat.bot.id, source.id, text, chat.threadId)
-                is Chat.RoomChat -> it.sendToRoom(chat.room.id, text, chat.threadId)
+                is Chat.RoomChat ->
+                    it.sendToRoom(chat.room.id, text, chat.threadId, source.sendId ?: UUID.randomUUID().toString())
             }
             accepted = true
         }
@@ -2705,6 +2714,30 @@ class Session(
      * session so a scrolling transcript never re-downloads it. Null when the
      * computer could not be reached — the row simply shows no picture.
      */
+    /** Successful previews only: a failed lookup is retried next time rather
+     *  than cached as a permanent "no preview". */
+    private val linkPreviewCache = LinkedHashMap<String, LinkPreview>()
+
+    suspend fun linkPreview(url: String): LinkPreview? {
+        linkPreviewCache[url]?.let { return it }
+        val activeClient = client ?: return null
+        val preview = runCatching { activeClient.linkPreview(url) }.getOrNull() ?: return null
+        if (linkPreviewCache.size >= 32) linkPreviewCache.clear()
+        linkPreviewCache[url] = preview
+        return preview
+    }
+
+    private val linkPreviewImageCache = LinkedHashMap<String, ByteArray>()
+
+    suspend fun linkPreviewImage(url: String): ByteArray? {
+        linkPreviewImageCache[url]?.let { return it }
+        val activeClient = client ?: return null
+        val bytes = runCatching { activeClient.linkPreviewImage(url) }.getOrNull() ?: return null
+        if (linkPreviewImageCache.size >= 16) linkPreviewImageCache.clear()
+        linkPreviewImageCache[url] = bytes
+        return bytes
+    }
+
     private val attachmentImageCache = LinkedHashMap<String, ByteArray>()
     suspend fun attachmentImage(path: String): ByteArray? {
         attachmentImageCache[path]?.let { return it }

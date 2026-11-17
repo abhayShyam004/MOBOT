@@ -14,6 +14,8 @@
 // Pure and synchronous on purpose: it is the piece most likely to need
 // tuning against real transcripts, so it stays trivially testable.
 
+import { describeToolActivity } from "../tool-activity.ts";
+
 /** A fenced block becomes a mention of itself, with its language if known. */
 function describeCodeBlock(fence: string): string {
   const lang = fence.trim().split(/\s+/)[0]?.replace(/[^a-z0-9+#]/gi, "") ?? "";
@@ -197,33 +199,23 @@ function splitLong(text: string, maxChars: number): string[] {
   return out;
 }
 
-/** A tool-activity chip as a spoken progress line ("reading core.ts").
- * Returns null for chips not worth interrupting the ear for. */
+/** A tool-activity chip as a spoken progress line ("reading a file").
+ * Returns null for chips not worth interrupting the ear for.
+ *
+ * The one rule this function exists to enforce: never read a provider's
+ * registry key aloud. `android_computer_project_start` is a dispatch name,
+ * not an action a person can picture — [describeToolActivity] turns it into
+ * "starting the project" before it reaches a voice or a chip. */
 export function narrateTool(toolName: string): string | null {
-  const name = toolName.replace(/^mcp__[^_]+__/, "").trim();
+  const name = toolName.trim();
   if (!name) return null;
   // the harness writes these as chips too; they are already spoken elsewhere
   if (/^(auto-approved|error):/i.test(name)) return null;
+  // a shell command is not a tool name; the chip's summary already carries
+  // the command, and reading argv was the defect this guard prevents
+  if (/\s/.test(name) && !/^[A-Za-z][\w.:/-]*(?:\s+[\w.:/-]+)+$/.test(name)) return null;
+  if (/\s/.test(name) && /["'`$|;&<>]/.test(name)) return null;
 
-  const bare = name.toLowerCase();
-  const verbs: Array<[RegExp, string]> = [
-    [/^(bash|shell|terminal|run_command|execute|computer_exec)$/, "running a command"],
-    [/^(read|read_file|view)$/, "reading a file"],
-    [/^(write|create_file)$/, "writing a file"],
-    [/^(edit|apply_patch|str_replace|multiedit)$/, "editing a file"],
-    [/^(grep|search|glob|find)$/, "searching"],
-    [/^(web_?search|websearch)$/, "searching the web"],
-    [/^(web_?fetch|fetch)$/, "reading a page"],
-    [/^screenshot$/, "looking at the screen"],
-    [/^(click|type_text|press_key|scroll|computer_batch)$/, "using the computer"],
-    [/^open_url$/, "opening a page"],
-    [/^list_bots$/, "checking who's around"],
-    [/^ask_bot$/, "asking a teammate"],
-  ];
-  for (const [pattern, phrase] of verbs) {
-    if (pattern.test(bare)) return phrase;
-  }
-  // an unrecognized tool still deserves a beat, but not its raw argv
-  const short = shortenPaths(name).slice(0, 40);
-  return /^[\w .:/-]+$/.test(short) ? `running ${short}` : null;
+  const { spoken } = describeToolActivity(name);
+  return spoken;
 }

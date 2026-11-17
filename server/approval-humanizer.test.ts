@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { humanizeApprovalRequest, isReadOnlyTool, humanLabelForPackage } from "./approval-humanizer.ts";
+import { approvalSummary, assessToolCall } from "./tool-approval.ts";
 import { approvalHeldNote } from "./auto-approve.ts";
 
 describe("Approval Humanizer (Bug C Remediation)", () => {
@@ -131,6 +132,46 @@ describe("Approval Humanizer (Bug C Remediation)", () => {
       });
 
       expect(note).toBe("approval.held.sandbox");
+    });
+  });
+
+  describe("Chat assessment cards", () => {
+    it("leads the card with the action a chat driver assessed", () => {
+      // The shape server/tool-approval.ts produces: action, facts, why, then
+      // the raw arguments kept as evidence rather than as the explanation.
+      const summary = [
+        "Write `answers.ipynb` in this task's workspace",
+        "Target: answers.ipynb · Leaves this device: no · Can be undone: yes",
+      ].join("\n\n");
+      const res = humanizeApprovalRequest({ tool: "mcp__android_computer__workspace_write", summary });
+      expect(res.title).toBe("Write `answers.ipynb` in this task's workspace");
+      expect(res.subtitle).toBe(summary);
+    });
+
+    it("keeps the action, the boundary and the reversibility for an upload", () => {
+      // The real card from the device: the assessment ends with the raw
+      // arguments, and the JSON cleanup used to find that payload, flatten it
+      // into the subtitle and hide everything the facts line said.
+      //
+      // The scenario is an upload, so the tool has to be one. Catalog
+      // discovery (`composio_*_search_tools`) is a separately tested routine
+      // operation (server/tool-approval.test.ts): it deliberately reports no
+      // approval card, so it cannot produce this card's action.
+      const assessment = assessToolCall("composio_SLACK_UPLOAD_FILE", { file_name: "answers.ipynb" });
+      const summary = approvalSummary(
+        assessment,
+        '{"file_name":"answers.ipynb","channel":"C0241","session":{"u":1}}',
+      );
+      const res = humanizeApprovalRequest({ tool: "composio_SLACK_UPLOAD_FILE", summary });
+      expect(res.title).toBe("Send data to a connected service");
+      expect(res.subtitle).toContain("Leaves this device: yes");
+      expect(res.subtitle).toContain("Can be undone: no");
+      expect(res.subtitle).toContain("Arguments:");
+    });
+
+    it("keeps the prettified tool name for any other prose summary", () => {
+      const res = humanizeApprovalRequest({ tool: "workspace_write", summary: "The bot wants to write a file." });
+      expect(res.title).toBe("Workspace Write");
     });
   });
 });

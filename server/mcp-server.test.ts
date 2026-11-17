@@ -209,7 +209,9 @@ describe("MCP tool execution", () => {
         return { ok: true };
       }
       if (path === "/api/groups/channel-1/messages") {
-        expect(JSON.parse(String(options?.body))).toEqual({ text: "Ship it", threadId: "channel-task" });
+        const body = JSON.parse(String(options?.body));
+        expect(body).toMatchObject({ text: "Ship it", threadId: "channel-task" });
+        expect(body.sendId).toMatch(/^[A-Za-z0-9_-]{16,80}$/);
         return { ok: true };
       }
       throw new Error(`unexpected path ${path}`);
@@ -230,7 +232,13 @@ describe("MCP tool execution", () => {
     }, fetcher)).resolves.toMatchObject({ success: true, taskId: "bot-task" });
     await expect(handleToolCall("send_channel_message", {
       channel_id: "channel-1", text: "Ship it",
-    }, fetcher)).resolves.toMatchObject({ success: true, taskId: "channel-task" });
+    }, fetcher)).resolves.toMatchObject({ success: true, taskId: "channel-task", sendId: expect.any(String) });
+    // A retry supplies the identity the first attempt reported.
+    await expect(handleToolCall("send_channel_message", {
+      channel_id: "channel-1", text: "Ship it", send_id: "mcp_retry_send_00000001",
+    }, fetcher)).resolves.toMatchObject({
+      success: true, taskId: "channel-task", sendId: "mcp_retry_send_00000001",
+    });
   });
 
   it("creates a bot through the safe profile boundary", async () => {

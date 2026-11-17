@@ -9,9 +9,13 @@
 // - Interruption recovery, milestone preservation, clean cancellation
 // - Empirical completion verification gate
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { join, isAbsolute, resolve } from "node:path";
+import { writeFileAtomic } from "../atomic.ts";
 import { defaultProcessManager, GeneralProcessManager } from "./process-manager.ts";
+import { defaultArtifactManager } from "./artifact-manager.ts";
+import { sharedPersistentJobManager } from "../tasks.ts";
+import { evaluateTaskCompletion } from "../completion-contract.ts";
 import type {
   DurableTaskRecord,
   TaskCreationParams,
@@ -20,7 +24,10 @@ import type {
   TaskApprovalRequest,
   TaskVerificationItem,
   TaskMilestone,
+  MonitoringTargetRecord,
 } from "./types.ts";
+
+const TASK_ID_REGEX = /^task_\d+_[a-z0-9]+$/i;
 
 function defaultWorkspace(): string {
   if (process.env.AC_WORKSPACE) return process.env.AC_WORKSPACE;
@@ -31,6 +38,7 @@ function defaultWorkspace(): string {
 
 export class DurableTaskEngine {
   private readonly tasks = new Map<string, DurableTaskRecord>();
+  private readonly persistedTaskState = new Map<string, DurableTaskRecord>();
   private readonly baseWorkspace: string;
   private readonly processManager: GeneralProcessManager;
   private supervisorInterval: NodeJS.Timeout | null = null;
@@ -59,11 +67,8 @@ export class DurableTaskEngine {
   }
 
   private ensureDirs(ws: string): void {
-    const mobotDir = join(ws, ".mobot");
-    const tasksDir = join(mobotDir, "tasks");
-    try {
-      mkdirSync(tasksDir, { recursive: true });
-    } catch {}
+    const tasksDir = join(ws, ".mobot", "tasks");
+    mkdirSync(tasksDir, { recursive: true, mode: 0o700 });
   }
 
   private getRegistryPath(ws: string): string {
@@ -71,22 +76,52 @@ export class DurableTaskEngine {
   }
 
   private getTaskFilePath(taskId: string, ws: string): string {
+    if (!TASK_ID_REGEX.test(taskId)) throw new Error("Invalid durable task ID.");
     return join(ws, ".mobot", "tasks", `${taskId}.json`);
   }
 
   private saveTaskToDisk(task: DurableTaskRecord, ws: string): void {
-    this.ensureDirs(ws);
+    const taskPath = this.getTaskFilePath(task.id, ws);
     try {
-      // Save individual task file
-      writeFileSync(this.getTaskFilePath(task.id, ws), JSON.stringify(task, null, 2), "utf8");
-
-      // Save registry index
-      const registryPath = this.getRegistryPath(ws);
-      const allTasks = Array.from(this.tasks.values()).filter((t) => t.workspacePath === ws);
-      writeFileSync(registryPath, JSON.stringify(allTasks, null, 2), "utf8");
-    } catch {
-      // Best-effort disk persistence
+      this.ensureDirs(ws);
+      writeFileAtomic(taskPath, JSON.stringify(task, null, 2), { mode: 0o600 });
+      this.persistedTaskState.set(task.id, structuredClone(task));
+    } catch (error) {
+      const previous = this.persistedTaskState.get(task.id);
+      if (previous) {
+        for (const key of Object.keys(task) as Array<keyof DurableTaskRecord>) delete (task as any)[key];
+        Object.assign(task, structuredClone(previous));
+      } else {
+        this.tasks.delete(task.id);
+      }
+      throw new Error(`Failed to persist durable task ${task.id} in ${ws}: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
+
+    // The per-task file is authoritative. The registry is a rebuildable index
+    // and the loader scans task files, so an index failure cannot make a
+    // successfully persisted task transition look like a failed task write.
+    const registryPath = this.getRegistryPath(ws);
+    const allTasks = Array.from(this.tasks.values()).filter((t) => t.workspacePath === ws);
+    try {
+      writeFileAtomic(registryPath, JSON.stringify(allTasks, null, 2), { mode: 0o600 });
+    } catch (error) {
+      console.error(`[DurableTaskEngine] Task ${task.id} was saved, but registry index refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    // Consolidated persistence into authoritative PersistentJobManager
+    try {
+      const existingJob = sharedPersistentJobManager.getJob(task.id);
+      if (!existingJob) {
+        sharedPersistentJobManager.createJob({
+          jobId: task.id,
+          botId: task.botId,
+          threadId: task.threadId,
+          title: (task.goal || task.id).slice(0, 50),
+          objective: task.goal || task.id,
+          initialData: { durableTask: task },
+        });
+      }
+    } catch {}
   }
 
   private loadAllTasksFromDisk(ws: string): void {
@@ -99,13 +134,18 @@ export class DurableTaskEngine {
           try {
             const raw = readFileSync(join(tasksDir, f), "utf8");
             const task: DurableTaskRecord = JSON.parse(raw);
-            if (task && task.id) {
+            if (task && task.id && task.workspacePath === ws) {
               this.tasks.set(task.id, task);
+              this.persistedTaskState.set(task.id, structuredClone(task));
             }
-          } catch {}
+          } catch (error) {
+            console.error(`[DurableTaskEngine] Could not load task file ${join(tasksDir, f)}: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
       }
-    } catch {}
+    } catch (error) {
+      console.error(`[DurableTaskEngine] Could not scan durable tasks in ${tasksDir}: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /**
@@ -153,19 +193,43 @@ export class DurableTaskEngine {
    * Get task by ID.
    */
   public getTask(taskId: string, wsPath?: string): DurableTaskRecord | null {
+    if (!TASK_ID_REGEX.test(taskId)) return null;
+    const requestedWorkspace = wsPath ? this.resolveWorkspace(wsPath) : undefined;
     const task = this.tasks.get(taskId);
-    if (task) return task;
-    // Fallback load from disk
-    const ws = this.resolveWorkspace(wsPath);
+    if (task) return !requestedWorkspace || task.workspacePath === requestedWorkspace ? task : null;
+    // Fallback load from the explicitly requested workspace or the engine's default workspace.
+    const ws = requestedWorkspace || this.baseWorkspace;
     const taskPath = this.getTaskFilePath(taskId, ws);
     if (existsSync(taskPath)) {
       try {
         const loaded: DurableTaskRecord = JSON.parse(readFileSync(taskPath, "utf8"));
+        if (loaded.id !== taskId || loaded.workspacePath !== ws) return null;
         this.tasks.set(loaded.id, loaded);
+        this.persistedTaskState.set(loaded.id, structuredClone(loaded));
         return loaded;
-      } catch {}
+      } catch (error) {
+        console.error(`[DurableTaskEngine] Could not load task ${taskId}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
     return null;
+  }
+
+  /**
+   * Persists a monitoring target (URL, system, or process) with its cadence,
+   * active status, and verified condition.
+   */
+  public registerMonitoringTarget(
+    taskId: string,
+    target: MonitoringTargetRecord,
+    wsPath?: string,
+  ): DurableTaskRecord {
+    const effectiveWs = wsPath ? this.resolveWorkspace(wsPath) : this.baseWorkspace;
+    const task = this.getTask(taskId, effectiveWs);
+    if (!task) throw new Error(`Task ${taskId} not found`);
+    task.monitoringTarget = target;
+    task.updatedAt = new Date().toISOString();
+    this.saveTaskToDisk(task, effectiveWs);
+    return task;
   }
 
   /**
@@ -410,6 +474,89 @@ export class DurableTaskEngine {
         ok: false,
         task,
         error: `Cannot complete task: ${unverified.length} verification criteria failed (${unverified.map((u) => u.description).join(", ")}).`,
+      };
+    }
+
+    // Verify deliverable existence and non-emptiness before marking task complete
+    const artifactsToCheck = deliveredArtifacts && deliveredArtifacts.length > 0
+      ? deliveredArtifacts
+      : task.artifactIds;
+
+    if (artifactsToCheck && artifactsToCheck.length > 0) {
+      for (const item of artifactsToCheck) {
+        let exists = false;
+        let isNonEmpty = false;
+
+        const reg = defaultArtifactManager.getArtifact(item);
+        if (reg) {
+          if (existsSync(reg.localPath)) {
+            exists = true;
+            try {
+              isNonEmpty = statSync(reg.localPath).size > 0;
+            } catch {}
+          }
+        } else {
+          const fullPath = isAbsolute(item) ? item : resolve(task.workspacePath, item);
+          if (existsSync(fullPath)) {
+            exists = true;
+            try {
+              isNonEmpty = statSync(fullPath).size > 0;
+            } catch {}
+          }
+        }
+
+        if (!exists) {
+          return {
+            ok: false,
+            task,
+            error: `Cannot complete task: deliverable "${item}" does not exist on disk.`,
+          };
+        }
+        if (!isNonEmpty) {
+          return {
+            ok: false,
+            task,
+            error: `Cannot complete task: deliverable "${item}" is empty (0 bytes).`,
+          };
+        }
+      }
+    }
+
+    // Authoritative completion evaluation via completion-contract
+    const resolvedArtifacts = artifactsToCheck?.map((item) => {
+      const reg = defaultArtifactManager.getArtifact(item);
+      if (reg) return reg.localPath;
+      return isAbsolute(item) ? item : resolve(task.workspacePath, item);
+    });
+
+    const evaluation = evaluateTaskCompletion({
+      taskId: task.id,
+      title: task.goal,
+      objective: task.goal,
+      threadId: task.threadId,
+      execution: {
+        status: "SUCCEEDED",
+        operationsCompleted: (task.completedMilestones || []).map((m) => m.title),
+      },
+      requirements: verificationItems.map((v, i) => ({
+        id: `v-${i}`,
+        requirement: v.description,
+        status: v.verified ? "SATISFIED" : "VIOLATED",
+        evidence: v.evidence,
+      })),
+      artifacts: resolvedArtifacts,
+      summary,
+    });
+
+    if (evaluation.overallStatus !== "COMPLETED") {
+      task.status = evaluation.overallStatus === "PARTIALLY_COMPLETED" ? "RECOVERING" : "FAILED";
+      task.updatedAt = now;
+      task.progressMessage = `Task did not satisfy full completion contract: ${evaluation.blockingErrors.join("; ")}`;
+      this.saveTaskToDisk(task, task.workspacePath);
+      return {
+        ok: false,
+        task,
+        error: `Cannot complete task: ${evaluation.blockingErrors.join("; ")}`,
       };
     }
 
@@ -677,3 +824,18 @@ export class DurableTaskEngine {
 }
 
 export const defaultTaskEngine = new DurableTaskEngine();
+
+/**
+ * Checks whether persistent monitoring has actually been established for a task.
+ * Prevents claiming that notifications will arrive unless monitoring target,
+ * schedule, active status, and condition have been durably persisted.
+ */
+export function hasEstablishedMonitoring(task?: DurableTaskRecord | null): boolean {
+  return Boolean(
+    task &&
+    task.monitoringTarget &&
+    task.monitoringTarget.target &&
+    task.monitoringTarget.cadenceSeconds > 0 &&
+    task.monitoringTarget.status === "active"
+  );
+}

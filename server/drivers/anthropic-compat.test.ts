@@ -88,6 +88,36 @@ describe("AnthropicCompatDriver", () => {
     expect(events.at(-1)).toMatchObject({ type: "turn.completed", ok: true, usage: { input: 11, output: 7 } });
   });
 
+  it("reaches the provider with an availability notice when an integration cannot initialize", async () => {
+    const script = [
+      'const rl = require("node:readline").createInterface({ input: process.stdin });',
+      'rl.on("line", (line) => {',
+      '  let m; try { m = JSON.parse(line); } catch { return; }',
+      '  if (m.id === undefined) return;',
+      '  if (m.method === "initialize") {',
+      '    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, error: { code: -32000, message: "down" } }) + "\\n");',
+      '    return;',
+      '  }',
+      '  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { tools: [] } }) + "\\n");',
+      '});',
+    ].join("\n");
+    const { events, seen } = await runTurn(textStream, {
+      system: "be terse",
+      integrations: { custom: { broken: { command: process.execPath, args: ["-e", script], env: {} } } },
+    });
+    expect(seen).toHaveLength(1);
+    expect(String(seen[0].body.system)).toContain("[Tool Availability Notice]");
+    expect(String(seen[0].body.system)).toContain("broken (initialize; rpc_-32000)");
+    expect(seen[0].body).not.toHaveProperty("tools");
+    expect(events.find((event) => event.type === "tool.readiness")).toMatchObject({
+      type: "tool.readiness",
+      providerStarted: true,
+      toolCount: 0,
+      servers: [expect.objectContaining({ server: "broken", ok: false, stage: "initialize", code: "rpc_-32000" })],
+    });
+    expect(events.at(-1)).toMatchObject({ type: "turn.completed", ok: true });
+  });
+
   it("round-trips a streamed tool_use through a real tool result", async () => {
     const executed: unknown[] = [];
     const first =
@@ -152,5 +182,58 @@ describe("AnthropicCompatDriver", () => {
     const withKey = await create();
     expect(await withKey.snapshot()).toMatchObject({ state: "available", authenticated: true });
     await withKey.dispose();
+  });
+
+  it("extracts cached tokens and reports cachedInput in token usage", async () => {
+    const cachedStream =
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":50,"cache_read_input_tokens":35,"output_tokens":0}}}\n\n' +
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n' +
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Cached response"}}\n\n' +
+      'data: {"type":"content_block_stop","index":0}\n\n' +
+      'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10}}\n\n' +
+      'data: {"type":"message_stop"}\n\n';
+
+    const { events } = await runTurn(cachedStream);
+    const completed = events.find((e) => e.type === "turn.completed");
+    expect(completed).toMatchObject({
+      type: "turn.completed",
+      ok: true,
+      usage: { input: 50, output: 10, cachedInput: 35 },
+    });
+  });
+
+  it("supports dynamic capability retirement and artifact reading", async () => {
+    const mockMcp = [
+      'const rl = require("node:readline").createInterface({ input: process.stdin });',
+      'rl.on("line", (line) => {',
+      '  let m; try { m = JSON.parse(line); } catch { return; }',
+      '  if (m.id === undefined) return;',
+      '  if (m.method === "initialize") {',
+      '    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { serverInfo: { name: "test", version: "1.0" } } }) + "\\n");',
+      '    return;',
+      '  }',
+      '  if (m.method === "tools/list") {',
+      '    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: m.id, result: { tools: [{ name: "terminal_run", inputSchema: { type: "object" } }] } }) + "\\n");',
+      '    return;',
+      '  }',
+      '});',
+    ].join("\n");
+
+    const retireStream =
+      'data: {"type":"message_start","message":{"usage":{"input_tokens":10}}}\n\n' +
+      'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"retire_1","name":"capability_retire"}}\n\n' +
+      'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"servers\\":[\\"agents\\"]}"}}\n\n' +
+      'data: {"type":"content_block_stop","index":0}\n\n' +
+      'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":5}}\n\n' +
+      'data: {"type":"message_stop"}\n\n';
+
+    const { events } = await runTurn([retireStream, textStream], {
+      integrations: { agents: { command: process.execPath, args: ["-e", mockMcp], env: {} } },
+    });
+
+    const itemCompleted = events.find((e) => e.type === "item.completed" && (e as any).itemId === "retire_1");
+    expect(itemCompleted).toBeDefined();
+    expect(itemCompleted).toMatchObject({ ok: true });
+    expect(events.at(-1)).toMatchObject({ type: "turn.completed", ok: true });
   });
 });

@@ -69,7 +69,7 @@ it("carries a bot's recent 1:1 work into a room turn, tells the room, logs the t
       name: "Standup", memberIds: [lead.id, helper.id],
       setup: { bulletin: "", defaultResponder: { kind: "member", botId: lead.id } },
     }) as { group: { id: string; threadId: string } };
-    await api("POST", `/api/groups/${group.id}/messages`, { text: "Lead, what did you do today?" });
+    await api("POST", `/api/groups/${group.id}/messages`, {sendId: "test_room_send_0001",  text: "Lead, what did you do today?" });
     await expect.poll(() => {
       const text = dump()?.systemPrompt ?? "";
       return text.includes("Reply to the conversation above as") || JSON.stringify(dump()?.prompt ?? "").includes("Reply to the conversation above as");

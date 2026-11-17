@@ -83,6 +83,69 @@ entry:
   bots on these instances answer and write, but don't operate computers or
   connected apps.
 
+## One endpoint in front of every provider (Respan Gateway)
+
+The [Respan Gateway](https://github.com/respanai/respan-gateway?utm_source=freebuff&utm_medium=paid&utm_campaign=respan-gateway&bfcid=bfc_1.eyJpZCI6IjU0ZDYxY2IwLTdjYjEtNDAzYS04NDExLWIzNTg5ZGYxZTczNyIsImMiOiIyMDM2ODZkZS1mMzg0LTQ4NTQtYmViNC1hYzBiYWRmNmM1NTUiLCJrIjoiM2IxMGE4YmUtNzgyOS00MmJhLWFmNmEtYmI0YWUxZTRhY2Y4IiwiaWF0IjoxNzkzMzAyMDAxfQ.4XrpI7tuu-ZdGLrGT1fYzytQSQEu45atpekVASnTcLc)
+is an open-source LLM gateway: one OpenAI-compatible endpoint that routes each
+model name to the provider that owns it (`claude-*` to Anthropic, `grok-*` to
+xAI, everything else to the OpenAI-compatible endpoint you already configured).
+The built-in `respanGateway` driver runs it as a loopback sidecar on this
+machine and spends the keys already in `config.json` — no account, no hosted
+credits, no tracing export.
+
+Install its Python environment once (Python 3.10+, wheels only) and restart the
+server with its usual command (`pnpm dev:server`, or `pnpm dev` for the UI as
+well):
+
+```sh
+uv sync --directory gateway     # respan-gateway==0.3.0, pinned in gateway/pyproject.toml
+```
+
+Then one instance entry, under `"instances"` in `~/.openmausbot/config.json`:
+
+```json
+{
+  "instances": {
+    "respanGateway": {
+      "driver": "respanGateway",
+      "displayName": "Respan Gateway",
+      "config": { "model": "claude-haiku-4-5" }
+    }
+  }
+}
+```
+
+- **Keys are the workspace's own.** The driver hands the sidecar
+  `anthropic.key`, `xai.key`, and — only when you set a URL beside it —
+  `openaiCompat.key` with `RESPAN_OPENAI_BASE_URL`, so a router key is never
+  sent to api.openai.com by guesswork. Cover more vendors through the
+  instance's own `environment`, under the variable the gateway reads
+  (`GROQ_API_KEY`, `OPENROUTER_API_KEY`, `MISTRAL_API_KEY`, …); nothing else in
+  that block crosses into the sidecar.
+- **Pick a model, get a route.** The picker lists every configured vendor's
+  models, badged with the vendor the gateway will call: a `claude-*` turn leaves
+  as Anthropic Messages, a `gpt-*` turn leaves as chat completions.
+- **It stays local.** `server/drivers/respan-gateway.ts` starts
+  `gateway/serve.py` on an ephemeral 127.0.0.1 port when the instance loads and
+  stops it when the instance is disposed. `RESPAN_GATEWAY_PYTHON` points at
+  another interpreter that already has the package, `RESPAN_GATEWAY_ROOT` at
+  another checkout of the sidecar. A packaged desktop app ships no Python
+  environment, so there the instance reports itself unavailable with that
+  reason rather than failing mid-turn.
+- **A `gateway.toml` at the repository root** is read by the gateway itself (its
+  documented default) for provider settings this app does not model.
+
+Observed result, offline: `npx vitest run server/drivers/respan-gateway.test.ts`
+starts the real sidecar against two local fake providers and pins what this
+section claims — one picker listing `gpt-fixture` (vendor `openai`) and
+`claude-fixture` (vendor `anthropic`); a chat turn through the gateway reaching
+the first as a streamed chat completion; a `claude-*` turn reaching the second
+as `POST /v1/messages` while the first sees no Claude request at all; the
+sidecar's port closed again after the instance is disposed. **No live provider
+request was made or verified** here: this run had no provider keys, so every
+request above went to a fixture — the same path a real key takes, but the key
+test is yours to run.
+
 ## Notes
 
 - `config.json` is written with mode 0600; values in `environment` are stored

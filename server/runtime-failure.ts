@@ -107,6 +107,11 @@ const COPY: Record<FailureKind, FailureCopy> = {
     detail: "The provider's own safety checks ended this turn. Full access controls tool approvals, not the provider's review.",
     advice: "Review the provider's findings, then retry with a different approach. OpenMausBot cannot override this block.",
   },
+  output_limit: {
+    title: "The reply was cut off",
+    detail: "The provider ended this turn's answer at its output-token limit before the model could finish, so part of the work was never delivered.",
+    advice: "Retry, and ask for the change in smaller pieces — a shorter request leaves room for the answer to finish.",
+  },
   setup: {
     title: "The engine needs setup",
     detail: "This engine could not start on the computer that runs it — its command-line tool is missing, or it is not signed in.",
@@ -142,7 +147,18 @@ const ACCESS_PATTERN = /\b403\b|\bforbidden\b/i;
  * to reach the switch below, whose timeout arm said "the provider stopped
  * responding" — telling someone their provider was slow when a local
  * integration was broken. */
-const TOOLING_PATTERN = /\bMCP\b/;
+const TOOLING_PATTERN = /\bMCP\b|\btooling\b|\btool.?error\b/i;
+
+/** A reply the provider truncated at the model's output-token ceiling. It is
+ * not an outage and not a bad request: the turn was cut off mid-answer, which
+ * is why the person has to be told to ask for less at a time. */
+const OUTPUT_LIMIT_PATTERN = /\bmax_output_tokens\b|output[\s_-]*limit|length[\s_-]*limit/i;
+
+/** The response ended with nothing generated. The harness made that sound like
+ * a ceiling ("ended the response early"), which told the person to shorten a
+ * request that had produced no tokens at all. It is a provider-side abort. */
+const EARLY_TERMINATION_PATTERN =
+  /\b(?:ended the response early|empty event stream|stream ended before the response completed|unrecognized event stream)\b/i;
 
 /** Statuses worth printing on the card. A bare number that is not in a status
  * line is not read at all — a payload full of numbers must never become one,
@@ -168,6 +184,8 @@ export function failureKindFor(report: string, options: { setup?: boolean } = {}
   if (isProviderSafetyBlock(text)) return "safety";
   if (ACCESS_PATTERN.test(text)) return "access";
   if (TOOLING_PATTERN.test(text) && statusOf(text) === undefined) return "tooling";
+  if (OUTPUT_LIMIT_PATTERN.test(text)) return "output_limit";
+  if (EARLY_TERMINATION_PATTERN.test(text)) return "provider_error";
   switch (classifyError({ text }).reason) {
     case "rate_limited":
       return "rate_limit";
@@ -188,6 +206,8 @@ export function failureKindFor(report: string, options: { setup?: boolean } = {}
       return "network";
     case "timeout":
       return "timeout";
+    case "output_limit":
+      return "output_limit";
     case "provider_safety":
       return "safety";
     case "interrupted":
@@ -198,6 +218,12 @@ export function failureKindFor(report: string, options: { setup?: boolean } = {}
   }
 }
 
+/** A deadline sentence the harness itself wrote. Provider prose never has this
+ *  shape, so the card can show it verbatim without ever repeating a provider
+ *  payload — and the person learns *which* budget ran out, not merely that
+ *  one did. */
+const DEADLINE_SENTENCE = /^(?:The provider (?:did not answer|took too long to begin|connection stalled)|The model generation exceeded its deadline)/;
+
 /**
  * The card for a report. Every string is this module's; [RuntimeFailureInput.message]
  * is only read. [RuntimeFailureInput.attempts] rides along as a number so a
@@ -207,6 +233,8 @@ export function failureKindFor(report: string, options: { setup?: boolean } = {}
 export function summarizeRuntimeFailure(input: RuntimeFailureInput): FailureCardData {
   const kind = failureKindFor(input.message, { setup: input.setup });
   const copy = COPY[kind];
+  const deadline = input.message.trim();
+  const detail = kind === "timeout" && DEADLINE_SENTENCE.test(deadline) ? deadline : copy.detail;
   const attempts = input.attempts !== undefined && input.attempts > 1 ? input.attempts : undefined;
   // Only the kinds whose copy does not already account for the retries get the
   // count; a setup error or a bad key was never retried and must not imply it
@@ -219,11 +247,35 @@ export function summarizeRuntimeFailure(input: RuntimeFailureInput): FailureCard
   return {
     kind,
     title: copy.title,
-    detail: copy.detail,
+    detail,
     advice: copy.advice,
     ...tried,
     ...(status === undefined ? {} : { status }),
   };
+}
+
+/**
+ * The last line of a turn that produced no answer.
+ *
+ * It must stand on its own: the transcript used to end with "the error above
+ * explains why", which is a promise the client could not keep — a build that
+ * dropped the failure row told the person to read nothing. So this line never
+ * points anywhere. When a failure row for this turn is really in the store the
+ * card carries the cause and this line only has to say the turn ended; when it
+ * is not, the classified kind is the closest honest answer there is.
+ */
+export function turnFallbackText(input: {
+  ok: boolean;
+  stopReason?: string | null;
+  failureExplained: boolean;
+  failureRowStored: boolean;
+}): string {
+  if (input.stopReason === "interrupted") return "The request was interrupted.";
+  if (input.ok) return "Action completed.";
+  if (input.failureExplained && input.failureRowStored) {
+    return "This turn stopped before it finished. Retry when you are ready.";
+  }
+  return `This turn stopped before it finished: ${summarizeRuntimeFailure({ message: input.stopReason ?? "", terminal: true }).title}.`;
 }
 
 /** Everything a client may be told about which engine failed. */
@@ -312,6 +364,15 @@ export function summarizeStopReason(stopReason: string | null | undefined): Fail
   if (/^rate.?limit/.test(normalized)) return summarizeRuntimeFailure({ message: "429 rate limit" });
   if (/^(?:unknown|missing|invalid).?model|^model.?not.?found/.test(normalized)) {
     return summarizeRuntimeFailure({ message: "model not found" });
+  }
+  if (/^timeout\b|\btimed.?out\b/.test(normalized)) {
+    return summarizeRuntimeFailure({ message: "timeout" });
+  }
+  if (/^output.?limit\b|\bmax.?output.?tokens\b/.test(normalized)) {
+    return summarizeRuntimeFailure({ message: "output_limit" });
+  }
+  if (/^tool.?error\b|\btooling\b/.test(normalized)) {
+    return summarizeRuntimeFailure({ message: "tooling" });
   }
   return summarizeRuntimeFailure({ message: "", terminal: true });
 }

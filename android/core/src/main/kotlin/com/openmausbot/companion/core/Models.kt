@@ -65,6 +65,33 @@ data class SkillRequestCardData(
 }
 
 @Serializable
+data class EmailComposerAttachment(
+    val name: String,
+    val fileId: String? = null,
+    val mimeType: String? = null,
+    val size: String? = null,
+    val driveUrl: String? = null,
+    val verified: Boolean? = true,
+)
+
+@Serializable
+data class EmailComposerCardData(
+    val composerId: String,
+    val status: String = "proposed",
+    val from: String = "abhay315204@gmail.com",
+    val to: String = "",
+    val cc: String? = null,
+    val subject: String = "",
+    val body: String = "",
+    val attachments: List<EmailComposerAttachment> = emptyList(),
+    val relatedMeetingTitle: String? = null,
+    val relatedMeetingTime: String? = null,
+    val draftId: String? = null,
+    val messageId: String? = null,
+    val error: String? = null,
+)
+
+@Serializable
 data class OptionCard(
     val title: String,
     val subtitle: String,
@@ -88,6 +115,8 @@ data class OptionCard(
      * question card would read "answer" instead of the reply.
      */
     val answeredText: String? = null,
+    /** Chief of Staff native structured email composer proposal and lifecycle state. */
+    val emailComposer: EmailComposerCardData? = null,
 ) {
     val isPending: Boolean get() = requestId != null && answered == null && dismissed != true
     val isPermission: Boolean get() = tool != null
@@ -136,10 +165,22 @@ data class NotificationTarget private constructor(
 
 @Serializable
 data class ToolActivity(
+    /** The provider's raw identifier, kept for diagnostics and details. */
     val name: String,
+    /** Canonical human summary from the server. Summary surfaces show this,
+     * never [name], so a registry key cannot leak into the transcript. */
+    val label: String? = null,
+    /** queued/running/succeeded/failed/cancelled/retrying. Absent on records
+     * from builds before the server classified the state; [ok] remains the
+     * fallback there. */
+    val state: String? = null,
+    /** The provider's item id, used to reconcile a start with its completion. */
+    val operationId: String? = null,
     val ok: Boolean? = null,
     val spoken: String? = null,
     val setup: Boolean? = null,
+    val summary: String? = null,
+    val input: String? = null,
     val error: String? = null,
     val output: String? = null,
     val durationMs: Long? = null,
@@ -241,6 +282,13 @@ data class Message(
      * finally lands.
      */
     val queueId: String? = null,
+    /**
+     * The identity the person's own send carried. A failed turn's Retry
+     * re-sends exactly this, which is what makes the harness answer a retry
+     * with the original receipt instead of appending the words twice. Absent
+     * on lines a computer too old to stamp sends produced.
+     */
+    val sendId: String? = null,
     /**
      * Files the computer attached to this reply — currently pictures the bot
      * fetched from the internet, published as app-owned attachments and

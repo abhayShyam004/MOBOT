@@ -3,7 +3,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { ChatToolSessionError, mountChatTools, type ChatToolSession } from "./chat-mcp-tools.ts";
+import {
+  ChatToolSessionError,
+  capabilityEnableDefinition,
+  capabilityRetireDefinition,
+  chatToolAvailabilityNotice,
+  loadCapabilities,
+  retireCapabilities,
+  mountChatTools,
+  type ChatToolSession,
+} from "./chat-mcp-tools.ts";
 import { deviceMcpServerScript } from "../../scripts/lib/omb-mcp-server-script.mjs";
 import { remoteMcpFixtureScript } from "../../scripts/lib/omb-mcp-remote-fixture.mjs";
 
@@ -137,17 +146,24 @@ describe("Chat MCP session", () => {
   });
 
   it.each([
-    ["repeated cursor", `reply(message, {tools:[],nextCursor:"same"});`],
-    ["too many tools", `reply(message, {tools:Array.from({length:257},(_,i)=>({name:"tool"+i,inputSchema:schema}))});`],
-    ["duplicate tool", `reply(message, {tools:[{name:"same",inputSchema:schema},{name:"same",inputSchema:schema}]});`],
-    ["invalid RPC", `process.stdout.write('{"result":1}\\n');`],
-    ["oversized incomplete frame", `process.stdout.write("x".repeat(2*1024*1024+1));`],
-    ["oversized complete frame", `process.stdout.write("x".repeat(2*1024*1024+1) + "\\n");`],
-    ["too many response frames", `process.stdout.write("\\n".repeat(10001));`],
-    ["oversized tool catalog", `reply(message, {tools:[{name:"write",inputSchema:schema,description:"x".repeat(1024*1024)}]});`],
-  ])("fails startup and awaits child cleanup for %s", async (_label, response) => {
+    ["repeated cursor", `reply(message, {tools:[],nextCursor:"same"});`, "tools/list"],
+    ["too many tools", `reply(message, {tools:Array.from({length:257},(_,i)=>({name:"tool"+i,inputSchema:schema}))});`, "tools/list"],
+    ["duplicate tool", `reply(message, {tools:[{name:"same",inputSchema:schema},{name:"same",inputSchema:schema}]});`, "schema"],
+    ["invalid RPC", `process.stdout.write('{"result":1}\\n');`, "tools/list"],
+    ["oversized incomplete frame", `process.stdout.write("x".repeat(2*1024*1024+1));`, "tools/list"],
+    ["oversized complete frame", `process.stdout.write("x".repeat(2*1024*1024+1) + "\\n");`, "tools/list"],
+    ["too many response frames", `process.stdout.write("\\n".repeat(10001));`, "tools/list"],
+    ["oversized tool catalog", `reply(message, {tools:[{name:"write",inputSchema:schema,description:"x".repeat(1024*1024)}]});`, "schema"],
+  ])("excludes a server that fails %s and awaits its child cleanup", async (_label, response, stage) => {
     const f = fixture(`if (message.method === "tools/list") { ${response} continue; }`);
-    await expect(f.mount()).rejects.toThrow(/MCP/);
+    const session = await f.mount();
+    expect(session.definitions).toEqual([]);
+    expect(session.readiness).toMatchObject({
+      toolCount: 0,
+      servers: [expect.objectContaining({ server: "audit", ok: false, stage })],
+    });
+    expect(session.readiness.servers[0].code).toEqual(expect.any(String));
+    expect(session.readiness.servers[0].durationMs).toBeGreaterThanOrEqual(0);
     expect(alive(f.read().pid)).toBe(false);
   });
 
@@ -198,12 +214,206 @@ describe("Chat MCP session", () => {
     if (hasText) expect(result.text).toContain("partial result");
   });
 
-  it("closes already mounted peers when another server fails startup", async () => {
+  it("keeps ready peers mounted when another server fails startup", async () => {
     const ready = fixture();
     const failed = fixture(`if(message.method === "tools/list") { reply(message,{tools:"invalid"}); continue; }`);
-    await expect(mountChatTools({custom:{ready:ready.server,failed:failed.server}},ready.controller.signal)).rejects.toThrow("invalid result");
-    expect(alive(ready.read().pid)).toBe(false);
+    const session = await mountChatTools({custom:{ready:ready.server,failed:failed.server}},ready.controller.signal);
+    sessions.push(session);
+    expect(session.definitions.map((tool) => tool.function.name)).toEqual(["ready_write"]);
+    expect(session.readiness.servers).toEqual([
+      expect.objectContaining({ server: "ready", ok: true, stage: "ready", toolCount: 1 }),
+      expect.objectContaining({ server: "failed", ok: false, stage: "tools/list", toolCount: 0 }),
+    ]);
+    expect(alive(ready.read().pid)).toBe(true);
     expect(alive(failed.read().pid)).toBe(false);
+    await expect(session.execute("ready_write", { value: "still-works" }, ready.controller.signal))
+      .resolves.toEqual({ text: "recorded:still-works", ok: true });
+    await session.close();
+    expect(alive(ready.read().pid)).toBe(false);
+  });
+
+  it("reports a JSON-RPC error code without leaking the server's error text", async () => {
+    const f = fixture(`if (message.method === "tools/list") {
+      send({jsonrpc:"2.0",id:message.id,error:{code:-32000,message:"secret-fixture-key"}});
+      continue;
+    }`);
+    const session = await f.mount();
+    expect(session.readiness.servers[0]).toMatchObject({
+      server: "audit", ok: false, stage: "tools/list", code: "rpc_-32000",
+    });
+    expect(JSON.stringify(session.readiness)).not.toContain("secret-fixture-key");
+    const notice = chatToolAvailabilityNotice(session.readiness);
+    expect(notice).toContain("audit");
+    expect(notice).toContain("rpc_-32000");
+    expect(notice).not.toContain("secret-fixture-key");
+  });
+
+  it("drops a server's whole catalog when one of its schemas is invalid", async () => {
+    const good = fixture();
+    const partial = fixture(`if (message.method === "tools/list") {
+      reply(message,{tools:[
+        {name:"write",inputSchema:schema},
+        {name:"broken",inputSchema:{type:"object",properties:{value:{$ref:"https://example.invalid/private"}}}},
+      ]});
+      continue;
+    }`);
+    const session = await mountChatTools(
+      { custom: { good: good.server, partial: partial.server } },
+      good.controller.signal,
+    );
+    sessions.push(session);
+    expect(session.definitions.map((tool) => tool.function.name)).toEqual(["good_write"]);
+    expect(session.readiness.servers).toEqual([
+      expect.objectContaining({ server: "good", ok: true, stage: "ready", toolCount: 1 }),
+      expect.objectContaining({ server: "partial", ok: false, stage: "schema", toolCount: 0 }),
+    ]);
+    await expect(session.execute("partial_write", { value: "must-not-exist" }, good.controller.signal))
+      .rejects.toThrow("not advertised");
+    expect(alive(partial.read().pid)).toBe(false);
+  });
+
+  it("proceeds with zero tools and names every unavailable integration", async () => {
+    const first = fixture(`if (message.method === "initialize") {
+      send({jsonrpc:"2.0",id:message.id,error:{code:-32603,message:"first down"}});
+      continue;
+    }`);
+    const second = fixture(`if (message.method === "tools/list") {
+      send({jsonrpc:"2.0",id:message.id,error:{code:-32603,message:"second down"}});
+      continue;
+    }`);
+    const session = await mountChatTools(
+      { custom: { first: first.server, second: second.server } },
+      first.controller.signal,
+    );
+    sessions.push(session);
+    expect(session.definitions).toEqual([]);
+    expect(session.readiness.servers).toEqual([
+      expect.objectContaining({ server: "first", ok: false, stage: "initialize", code: "rpc_-32603" }),
+      expect.objectContaining({ server: "second", ok: false, stage: "tools/list", code: "rpc_-32603" }),
+    ]);
+    const notice = chatToolAvailabilityNotice(session.readiness);
+    expect(notice).toContain("first (initialize; rpc_-32603)");
+    expect(notice).toContain("second (tools/list; rpc_-32603)");
+    expect(notice).toContain("not available");
+  });
+
+  it("mounts a slow but successful server instead of treating latency as a failure", async () => {
+    // The contract this pins: a handshake inside the startup budget is a
+    // success no matter how long it took. The old mount code had no notion of
+    // a slow-but-fine server — a turn only had "all mounted" or "turn dead".
+    const slow = fixture(`if (message.method === "initialize") {
+      setTimeout(() => reply(message,{protocolVersion:"2024-11-05",capabilities:{tools:{}}}), 800);
+      continue;
+    }`);
+    const session = await slow.mount();
+    expect(session.definitions.map((tool) => tool.function.name)).toEqual(["audit_write"]);
+    expect(session.readiness.servers).toEqual([
+      expect.objectContaining({ server: "audit", ok: true, stage: "ready", toolCount: 1, timeoutMs: 30_000 }),
+    ]);
+    expect(session.readiness.servers[0]!.durationMs).toBeGreaterThanOrEqual(700);
+  });
+
+  it("mounts independent servers concurrently instead of serially", async () => {
+    // Two 800ms handshakes finish in about one budget, not two: a phone that
+    // mounts four integrations must not pay their latencies in sequence.
+    const delayed = `if (message.method === "initialize") {
+      setTimeout(() => reply(message,{protocolVersion:"2024-11-05",capabilities:{tools:{}}}), 800);
+      continue;
+    }`;
+    const one = fixture(delayed);
+    const two = fixture(delayed);
+    const started = Date.now();
+    const session = await mountChatTools({ custom: { one: one.server, two: two.server } }, one.controller.signal);
+    sessions.push(session);
+    const elapsed = Date.now() - started;
+    expect(session.definitions.map((tool) => tool.function.name)).toEqual(["one_write", "two_write"]);
+    expect(session.readiness.servers.map((server) => server.ok)).toEqual([true, true]);
+    expect(elapsed).toBeLessThan(1500);
+  });
+
+  it("advertises only the selected server and loads the rest on demand", async () => {
+    const one = fixture();
+    const two = fixture();
+    const session = await mountChatTools(
+      { custom: { one: one.server, two: two.server } },
+      one.controller.signal,
+      { expose: ["one"] },
+    );
+    sessions.push(session);
+    expect(session.definitions.map((tool) => tool.function.name)).toEqual(["one_write"]);
+    expect(session.readiness.servers.map((server) => [server.server, server.ok])).toEqual([["one", true], ["two", true]]);
+    expect(session.exposure).toEqual({ advertised: ["one"], deferred: ["two"] });
+    expect(() => session.validate("two_write", { value: "x" })).toThrow(/not advertised/);
+
+    const added = session.enableServers(["two"]);
+    expect(added.map((definition) => definition.function.name)).toEqual(["two_write"]);
+    expect(session.exposure).toEqual({ advertised: ["one", "two"], deferred: [] });
+    await expect(session.execute("two_write", { value: "now" }, two.controller.signal))
+      .resolves.toEqual({ text: "recorded:now", ok: true });
+    // Enabling a server cannot advertise a name that was never verified.
+    expect(() => session.validate("three_write", {})).toThrow(/not advertised/);
+  });
+
+  it("loads a deferred capability through the shared helper", async () => {
+    const one = fixture();
+    const two = fixture();
+    const session = await mountChatTools(
+      { custom: { one: one.server, two: two.server } },
+      one.controller.signal,
+      { expose: ["one"] },
+    );
+    sessions.push(session);
+    const combined = session.definitions.concat([capabilityEnableDefinition(session.exposure.deferred)]);
+    expect(combined.map((tool) => tool.function.name)).toEqual(["one_write", "capability_enable"]);
+
+    const loaded = loadCapabilities(session, ["two"], combined);
+    expect(loaded.ok).toBe(true);
+    expect(loaded.text).toContain("two");
+    expect(combined.map((tool) => tool.function.name)).toEqual(["one_write", "capability_enable", "two_write"]);
+
+    const missing = loadCapabilities(session, ["nope"], combined);
+    expect(missing.ok).toBe(false);
+    expect(missing.text).toContain("Not loaded yet");
+  });
+
+  it("retires standard capabilities to conserve context and allows re-enabling them later", async () => {
+    const browser = fixture();
+    const customTool = fixture();
+    const session = await mountChatTools(
+      {
+        custom: {
+          browser: browser.server,
+          my_custom_mcp: customTool.server,
+        },
+      },
+      browser.controller.signal,
+    );
+    sessions.push(session);
+
+    // Initial state: both are advertised
+    expect(session.exposure.advertised).toEqual(["browser", "my_custom_mcp"]);
+    const retireDef = capabilityRetireDefinition(session.exposure.advertised);
+    expect(retireDef.function.name).toBe("capability_retire");
+    const activeDefs = [...session.definitions];
+
+    // Attempting to retire a custom MCP server is blocked (invariant: custom user tools are never retired)
+    const customRetire = retireCapabilities(session, ["my_custom_mcp"], activeDefs);
+    expect(customRetire.ok).toBe(false);
+    expect(session.exposure.advertised).toContain("my_custom_mcp");
+
+    // Retiring a known standard surface (browser) succeeds
+    const retireResult = retireCapabilities(session, ["browser"], activeDefs);
+    expect(retireResult.ok).toBe(true);
+    expect(session.exposure.advertised).toEqual(["my_custom_mcp"]);
+    expect(session.exposure.deferred).toEqual(["browser"]);
+    expect(activeDefs.map((d) => d.function.name)).toEqual(["my_custom_mcp_write"]);
+
+    // Re-enabling browser capability restores it immediately without remounting
+    const reloaded = loadCapabilities(session, ["browser"], activeDefs);
+    expect(reloaded.ok).toBe(true);
+    expect(session.exposure.advertised).toEqual(["my_custom_mcp", "browser"]);
+    expect(session.exposure.deferred).toEqual([]);
+    expect(activeDefs.map((d) => d.function.name)).toContain("browser_write");
   });
 
   it("returns declared tool errors and bounds aggregate text without splitting UTF-8", async () => {
@@ -285,9 +495,14 @@ describe("Chat MCP schema validation", () => {
     { type: "object", properties: {value:{type:"string",format:"unregistered-format"}} },
     { type: "object", properties: {value:{$ref:"https://example.invalid/private-schema"}} },
     { type: "object", properties: {value:{type:"string",unrecognizedAssertion: true}} },
-  ])("refuses schemas it cannot validate instead of silently weakening them %#", async (toolSchema) => {
+  ])("excludes a server whose schema it cannot validate instead of weakening it %#", async (toolSchema) => {
     const f = fixture("", toolSchema);
-    await expect(f.mount()).rejects.toThrow("schema could not be validated");
+    const session = await f.mount();
+    expect(session.definitions).toEqual([]);
+    expect(session.readiness.servers[0]).toMatchObject({
+      server: "audit", ok: false, stage: "schema", code: "schema_invalid",
+    });
+    expect(session.readiness.servers[0].error).toContain("schema could not be validated");
     expect(alive(f.read().pid)).toBe(false);
   });
 
@@ -317,12 +532,17 @@ describe("Chat MCP schema validation", () => {
     expect(alive(secondPid)).toBe(false);
   });
 
-  it("fails a mount when the server emits a malformed JSON frame instead of accepting it", async () => {
+  it("excludes a server that emits a malformed JSON frame instead of accepting it", async () => {
     // Emit garbage on stdout immediately after the first inbound frame —
-    // the strict parser must fail the whole session rather than skip a
-    // corrupt line, and the spawned process must not survive the failure.
+    // the strict parser must fail that server rather than skip a corrupt
+    // line, and the spawned process must not survive the failure.
     const f = fixture("if (calls.length === 1) process.stdout.write('@@not-json@@\\n');");
-    await expect(f.mount()).rejects.toThrow(/invalid JSON|invalid RPC envelope|exited/);
+    const session = await f.mount();
+    expect(session.definitions).toEqual([]);
+    expect(session.readiness.servers[0]).toMatchObject({
+      server: "audit", ok: false, stage: "initialize", code: "protocol_error",
+    });
+    expect(session.readiness.servers[0].error).toMatch(/invalid JSON|invalid RPC/);
     expect(alive(f.read().pid)).toBe(false);
   });
 

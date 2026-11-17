@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { launchVerificationServer, runControlOmb } from "./control-omb.ts";
@@ -58,7 +59,11 @@ try {
     await api(`/api/groups/${group.id}`, { defaultResponder: { kind: "member", botId: id } }, "PATCH");
     // A stale dump must never count as proof of this dispatch.
     rmSync(fixture.fixtureDumpPath, { force: true });
-    await api(`/api/groups/${group.id}/messages`, { mode: "goal", text: "Reply once for isolated GUI routing verification." });
+    await api(`/api/groups/${group.id}/messages`, {
+      mode: "goal",
+      text: "Reply once for isolated GUI routing verification.",
+      sendId: randomUUID(),
+    });
     const wait = await runControlOmb(["wait", "--channel", group.id, "--timeout", "60", "--url", fixture.info.url]) as { status: string };
     controller.signal.throwIfAborted();
     assert.equal(wait.status, "settled", "Goal turn must settle");

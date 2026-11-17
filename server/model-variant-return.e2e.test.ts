@@ -71,7 +71,7 @@ it("blocks direct and group turns when an offline engine returns without support
     const direct = await api("POST", `/api/bots/${bot.id}/messages`, { text: "Direct guard fixture", threadId: current.threadId });
     expect(direct.status).toBe(409);
     expect(direct.body.error).toContain("saved model variant cannot be applied");
-    const sent = await api("POST", `/api/groups/${group.id}/messages`, { text: "Group guard fixture" });
+    const sent = await api("POST", `/api/groups/${group.id}/messages`, {sendId: "test_room_send_0001",  text: "Group guard fixture" });
     expect(sent.status).toBe(202);
     const messages = async () => {
       const rows = (await api("GET", `/api/threads/${group.threadId}/messages?limit=20`)).body.messages;

@@ -453,6 +453,17 @@ object AppType {
 }
 
 /**
+ * Material 3 Expressive shape scale.
+ */
+fun appShapes(): androidx.compose.material3.Shapes = androidx.compose.material3.Shapes(
+    extraSmall = RoundedCornerShape(4.dp),
+    small = RoundedCornerShape(8.dp),
+    medium = RoundedCornerShape(12.dp),
+    large = RoundedCornerShape(16.dp),
+    extraLarge = RoundedCornerShape(24.dp),
+)
+
+/**
  * The app's typography: hierarchy carried by size and weight, not by colour.
  *
  * Each step has exactly one job — a screen title, the primary object in a row, a
@@ -483,66 +494,78 @@ internal fun appTypography(): Typography {
     )
 
     // The one big line a screen is allowed.
-    val display = base.displayLarge.step(34, 38, FontWeight.SemiBold, tracking = (-1.1))
-    val screenTitle = base.displayLarge.step(26, 32, FontWeight.SemiBold, tracking = (-0.5))
-    val sectionTitle = base.displayLarge.step(18, 24, FontWeight.SemiBold, tracking = (-0.2))
+    val displayL = base.displayLarge.step(34, 40, FontWeight.SemiBold, tracking = (-1.1))
+    val displayM = base.displayLarge.step(30, 36, FontWeight.SemiBold, tracking = (-0.8))
+    val displayS = base.displayLarge.step(26, 32, FontWeight.SemiBold, tracking = (-0.5))
 
-    // Objects: a bot's name, a thread's title, a provider's name.
-    val objectLarge = base.displayLarge.step(16, 21, FontWeight.SemiBold, tracking = (-0.1))
-    val objectMedium = base.displayLarge.step(15, 20, FontWeight.Medium)
-    val objectSmall = base.displayLarge.step(14, 18, FontWeight.Medium)
+    val headlineL = base.displayLarge.step(24, 30, FontWeight.SemiBold, tracking = (-0.4))
+    val headlineM = base.displayLarge.step(22, 28, FontWeight.SemiBold, tracking = (-0.3))
+    val headlineS = base.displayLarge.step(20, 26, FontWeight.SemiBold, tracking = (-0.2))
 
-    // Copy.
-    val body = base.displayLarge.step(16, 23, FontWeight.Normal)
-    val bodyCompact = base.displayLarge.step(15, 20, FontWeight.Normal)
-    val caption = base.displayLarge.step(13, 18, FontWeight.Normal)
+    val titleL = base.displayLarge.step(18, 24, FontWeight.SemiBold, tracking = (-0.1))
+    val titleM = base.displayLarge.step(16, 22, FontWeight.SemiBold, tracking = (-0.05))
+    val titleS = base.displayLarge.step(14, 20, FontWeight.Medium)
 
-    // Metadata: timestamps, counts, section headers.
-    val meta = base.displayLarge.step(12, 16, FontWeight.Medium, tracking = 0.4)
-    val metaQuiet = base.displayLarge.step(12, 16, FontWeight.Normal)
+    val bodyL = base.displayLarge.step(16, 24, FontWeight.Normal)
+    val bodyM = base.displayLarge.step(14, 20, FontWeight.Normal)
+    val bodyS = base.displayLarge.step(12, 16, FontWeight.Normal)
+
+    val labelL = base.displayLarge.step(14, 20, FontWeight.SemiBold, tracking = 0.1)
+    val labelM = base.displayLarge.step(12, 16, FontWeight.Medium, tracking = 0.2)
+    val labelS = base.displayLarge.step(11, 14, FontWeight.Medium, tracking = 0.3)
 
     return base.copy(
-        displayLarge = display,
-        displayMedium = display,
-        displaySmall = screenTitle,
-        headlineLarge = screenTitle,
-        headlineMedium = screenTitle,
-        headlineSmall = screenTitle,
-        titleLarge = sectionTitle,
-        titleMedium = objectLarge,
-        titleSmall = objectMedium,
-        bodyLarge = body,
-        bodyMedium = bodyCompact,
-        bodySmall = caption,
-        labelLarge = meta,
-        labelMedium = meta,
-        labelSmall = metaQuiet,
+        displayLarge = displayL,
+        displayMedium = displayM,
+        displaySmall = displayS,
+        headlineLarge = headlineL,
+        headlineMedium = headlineM,
+        headlineSmall = headlineS,
+        titleLarge = titleL,
+        titleMedium = titleM,
+        titleSmall = titleS,
+        bodyLarge = bodyL,
+        bodyMedium = bodyM,
+        bodySmall = bodyS,
+        labelLarge = labelL,
+        labelMedium = labelM,
+        labelSmall = labelS,
     )
 }
 
-/** Material's scheme, built from [AppColors] so Material widgets match the tokens. */
+/** Material 3 Expressive color scheme, built from [AppColors] with calibrated tonal containers. */
 internal fun appColorScheme(colors: AppColors, dark: Boolean) = run {
     val base = if (dark) darkColorScheme() else lightColorScheme()
     base.copy(
         primary = colors.accent,
         onPrimary = colors.onAccent,
+        primaryContainer = if (dark) Color(0xFF272A32) else Color(0xFFE2E6EF),
+        onPrimaryContainer = if (dark) Color(0xFFE2E8F0) else Color(0xFF0F172A),
         secondary = colors.textSecondary,
         onSecondary = colors.onAccent,
+        secondaryContainer = if (dark) Color(0xFF1E2128) else Color(0xFFECEEF2),
+        onSecondaryContainer = if (dark) Color(0xFFCBD5E1) else Color(0xFF1E293B),
+        tertiary = colors.info,
+        onTertiary = colors.onAccent,
+        tertiaryContainer = if (dark) Color(0xFF132F3E) else Color(0xFFE0F2FE),
+        onTertiaryContainer = if (dark) Color(0xFF7DD3FC) else Color(0xFF0369A1),
         background = colors.background,
         onBackground = colors.textPrimary,
         surface = colors.surface,
         onSurface = colors.textPrimary,
         surfaceVariant = colors.surfaceVariant,
         onSurfaceVariant = colors.textSecondary,
-        surfaceContainer = colors.surface,
-        surfaceContainerHigh = colors.elevatedSurface,
-        surfaceContainerHighest = colors.elevatedSurface,
-        surfaceContainerLow = colors.surface,
-        surfaceContainerLowest = colors.background,
+        surfaceContainerLowest = if (dark) Color(0xFF0E1013) else Color(0xFFFFFFFF),
+        surfaceContainerLow = if (dark) Color(0xFF15181E) else Color(0xFFF7F7FA),
+        surfaceContainer = if (dark) Color(0xFF1A1D24) else Color(0xFFF0F1F4),
+        surfaceContainerHigh = if (dark) Color(0xFF22262E) else Color(0xFFE9EBEF),
+        surfaceContainerHighest = if (dark) Color(0xFF2A2E37) else Color(0xFFE2E4E9),
         outline = colors.border,
         outlineVariant = colors.subtleBorder,
         error = colors.danger,
         onError = colors.onAccent,
+        errorContainer = if (dark) Color(0xFF3B1818) else Color(0xFFFEE2E2),
+        onErrorContainer = if (dark) Color(0xFFFF8A80) else Color(0xFFDC2626),
         scrim = Color.Black,
     )
 }

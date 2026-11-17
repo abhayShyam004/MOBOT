@@ -79,6 +79,12 @@ describe("held notes", () => {
     expect(approvalHeldNote({ source: "native-approval", permission: true })).toBe("approval.held.native");
     expect(approvalHeldNote({ source: "explicit-approval-block", permission: true })).toBe("approval.held.sandbox");
     expect(approvalHeldNote({ source: "no-grant", permission: true })).toBeUndefined();
+    // A bulk deletion is never auto-approved, so its card must not claim that
+    // Full access would skip it.
+    expect(approvalHeldNote({ source: "explicit-approval-block", permission: true, massDeletion: true }))
+      .toBe("approval.held.bulk");
+    expect(approvalHeldReason({ source: "explicit-approval-block", permission: true, massDeletion: true }))
+      .toContain("Full access does not skip it");
     expect(approvalHeldNote({ source: undefined, permission: true })).toBeUndefined();
     // questions are never held for a mode reason
     expect(approvalHeldNote({ source: "native-approval", permission: false })).toBeUndefined();

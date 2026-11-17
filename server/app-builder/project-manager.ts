@@ -1,7 +1,7 @@
 // ProjectManager: Manages isolated project workspaces, metadata, file operations,
 // builds, tests, local preview processes, and git state on Android and host.
-import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
@@ -44,6 +44,91 @@ export const DEFAULT_PROJECTS_DIR = process.env.OMB_PROJECTS_DIR || join(DATA_DI
 
 const PROJECT_ID_REGEX = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 const ENV_KEY_REGEX = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
+const GIT_MAX_BUFFER = 8 * 1024 * 1024;
+const DEFAULT_GITIGNORE = "node_modules/\nproject.json\n.env\n.env.*\n!.env.example\n!.env.sample\n!.env.template\n.omb/\n*.pem\n*.p12\n*.pfx\n*.key\n*.keystore\n*.jks\n";
+
+interface GitCommandResult {
+  status: number;
+  stdout: string;
+  stderr: string;
+}
+
+function runGit(projectDir: string, args: string[]): GitCommandResult {
+  const result = spawnSync("git", args, {
+    cwd: projectDir,
+    encoding: "utf8",
+    timeout: 30_000,
+    maxBuffer: GIT_MAX_BUFFER,
+    windowsHide: true,
+    env: {
+      ...process.env,
+      GIT_DIR: undefined,
+      GIT_WORK_TREE: undefined,
+      GIT_INDEX_FILE: undefined,
+      GIT_COMMON_DIR: undefined,
+      GIT_PREFIX: undefined,
+      GIT_TERMINAL_PROMPT: "0",
+      GIT_PAGER: "cat",
+      PAGER: "cat",
+    },
+  });
+  if (result.error) {
+    throw new Error(`Git could not run ${args[0] || "the requested command"}: ${result.error.message}`);
+  }
+  return {
+    status: result.status ?? -1,
+    stdout: result.stdout || "",
+    stderr: result.stderr || "",
+  };
+}
+
+function requireGit(projectDir: string, args: string[]): GitCommandResult {
+  const result = runGit(projectDir, args);
+  if (result.status !== 0) {
+    const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.status}`;
+    throw new Error(`Git ${args[0] || "command"} failed: ${detail.slice(0, 4000)}`);
+  }
+  return result;
+}
+
+function projectGitRoot(projectDir: string): string | null {
+  const result = runGit(projectDir, ["rev-parse", "--show-toplevel"]);
+  if (result.status !== 0) return null;
+  try {
+    const root = realpathSync(result.stdout.trim());
+    if (root !== realpathSync(projectDir)) {
+      throw new Error(`Refusing to use parent Git repository at ${root} for isolated project ${projectDir}.`);
+    }
+    return root;
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("Refusing to use parent Git repository")) throw error;
+    return null;
+  }
+}
+
+function isLegacySyntheticGitDir(gitDir: string): boolean {
+  try {
+    if (!lstatSync(gitDir).isDirectory()) return false;
+    const entries = readdirSync(gitDir).sort();
+    const allowed = new Set(["HEAD", "objects", "omb_commits.json", "refs"]);
+    if (entries.some((entry) => !allowed.has(entry))) return false;
+    if (!entries.includes("HEAD") || !entries.includes("objects") || !entries.includes("refs")) return false;
+    if (readFileSync(join(gitDir, "HEAD"), "utf8") !== "ref: refs/heads/main\n") return false;
+    if (readdirSync(join(gitDir, "objects")).length !== 0) return false;
+    const refsDir = join(gitDir, "refs");
+    if (readdirSync(refsDir).some((entry) => entry !== "heads")) return false;
+    return readdirSync(join(refsDir, "heads")).length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function isSensitiveGitPath(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/").toLowerCase();
+  const basename = normalized.slice(normalized.lastIndexOf("/") + 1);
+  if (basename === ".env" || (basename.startsWith(".env.") && ![".env.example", ".env.sample", ".env.template"].includes(basename))) return true;
+  return /\.(?:pem|p12|pfx|key|keystore|jks)$/.test(basename);
+}
 
 export interface ActivePreviewProcess {
   process: ChildProcess;
@@ -475,23 +560,70 @@ export class ProjectManager {
     writeFileAtomic(filePath, lines.join("\n") + "\n", { mode });
   }
 
-  // ── Git Version Control (Self-Contained & Native-Compatible) ──────────────
+  // ── Git Version Control ──────────────────────────────────────────────────
+
+  private ensureProjectGitignore(projectDir: string): void {
+    const gitignorePath = join(projectDir, ".gitignore");
+    const current = existsSync(gitignorePath) ? readFileSync(gitignorePath, "utf8") : "";
+    const existing = new Set(current.split(/\r?\n/).map((line) => line.trim()));
+    const missing = DEFAULT_GITIGNORE.trimEnd().split("\n").filter((line) => !existing.has(line));
+    if (missing.length > 0) {
+      const separator = current.length > 0 && !current.endsWith("\n") ? "\n" : "";
+      writeFileAtomic(gitignorePath, `${current}${separator}${missing.join("\n")}\n`, { mode: 0o600 });
+    }
+  }
+
+  private readProjectGitStatus(projectDir: string): ProjectGitState & { statusText: string } {
+    const gitDir = join(projectDir, ".git");
+    const root = projectGitRoot(projectDir);
+    if (!root) {
+      if (existsSync(gitDir)) throw new Error("The project's .git directory is not a valid Git repository rooted at this project.");
+      return { initialized: false, clean: true, statusText: "Git not initialized" };
+    }
+
+    const status = requireGit(projectDir, ["status", "--porcelain=v1", "--untracked-files=all", "-z"]);
+    const branchResult = runGit(projectDir, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
+    const branch = branchResult.status === 0 ? branchResult.stdout.trim() : "HEAD";
+    const headResult = runGit(projectDir, ["rev-parse", "--verify", "HEAD"]);
+    const commitHash = headResult.status === 0 ? headResult.stdout.trim() : undefined;
+    const messageResult = commitHash ? runGit(projectDir, ["log", "-1", "--format=%s"]) : null;
+    const clean = status.stdout.length === 0;
+    const details = status.stdout.split("\0").filter(Boolean);
+    const statusSummary = clean ? "working tree clean" : `${details.length} changed path${details.length === 1 ? "" : "s"}`;
+
+    return {
+      initialized: true,
+      branch,
+      commitHash,
+      clean,
+      lastCommitMessage: messageResult?.status === 0 ? messageResult.stdout.trim() : undefined,
+      statusText: `On branch ${branch}${commitHash ? `. Commit: ${commitHash.slice(0, 7)}` : ". No commits yet"}; ${statusSummary}.`,
+    };
+  }
 
   gitInit(projectId: string): ProjectGitState {
     const projectDir = this.getProjectDir(projectId);
     const gitDir = join(projectDir, ".git");
-
-    if (!existsSync(gitDir)) {
-      mkdirSync(join(gitDir, "objects"), { recursive: true });
-      mkdirSync(join(gitDir, "refs", "heads"), { recursive: true });
-      writeFileSync(join(gitDir, "HEAD"), "ref: refs/heads/main\n");
-      writeFileSync(join(projectDir, ".gitignore"), "node_modules/\n.env.local\n.omb/\n");
+    const root = projectGitRoot(projectDir);
+    if (root && root !== realpathSync(projectDir)) {
+      throw new Error("Refusing to initialize Git inside another repository.");
+    }
+    if (!root && existsSync(gitDir)) {
+      if (!isLegacySyntheticGitDir(gitDir)) {
+        throw new Error("Refusing to replace an existing .git directory that is not a recognized legacy MOBOT placeholder.");
+      }
+      rmSync(gitDir, { recursive: true, force: true });
     }
 
+    this.ensureProjectGitignore(projectDir);
+    if (!root) requireGit(projectDir, ["-c", "init.defaultBranch=main", "init"]);
+    const status = this.readProjectGitStatus(projectDir);
     const state: ProjectGitState = {
-      initialized: true,
-      branch: "main",
-      clean: true,
+      initialized: status.initialized,
+      branch: status.branch,
+      commitHash: status.commitHash,
+      clean: status.clean,
+      lastCommitMessage: status.lastCommitMessage,
     };
 
     const project = this.getProject(projectId);
@@ -505,82 +637,83 @@ export class ProjectManager {
   gitStatus(projectId: string): ProjectGitState & { statusText: string } {
     const project = this.getProject(projectId);
     if (!project) throw new Error(`Project "${projectId}" not found.`);
-
-    const projectDir = this.getProjectDir(projectId);
-    const gitDir = join(projectDir, ".git");
-    if (!existsSync(gitDir)) {
-      return { initialized: false, clean: true, statusText: "Git not initialized" };
-    }
-
-    const commitLogFile = join(gitDir, "omb_commits.json");
-    let commits: any[] = [];
-    if (existsSync(commitLogFile)) {
-      try {
-        commits = JSON.parse(readFileSync(commitLogFile, "utf8"));
-      } catch {}
-    }
-
-    const lastCommit = commits[commits.length - 1];
-    const headCommit = lastCommit ? lastCommit.hash : undefined;
-
-    return {
-      initialized: true,
-      branch: "main",
-      commitHash: headCommit,
-      clean: true,
-      lastCommitMessage: lastCommit ? lastCommit.message : undefined,
-      statusText: `On branch main. Commit: ${headCommit ? headCommit.slice(0, 7) : "Initial"}`,
-    };
+    return this.readProjectGitStatus(this.getProjectDir(projectId));
   }
 
-  gitCommit(projectId: string, message: string): { commitHash: string; branch: string } {
-    const projectDir = this.getProjectDir(projectId);
-    const gitDir = join(projectDir, ".git");
-    if (!existsSync(gitDir)) {
-      this.gitInit(projectId);
-    }
-
-    const files = this.listProjectFiles(projectId);
-    const hasher = createHash("sha1");
-    for (const f of files) {
-      hasher.update(`${f.path}:${f.size}`);
-    }
-    hasher.update(message);
-    hasher.update(String(Date.now()));
-    const commitHash = hasher.digest("hex");
-
-    const commitLogFile = join(gitDir, "omb_commits.json");
-    let commits: any[] = [];
-    if (existsSync(commitLogFile)) {
-      try {
-        commits = JSON.parse(readFileSync(commitLogFile, "utf8"));
-      } catch {}
-    }
-
-    commits.push({
-      hash: commitHash,
-      message,
-      timestamp: new Date().toISOString(),
-      fileCount: files.length,
-    });
-
-    writeFileSync(commitLogFile, JSON.stringify(commits, null, 2));
-
+  gitCommit(projectId: string, message: string, paths?: string[]): { commitHash: string; branch: string } {
     const project = this.getProject(projectId);
-    if (project) {
-      project.git.commitHash = commitHash;
-      project.git.clean = true;
-      project.git.lastCommitMessage = message;
-      this.saveProjectRecord(project);
+    if (!project) throw new Error(`Project "${projectId}" not found.`);
+    const cleanMessage = message.trim();
+    if (!cleanMessage) throw new Error("A non-empty Git commit message is required.");
+    const projectDir = this.getProjectDir(projectId);
+    this.gitInit(projectId);
+
+    const existingStaged = requireGit(projectDir, ["diff", "--cached", "--name-only", "-z"]);
+    if (existingStaged.stdout.length > 0) {
+      throw new Error("Refusing to commit because the index already contains staged changes; review or commit those changes separately first.");
     }
 
-    return { commitHash, branch: "main" };
+    const pending = requireGit(projectDir, ["ls-files", "--modified", "--deleted", "--others", "--exclude-standard", "-z"])
+      .stdout.split("\0").filter(Boolean);
+    const requestedPaths = paths?.map((path) => path.trim()).filter(Boolean);
+    if (requestedPaths?.some((path) => path.startsWith("-") || path.includes("\\0"))) {
+      throw new Error("Git commit paths must be project-relative paths and may not begin with '-'.");
+    }
+    const selected = requestedPaths?.length ? requestedPaths : pending;
+    const pendingSet = new Set(pending);
+    const missing = selected.filter((path) => !pendingSet.has(path));
+    if (missing.length > 0) {
+      throw new Error(`Refusing to commit paths that are unchanged, ignored, or outside the pending worktree changes: ${missing.join(", ")}`);
+    }
+    const sensitive = selected.filter(isSensitiveGitPath);
+    const stageable = selected.filter((path) => !isSensitiveGitPath(path));
+    if (stageable.length === 0) {
+      throw new Error(sensitive.length > 0
+        ? "No commit was created: pending changes contain only secret-like files, which are not staged."
+        : "No changes to commit.");
+    }
+
+    for (let offset = 0; offset < stageable.length; offset += 100) {
+      requireGit(projectDir, ["add", "-A", "--", ...stageable.slice(offset, offset + 100)]);
+    }
+    const staged = requireGit(projectDir, ["diff", "--cached", "--name-only", "-z"]).stdout.split("\0").filter(Boolean);
+    if (staged.length === 0) throw new Error("No changes to commit.");
+    if (staged.some((path) => !stageable.includes(path))) {
+      throw new Error("Refusing to commit because Git staged a path outside the selected project changes.");
+    }
+    if (staged.some(isSensitiveGitPath)) throw new Error("Refusing to create a commit containing secret-like files.");
+
+    requireGit(projectDir, ["-c", "user.name=MOBOT", "-c", "user.email=mobot@localhost", "commit", "--no-gpg-sign", "-m", cleanMessage]);
+    const status = this.readProjectGitStatus(projectDir);
+    if (!status.commitHash) throw new Error("Git commit reported success but HEAD has no commit object.");
+
+    project.git = {
+      initialized: status.initialized,
+      branch: status.branch,
+      commitHash: status.commitHash,
+      clean: status.clean,
+      lastCommitMessage: status.lastCommitMessage,
+    };
+    this.saveProjectRecord(project);
+    return { commitHash: status.commitHash, branch: status.branch || "HEAD" };
   }
 
   gitDiff(projectId: string): string {
     const project = this.getProject(projectId);
     if (!project) throw new Error(`Project "${projectId}" not found.`);
-    return "All working tree changes tracked and clean.";
+    const projectDir = this.getProjectDir(projectId);
+    const root = projectGitRoot(projectDir);
+    if (!root) {
+      if (existsSync(join(projectDir, ".git"))) throw new Error("The project's .git directory is invalid.");
+      return "Git not initialized.";
+    }
+    const head = runGit(projectDir, ["rev-parse", "--verify", "HEAD"]);
+    const args = head.status === 0
+      ? ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "HEAD", "--"]
+      : ["--no-pager", "diff", "--no-ext-diff", "--no-textconv", "--"];
+    const result = runGit(projectDir, args);
+    if (result.status !== 0) throw new Error(`Git diff failed: ${(result.stderr.trim() || `exit code ${result.status}`).slice(0, 4000)}`);
+    return result.stdout || "No tracked changes. Untracked files are listed by project_git_status.";
   }
 
   // ── Build & Test Runner ──────────────────────────────────────────────────

@@ -1,5 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { ProjectManager } from "./project-manager.ts";
@@ -151,20 +152,80 @@ describe("ProjectManager (Phase C Full-Stack App Builder)", () => {
   });
 
   describe("Git Operations", () => {
-    it("tracks commits, status, and history", () => {
+    it("creates a genuine commit object and reports real status and diff", () => {
       manager.createProject({ name: "Git App", id: "git-app", initGit: true });
+      const projectDir = manager.getProjectDir("git-app");
 
-      const status = manager.gitStatus("git-app");
-      expect(status.initialized).toBe(true);
-      expect(status.branch).toBe("main");
+      const initial = manager.gitStatus("git-app");
+      expect(initial.initialized).toBe(true);
+      expect(initial.branch).toBe("main");
+      expect(initial.commitHash).toBeUndefined();
+      expect(initial.clean).toBe(false);
 
       const commit = manager.gitCommit("git-app", "feat: initial commit of job tracker");
-      expect(commit.commitHash).toBeDefined();
-      expect(commit.commitHash.length).toBe(40);
+      expect(commit.commitHash).toMatch(/^[0-9a-f]{40}$/);
+      const actual = spawnSync("git", ["cat-file", "-t", commit.commitHash], { cwd: projectDir, encoding: "utf8" });
+      expect(actual.status).toBe(0);
+      expect(actual.stdout.trim()).toBe("commit");
 
       const statusAfter = manager.gitStatus("git-app");
       expect(statusAfter.commitHash).toBe(commit.commitHash);
       expect(statusAfter.lastCommitMessage).toBe("feat: initial commit of job tracker");
+      expect(statusAfter.clean).toBe(true);
+
+      writeFileSync(join(projectDir, "app.js"), "console.log('edited');\n");
+      writeFileSync(join(projectDir, "new-file.txt"), "untracked\n");
+      const dirty = manager.gitStatus("git-app");
+      expect(dirty.clean).toBe(false);
+      expect(dirty.statusText).toContain("2 changed paths");
+      expect(manager.gitDiff("git-app")).toContain("console.log('edited')");
+      expect(manager.gitDiff("git-app")).not.toContain("new-file.txt");
+
+      const secondCommit = manager.gitCommit("git-app", "fix: track modified files");
+      expect(secondCommit.commitHash).not.toBe(commit.commitHash);
+      expect(manager.gitStatus("git-app").clean).toBe(true);
+    });
+
+    it("does not stage secret-like files and can commit only selected paths", () => {
+      manager.createProject({ name: "Git Safety", id: "git-safety", initGit: true });
+      const projectDir = manager.getProjectDir("git-safety");
+      writeFileSync(join(projectDir, "index.html"), "<main>safe</main>\n");
+      writeFileSync(join(projectDir, ".env.production"), "PRIVATE_TOKEN=do-not-commit\n");
+
+      const commit = manager.gitCommit("git-safety", "feat: add safe content");
+      const committedFiles = spawnSync("git", ["show", "--format=", "--name-only", commit.commitHash], { cwd: projectDir, encoding: "utf8" });
+      expect(committedFiles.stdout).not.toContain(".env.production");
+      expect(readFileSync(join(projectDir, ".env.production"), "utf8")).toContain("do-not-commit");
+
+      writeFileSync(join(projectDir, "user-staged.txt"), "existing staged data\n");
+      writeFileSync(join(projectDir, "other-change.txt"), "leave this for later\n");
+      const selectedCommit = manager.gitCommit("git-safety", "feat: commit only the requested path", ["user-staged.txt"]);
+      const selectedFiles = spawnSync("git", ["show", "--format=", "--name-only", selectedCommit.commitHash], { cwd: projectDir, encoding: "utf8" });
+      expect(selectedFiles.stdout.trim()).toBe("user-staged.txt");
+      expect(manager.gitStatus("git-safety").clean).toBe(false);
+      expect(manager.gitDiff("git-safety")).toBe("No tracked changes. Untracked files are listed by project_git_status.");
+      const staged = spawnSync("git", ["diff", "--cached", "--name-only"], { cwd: projectDir, encoding: "utf8" });
+      expect(staged.stdout).toBe("");
+      expect(() => manager.gitCommit("git-safety", "must not absorb ignored or unchanged path", ["not-present.txt"])).toThrow(/outside the pending worktree changes/);
+    });
+
+    it("refuses to treat a parent repository or unrelated .git metadata as the project repository", () => {
+      const separateRoot = join(tmpdir(), `mobot-git-boundary-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+      try {
+        const isolatedManager = new ProjectManager(separateRoot);
+        isolatedManager.createProject({ name: "Untrusted Git", id: "untrusted-git", initGit: false });
+        const gitDir = join(isolatedManager.getProjectDir("untrusted-git"), ".git");
+        mkdirSync(gitDir, { recursive: true });
+        writeFileSync(join(gitDir, "config"), "unrecognized git data");
+        expect(() => isolatedManager.gitInit("untrusted-git")).toThrow(/not a recognized legacy/);
+      } finally {
+        rmSync(separateRoot, { recursive: true, force: true });
+      }
+
+      const project = manager.createProject({ name: "Nested Repo", id: "nested-repo", initGit: false });
+      const parentInit = spawnSync("git", ["init", "--quiet"], { cwd: tempDir });
+      expect(parentInit.status).toBe(0);
+      expect(() => manager.gitInit(project.id)).toThrow(/parent Git repository/);
     });
   });
 

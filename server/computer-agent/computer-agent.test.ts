@@ -531,6 +531,58 @@ describe("General-Purpose Computer Agent Layer", () => {
       expect(record.metadata?.width).toBe(120);
     });
 
+    it("delivers a Colab notebook as a notebook, and refuses one no reader could open", () => {
+      const { ArtifactManager, inspectNotebook, NOTEBOOK_MIME } = require("./artifact-manager.ts");
+      const manager = new ArtifactManager();
+
+      const notebook = {
+        nbformat: 4,
+        nbformat_minor: 5,
+        metadata: {
+          kernelspec: { display_name: "Python 3", language: "python", name: "python3" },
+          language_info: { name: "python" },
+          colab: { provenance: [] },
+        },
+        cells: [
+          { cell_type: "markdown", metadata: {}, source: ["# List and tuple methods"] },
+          {
+            cell_type: "code",
+            metadata: {},
+            execution_count: null,
+            outputs: [],
+            source: ["items = [3, 1, 2]\n", "items.sort()\n", "items"],
+          },
+        ],
+      };
+      const goodPath = join(tempDir, "list-tuple-methods.ipynb");
+      writeFileSync(goodPath, JSON.stringify(notebook, null, 2));
+
+      const inspected = inspectNotebook(Buffer.from(JSON.stringify(notebook)));
+      expect(inspected.ok).toBe(true);
+      expect(inspected.cellCount).toBe(2);
+      expect(inspected.codeCellCount).toBe(1);
+      expect(inspected.kernel).toBe("python3");
+
+      const record = manager.registerArtifact(goodPath, { name: "List_tuple Methods.ipynb" });
+      expect(record.kind).toBe("document");
+      expect(record.mime).toBe(NOTEBOOK_MIME);
+      expect(record.urlPath).toMatch(/^\/api\/attachments\/[a-f0-9-]+\.ipynb$/);
+      expect(record.metadata?.format).toBe("ipynb");
+      expect(record.metadata?.codeCellCount).toBe(1);
+      expect(record.metadata?.kernel).toBe("python3");
+
+      // Truncated JSON, and JSON that is not a notebook at all, are both refused.
+      const truncatedPath = join(tempDir, "truncated.ipynb");
+      writeFileSync(truncatedPath, JSON.stringify(notebook).slice(0, 120));
+      expect(() => manager.registerArtifact(truncatedPath, { name: "truncated.ipynb" })).toThrow(
+        /Refusing to register .* as a Colab notebook/,
+      );
+
+      const emptyCellsPath = join(tempDir, "empty.ipynb");
+      writeFileSync(emptyCellsPath, JSON.stringify({ nbformat: 4, nbformat_minor: 5, metadata: {}, cells: [] }));
+      expect(() => manager.registerArtifact(emptyCellsPath, { name: "empty.ipynb" })).toThrow(/no cells/);
+    });
+
     it("registers and delivers artifacts with durability and turn scoping", () => {
       const { ArtifactManager } = require("./artifact-manager.ts");
       const manager = new ArtifactManager();
@@ -576,6 +628,93 @@ describe("General-Purpose Computer Agent Layer", () => {
       expect(discovered.length).toBe(2);
       expect(discovered.some((d: any) => d.kind === "image")).toBe(true);
       expect(discovered.some((d: any) => d.kind === "pdf")).toBe(true);
+    });
+
+    it("discovers a notebook written at the workspace root, not the project's own source", () => {
+      const { ArtifactManager, NOTEBOOK_MIME } = require("./artifact-manager.ts");
+      const { mkdirSync } = require("node:fs");
+      const manager = new ArtifactManager();
+      const root = join(tmpdir(), `omb-artifact-root-${Date.now()}-${Math.random()}`);
+      mkdirSync(root, { recursive: true });
+
+      const notebook = {
+        nbformat: 4,
+        nbformat_minor: 5,
+        metadata: { kernelspec: { display_name: "Python 3", language: "python", name: "python3" } },
+        cells: [
+          { cell_type: "markdown", metadata: {}, source: ["# Answers"] },
+          { cell_type: "code", metadata: {}, execution_count: null, outputs: [], source: ["1 + 1"] },
+        ],
+      };
+      writeFileSync(join(root, "list-tuple-answers.ipynb"), JSON.stringify(notebook));
+      writeFileSync(join(root, "server.js"), "console.log('project source, not a deliverable')\n");
+      writeFileSync(join(root, "package.json"), '{"name":"trial"}\n');
+
+      const discovered = manager.scanAndRegisterWorkspaceArtifacts([root], {
+        turnId: "turn-root-notebook",
+        threadId: "thread-root-notebook",
+      });
+
+      expect(discovered.map((d: any) => d.name)).toEqual(["list-tuple-answers.ipynb"]);
+      expect(discovered[0].mime).toBe(NOTEBOOK_MIME);
+      expect(discovered[0].metadata?.format).toBe("ipynb");
+    });
+
+    it("never publishes a pre-existing root deliverable that this turn did not write", () => {
+      const { ArtifactManager } = require("./artifact-manager.ts");
+      const { mkdirSync, utimesSync } = require("node:fs");
+      const manager = new ArtifactManager();
+      const root = join(tmpdir(), `omb-artifact-root-age-${Date.now()}-${Math.random()}`);
+      mkdirSync(root, { recursive: true });
+
+      // A PDF and a dataset that were in the workspace before this turn.
+      const oldPdf = join(root, "contract-signed-2024.pdf");
+      writeFileSync(oldPdf, createTestPdf());
+      const oldCsv = join(root, "customers.csv");
+      writeFileSync(oldCsv, "id,name\n1,Ada\n");
+      const old = new Date(Date.now() - 6 * 60 * 60 * 1000);
+      utimesSync(oldPdf, old, old);
+      utimesSync(oldCsv, old, old);
+
+      // A notebook the turn actually wrote.
+      const notebook = {
+        nbformat: 4,
+        nbformat_minor: 5,
+        metadata: { kernelspec: { name: "python3" } },
+        cells: [{ cell_type: "markdown", metadata: {}, source: ["# Fresh"] }],
+      };
+      const fresh = join(root, "fresh-answers.ipynb");
+      writeFileSync(fresh, JSON.stringify(notebook));
+
+      const discovered = manager.scanAndRegisterWorkspaceArtifacts([root], {
+        turnId: "turn-age",
+        threadId: "thread-age",
+        turnStartTime: Date.now() - 60_000,
+      });
+
+      expect(discovered.map((d: any) => d.name)).toEqual(["fresh-answers.ipynb"]);
+    });
+
+    it("keeps source files, manifests and dotfiles out of root discovery", () => {
+      const { ArtifactManager } = require("./artifact-manager.ts");
+      const { mkdirSync } = require("node:fs");
+      const manager = new ArtifactManager();
+      const root = join(tmpdir(), `omb-artifact-root-source-${Date.now()}-${Math.random()}`);
+      mkdirSync(root, { recursive: true });
+
+      writeFileSync(join(root, "main.ts"), "export const x = 1;\n");
+      writeFileSync(join(root, "server.js"), "console.log(1);\n");
+      writeFileSync(join(root, "tsconfig.json"), '{"compilerOptions":{}}\n');
+      writeFileSync(join(root, "package.json"), '{"name":"x"}\n');
+      writeFileSync(join(root, ".env"), "SECRET=1\n");
+      writeFileSync(join(root, "debug.log"), "noise\n");
+
+      const discovered = manager.scanAndRegisterWorkspaceArtifacts([root], {
+        turnId: "turn-source",
+        threadId: "thread-source",
+      });
+
+      expect(discovered).toEqual([]);
     });
 
     it("never rediscovers already delivered artifacts on subsequent turns", () => {

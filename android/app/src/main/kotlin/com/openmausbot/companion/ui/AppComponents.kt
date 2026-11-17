@@ -547,7 +547,7 @@ internal fun BotRow(
                             fontWeight = FontWeight.Bold,
                             letterSpacing = (-0.3).sp,
                         ),
-                        color = colors.textPrimary,
+                        color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f, fill = false),
@@ -563,7 +563,7 @@ internal fun BotRow(
                             fontSize = 12.5.sp,
                             fontWeight = FontWeight.Normal,
                         ),
-                        color = colors.textTertiary,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                     )
                 }
@@ -581,14 +581,13 @@ internal fun BotRow(
                         fontWeight = FontWeight.Normal,
                         letterSpacing = (-0.1).sp,
                     ),
-                    color = colors.textSecondary,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
                 if (unread) {
-                    // Vibrant Grok electric blue unread indicator
-                    AppStatusDot(color = Color(0xFF1D9BF0), size = 8.5.dp)
+                    AppStatusDot(color = MaterialTheme.colorScheme.primary, size = 8.5.dp)
                 }
             }
         }
@@ -698,13 +697,13 @@ internal fun RoleChip(text: String, modifier: Modifier = Modifier) {
     Text(
         text = text,
         style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.Medium,
-        color = AppTheme.colors.textSecondary,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.onSecondaryContainer,
         maxLines = 1,
         overflow = TextOverflow.Ellipsis,
         modifier = modifier
             .clip(RoundedCornerShape(8.dp))
-            .background(AppTheme.colors.surfaceRaised)
+            .background(MaterialTheme.colorScheme.secondaryContainer)
             .padding(horizontal = 7.dp, vertical = 2.dp),
     )
 }

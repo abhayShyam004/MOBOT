@@ -80,4 +80,19 @@ class InAppBrowserNavigationTest {
         navigator.pop()
         assertEquals(Destination.Roster, navigator.current)
     }
+
+    @Test
+    fun `browser destination with isPreview encodes and decodes faithfully`() {
+        val stack = listOf(
+            Destination.Roster,
+            Destination.Browser("http://127.0.0.1:3001", "CodeQuest", null, isPreview = true),
+        )
+        val encoded = CompanionNavigator.encode(stack)
+        val decoded = CompanionNavigator.decode(encoded)
+        assertEquals(stack, decoded)
+        val browser = decoded[1] as Destination.Browser
+        assertTrue(browser.isPreview)
+        assertEquals("http://127.0.0.1:3001", browser.url)
+        assertEquals("CodeQuest", browser.title)
+    }
 }

@@ -594,3 +594,24 @@ describe("close_thread", () => {
     }
   });
 });
+
+describe("bot deletion isolation", () => {
+  it("releases a deleted bot's exclusive device claim before its interrupted turn reports completion", async () => {
+    const doomed = await createBot("Doomed", "gated");
+    const next = await createBot("Next", "gated");
+    try {
+      // "open" selects the phone skill, which takes the process-wide phone
+      // device for the whole turn. That is the lease a deleted bot must not
+      // keep while its CLI is still inside the interrupt kill grace.
+      await heldTurn(doomed, "Open a calculator.");
+      expect((await api("DELETE", `/api/bots/${doomed.id}`)).status).toBe(200);
+      // If the dead turn still owns the device, this setup throws before it
+      // can spawn a provider and liveToken times out.
+      await heldTurn(next, "Open a calculator.");
+      release(next.threadId);
+      await expect.poll(async () => (await botState(next.id))?.busy, { timeout: 15_000 }).toBe(false);
+    } finally {
+      await cleanup([next.id]);
+    }
+  }, 60_000);
+});

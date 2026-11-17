@@ -1,5 +1,6 @@
 package com.openmausbot.companion.ui
 
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.geometry.CornerRadius
@@ -192,20 +193,20 @@ private const val QUARTER = 90f
  */
 object BubbleColor {
     /**
-     * User bubble: Grok obsidian dark charcoal in daylight, deep dark in dark mode.
+     * User bubble: High-contrast primary surface container adhering to Material 3 Expressive.
      */
     val mine: Color
-        @Composable get() = if (AppTheme.isDark) Color(0xFF2C2C30) else Color(0xFF1F1F21)
+        @Composable get() = AppTheme.colors.myBubble
 
     val mineText: Color
-        @Composable get() = Color.White
+        @Composable get() = AppTheme.colors.onMyBubble
 
     /**
-     * Assistant bubble: Grok clean, soft light gray in daylight, subtle dark surface in dark mode.
+     * Assistant bubble: Material 3 surfaceContainer tonal surface.
      */
     val theirs: Color
-        @Composable get() = if (AppTheme.isDark) Color(0xFF212124) else Color(0xFFF3F3F5)
+        @Composable get() = MaterialTheme.colorScheme.surfaceContainer
 
     val theirsText: Color
-        @Composable get() = if (AppTheme.isDark) Color(0xFFF0F0F2) else Color(0xFF1A1A1C)
+        @Composable get() = MaterialTheme.colorScheme.onSurface
 }

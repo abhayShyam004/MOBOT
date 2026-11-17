@@ -343,6 +343,10 @@ function mimeFor(path: string): string {
     case ".csv": return "text/csv; charset=utf-8";
     case ".tsv": return "text/tab-separated-values; charset=utf-8";
     case ".json": return "application/json";
+    // A notebook the agent registered as an artifact is fetched back through
+    // this route, so it must keep the notebook type the card advertises;
+    // octet-stream would stop "Open" from handing it to a notebook app.
+    case ".ipynb": return "application/x-ipynb+json";
     case ".pdf": return "application/pdf";
     case ".rtf": return "application/rtf";
     case ".png": return "image/png";

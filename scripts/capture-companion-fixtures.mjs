@@ -20,6 +20,7 @@
 // for approval, which needs a real provider and a real turn. It is left
 // alone, and the run says so rather than quietly writing a worse version.
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -294,7 +295,7 @@ async function main() {
     const posted = await fetch(`${SIDECAR}/api/groups/${room.id}/messages`, asDevice({
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: `room fixture message ${i}` }),
+      body: JSON.stringify({ text: `room fixture message ${i}`, sendId: randomUUID() }),
     }));
     if (!posted.ok) throw new Error(`could not post room message ${i}: ${posted.status}`);
     await sleep(120);

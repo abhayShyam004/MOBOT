@@ -759,6 +759,45 @@ describe("OpenCode Go configuration", () => {
   });
 });
 
+describe("Respan Gateway configuration", () => {
+  it("hands the workspace's own provider keys to the gateway, under the names it reads", () => {
+    // The gateway routes between vendors, so it is the one driver that needs
+    // several credentials at once; the base URL travels beside the
+    // OpenAI-compatible key so the gateway calls the service that key belongs
+    // to rather than api.openai.com.
+    const cfg: AppConfig = {
+      anthropic: { key: "SECRET-ANTHROPIC" },
+      xai: { key: "SECRET-XAI" },
+      openaiCompat: { key: "SECRET-COMPAT", url: "https://openrouter.ai/api/v1" },
+      instances: {
+        gateway: { driver: "respanGateway" },
+        compat: { driver: "openai-compat" },
+      },
+    };
+
+    const instances = instanceConfigs(cfg);
+    expect(instances.gateway.environment).toEqual({
+      ANTHROPIC_API_KEY: "SECRET-ANTHROPIC",
+      XAI_API_KEY: "SECRET-XAI",
+      OPENAI_API_KEY: "SECRET-COMPAT",
+      RESPAN_OPENAI_BASE_URL: "https://openrouter.ai/api/v1",
+    });
+    // The router's own instance still receives only its own key.
+    expect(instances.compat.environment).toEqual({
+      OPENAI_COMPAT_API_KEY: "SECRET-COMPAT",
+      OPENAI_COMPAT_URL: "https://openrouter.ai/api/v1",
+    });
+  });
+
+  it("does not guess which service an OpenAI-compatible key belongs to", () => {
+    const instances = instanceConfigs({
+      openaiCompat: { key: "SECRET-COMPAT" },
+      instances: { gateway: { driver: "respanGateway" } },
+    });
+    expect(instances.gateway.environment).toEqual({});
+  });
+});
+
 describe("credential env narrowing", () => {
   it("injects each credential only into the driver that consumes it", () => {
     const cfg: AppConfig = {

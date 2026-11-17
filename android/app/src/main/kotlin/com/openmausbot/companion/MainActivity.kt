@@ -259,6 +259,26 @@ class MainActivity : ComponentActivity() {
         intent.getStringExtra("test_simulate_error")?.let { errorType ->
             app.session.triggerSimulatedError(errorType)
         }
+        intent.getStringExtra("open_preview_url")?.trim('\'', '"')?.let { previewUrl ->
+            val previewTitle = intent.getStringExtra("open_preview_title")?.trim('\'', '"')
+            val authExtra = intent.getBooleanExtra("authorize_preview_port", false)
+            android.util.Log.i("MainActivity", "handleIntent: previewUrl=$previewUrl, authExtra=$authExtra")
+            if (authExtra) {
+                runCatching {
+                    val uri = java.net.URI(previewUrl)
+                    val port = uri.port.takeIf { it in 1024..65535 }
+                    val host = uri.host.orEmpty()
+                    android.util.Log.i("MainActivity", "handleIntent parsed: host=$host, port=$port")
+                    if (port != null && com.openmausbot.companion.browser.BrowserSecurity.isLoopbackHost(host)) {
+                        com.openmausbot.companion.browser.BrowserSecurity.addAllowedPreviewPort(port)
+                        android.util.Log.i("MainActivity", "handleIntent added port: allowed=${com.openmausbot.companion.browser.BrowserSecurity.allowedPreviewPorts}")
+                    }
+                }.onFailure {
+                    android.util.Log.e("MainActivity", "handleIntent failed to parse", it)
+                }
+            }
+            pendingPreview.value = Pair(previewUrl, previewTitle)
+        }
 
         // The extras deliberately stay on the Intent: PendingThreadNavigation
         // remembers what has already been opened, so a rotation before the
@@ -337,8 +357,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private companion object {
+    companion object {
         const val STATE_CONSUMED_NOTIFICATION = "openmaus.consumedNotification"
+        val pendingPreview = kotlinx.coroutines.flow.MutableStateFlow<Pair<String, String?>?>(null)
 
         /** One key per tracked permission, so a second one needs no new plumbing. */
         fun askedKey(permission: String): String =

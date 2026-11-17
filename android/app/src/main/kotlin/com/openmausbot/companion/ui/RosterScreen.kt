@@ -505,9 +505,9 @@ private fun RosterHeader(
             Row(
                 modifier = Modifier
                     .weight(1f)
-                    .height(42.dp)
-                    .clip(RoundedCornerShape(21.dp))
-                    .background(AppTheme.colors.surfaceRaised)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(22.dp))
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                     .padding(horizontal = 14.dp),
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -515,7 +515,7 @@ private fun RosterHeader(
                 Icon(
                     imageVector = Icons.Filled.Search,
                     contentDescription = null,
-                    tint = AppTheme.colors.textTertiary,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )
                 Box(modifier = Modifier.weight(1f)) {
@@ -523,7 +523,7 @@ private fun RosterHeader(
                         Text(
                             "Search",
                             fontSize = 16.sp,
-                            color = AppTheme.colors.textTertiary,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                     BasicTextField(
@@ -532,9 +532,9 @@ private fun RosterHeader(
                         singleLine = true,
                         textStyle = LocalTextStyle.current.copy(
                             fontSize = 16.sp,
-                            color = AppTheme.colors.textPrimary,
+                            color = MaterialTheme.colorScheme.onSurface,
                         ),
-                        cursorBrush = SolidColor(AppTheme.colors.textPrimary),
+                        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         modifier = Modifier
                             .fillMaxWidth()
@@ -546,7 +546,7 @@ private fun RosterHeader(
                         Icon(
                             imageVector = Icons.Filled.Close,
                             contentDescription = "Clear search",
-                            tint = AppTheme.colors.textTertiary,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.size(18.dp),
                         )
                     }
@@ -555,8 +555,8 @@ private fun RosterHeader(
             Text(
                 text = "Cancel",
                 fontSize = 16.sp,
-                fontWeight = FontWeight.Medium,
-                color = AppTheme.colors.textPrimary,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier
                     .clip(RoundedCornerShape(8.dp))
                     .clickable(role = Role.Button, onClick = { onBar(bar.cancelSearch()) })
@@ -575,9 +575,9 @@ private fun RosterHeader(
             Box {
                 Box(
                     modifier = Modifier
-                        .size(38.dp)
+                        .size(40.dp)
                         .clip(CircleShape)
-                        .background(AppTheme.colors.surfaceRaised)
+                        .background(MaterialTheme.colorScheme.surfaceContainerHighest)
                         .combinedClickable(
                             role = Role.Button,
                             onClick = onSettings,
@@ -588,7 +588,7 @@ private fun RosterHeader(
                     Icon(
                         imageVector = Icons.Filled.Settings,
                         contentDescription = "Settings",
-                        tint = AppTheme.colors.textPrimary,
+                        tint = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(20.dp),
                     )
                 }

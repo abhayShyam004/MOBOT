@@ -43,6 +43,28 @@ import {
 } from './default-capabilities.ts';
 import { PhoneControlCapability } from './phone-control.ts';
 import { ReachCapability } from './reach.ts';
+import {
+  isGreeting,
+  isOutputFormatInstruction,
+  stripGreetingPrefix,
+  stripTrailingOutputFormatConstraints,
+} from '../conversational-cadence.ts';
+
+/**
+ * Informational framing. "Explain how to open WhatsApp" and "What is a
+ * calendar event?" contain words that also name device actions, but their
+ * grammatical mood is a request for an explanation, not an instruction to
+ * actuate anything. Real-time freshness still overrides this: "Explain
+ * today's headlines" genuinely needs retrieval.
+ */
+const EXPLANATORY_REQUEST =
+  /^(?:please\s+)?(?:explain|describe|define|summari[sz]e|compare|contrast|why\b|how\s+(?:do|does|did|can|could|would|is|are|to)\b|tell\s+me\s+(?:about|how|why|what)\b|can\s+you\s+explain|could\s+you\s+explain)/i;
+const DEFINITIONAL_REQUEST =
+  /^(?:please\s+)?(?:what|who|when|where)\s+(?:is|are|was|were|does|do|did|would|should|can)\b/i;
+/** A path or an explicit device operation is a real task even when the
+ * sentence opens with "what is". A definition ("what is a file?") is not. */
+const CONCRETE_EXTERNAL_TARGET =
+  /(?:^|[\s"'(])(?:\/|~\/|[a-z]:\\|https?:\/\/|www\.)/i;
 
 export const CAPABILITY_PROBE_TIMEOUT_MS = 500;
 
@@ -587,10 +609,26 @@ export class DeviceCapabilityRegistry {
     }
 
     const obj = (request.objective || "").trim();
-    const lowerObj = obj.toLowerCase();
     const keywords = (Array.isArray(request.contextKeywords) ? request.contextKeywords : [])
       .map((k) => (typeof k === "string" ? k.toLowerCase().trim() : ""))
       .filter(Boolean);
+
+    // The conversational-cadence helper owns the greeting vocabulary and
+    // permits only a short address term ("Hey MOBOT"). Reusing it here keeps
+    // "hey can you explain…" and "yo write a script" out of the greeting lane
+    // instead of swallowing the request with a permissive prefix regex.
+    const greeting = isGreeting(obj, request.activeBotName ? [request.activeBotName] : []);
+    // A greeting is conversational framing, not the request. Routing reads the
+    // request behind it so "hey can you explain X" classifies exactly like
+    // "can you explain X"; the original text still reaches the provider.
+    const routingObj = stripGreetingPrefix(obj, request.activeBotName ? [request.activeBotName] : []) ?? obj;
+    // Output-format instructions constrain the answer's shape, not the work
+    // it takes to produce it. They are removed from the routing text only;
+    // the provider still receives the person's original message.
+    const taskObj = stripTrailingOutputFormatConstraints(routingObj).trim() || routingObj;
+    const outputOnly = isOutputFormatInstruction(routingObj);
+
+    const lowerObj = taskObj.toLowerCase();
     const combinedTokens = new Set([
       ...lowerObj.split(/[\s,.;:!?_/\-()]+/).filter(Boolean),
       ...keywords,
@@ -602,9 +640,9 @@ export class DeviceCapabilityRegistry {
     // 1. Ambiguous, nonsensical, or completely missing objective -> user_clarification
     if (
       !obj ||
-      obj.length < 3 ||
-      /^[^a-zA-Z0-9]+$/.test(obj) ||
-      /^(?:what|help|do it|fix it|\?+|can you help me with that thing)$/i.test(obj)
+      (!greeting && taskObj.length < 3) ||
+      /^[^a-zA-Z0-9]+$/.test(taskObj) ||
+      /^(?:what|help|do it|fix it|\?+|can you help me with that thing)$/i.test(taskObj)
     ) {
       return {
         chosenModality: "user_clarification",
@@ -614,29 +652,36 @@ export class DeviceCapabilityRegistry {
       };
     }
 
-    // 2. Simple Conversational Greetings or Pure Reasoning -> direct_answer
-    // Anti-Pattern: Do not force simple conversational greetings through a heavy tool routing pipeline.
-    const isGreeting =
-      /^(?:hi|hello|hey|greetings|howdy|sup)(?:\s+\w+)?[\s!.]*$/i.test(obj) ||
-      /^(?:good\s+(?:morning|afternoon|evening|day))[\s!.]*$/i.test(obj);
+    // 2. Conversational greetings, rendering-only instructions, explanatory
+    // questions, and pure reasoning -> direct_answer. The model is a reasoning
+    // and language capability; a missing tool must never turn an ordinary
+    // question into a capability error.
+    const isInformationalRequest =
+      request.requiredDataFreshness !== "realtime" &&
+      (
+        EXPLANATORY_REQUEST.test(routingObj) ||
+        (DEFINITIONAL_REQUEST.test(routingObj) && !CONCRETE_EXTERNAL_TARGET.test(routingObj))
+      );
     const isPureReasoning =
       request.requiredDataFreshness !== "realtime" &&
       (
-        /^(?:who\s+are\s+you|what\s+is\s+your\s+name|who\s+(?:built|made|created)\s+you)/i.test(obj) ||
-        /^(?:tell\s+me\s+a\s+joke|write\s+a\s+poem|tell\s+(?:me\s+)?a\s+story)/i.test(obj) ||
-        /^what\s+is\s+[\d\s+*/^().-]+\??$/i.test(obj) ||
-        /^explain\s+/i.test(obj) ||
+        /^(?:who\s+are\s+you|what\s+is\s+your\s+name|who\s+(?:built|made|created)\s+you)/i.test(taskObj) ||
+        /^(?:tell\s+me\s+a\s+joke|write\s+a\s+poem|tell\s+(?:me\s+)?a\s+story)/i.test(taskObj) ||
+        /^what\s+is\s+[\d\s+*/^().-]+\??$/i.test(taskObj) ||
+        /^(?:(?:can|could|would|will)\s+you\s+|please\s+)?explain\s+/i.test(taskObj) ||
         (hasAnyToken("poem", "joke", "story", "reasoning", "philosophy") && !hasAnyToken("search", "browse", "file", "weather", "news", "today", "headlines", "latest")) ||
         (request.requiredDataFreshness === "historical" && !hasAnyToken("search", "browse", "file", "open", "launch", "click"))
       );
 
-    if (isGreeting || isPureReasoning) {
+    if (greeting || outputOnly || isInformationalRequest || isPureReasoning) {
       return {
         chosenModality: "direct_answer",
         fallbackCapabilityIds: [],
-        justification: isGreeting
+        justification: greeting
           ? "Conversational greeting handled via direct LLM generation without unnecessary tool routing."
-          : "Conceptual, creative, or pure reasoning query satisfied via direct LLM synthesis without external mutation.",
+          : outputOnly
+            ? "Request only constrains how the answer is rendered; the model answers directly without an external capability."
+            : "Conceptual, creative, or pure reasoning query satisfied via direct LLM synthesis without external mutation.",
         confidenceScore: 0.96,
       };
     }
@@ -694,9 +739,15 @@ export class DeviceCapabilityRegistry {
     }
 
     // 5. Terminal Command / Cloud VPS -> terminal_command
+    // "Execute it" is only a command when there is something executable in the
+    // request: "execute the plan" is reasoning, "write a program and execute
+    // it" needs a shell.
+    const isCodeExecution =
+      hasAnyToken("execute", "run", "compile", "build", "test", "tests") &&
+      hasAnyToken("code", "program", "script", "python", "javascript", "typescript", "node", "bash", "shell", "command", "terminal", "project", "repository", "repo");
     const isTerminalTarget =
       !hasWebUrl &&
-      (request.targetDevice === "cloud_vps" ||
+      (request.targetDevice === "cloud_vps" || isCodeExecution ||
         hasAnyToken("terminal", "bash", "shell", "exec", "curl", "npm", "pnpm", "git", "docker", "compile", "script", "command"));
     if (isTerminalTarget && !hasAnyToken("browser", "search", "headlines", "news")) {
       const candidates = ["system.terminal", "device.apps"].filter((id) => this.has(id));
@@ -868,29 +919,34 @@ export class DeviceCapabilityRegistry {
       };
     }
 
-    // 10. Fallback: Check if any registered capability matches the keywords
-    for (const [id, cap] of this.capabilities.entries()) {
-      if (hasAnyToken(id, cap.name.toLowerCase())) {
-        const health = this.getHealthStatus(id);
-        if (health.state === "AVAILABLE") {
-          return {
-            chosenModality: "device_gesture",
-            primaryCapabilityId: id,
-            fallbackCapabilityIds: [],
-            justification: `Task keywords matched registered capability '${id}'.`,
-            confidenceScore: 0.85,
-          };
-        }
-      }
+    // 10. Explicit external actions that have no registered capability. These
+    // are positive statements that the request must act on something outside
+    // the model — not merely requests that failed to match a keyword. Only
+    // these get an honest capability limitation.
+    const asksToMessage =
+      hasAnyToken("send", "post", "message", "email", "dm", "notify") &&
+      hasAnyToken("message", "messages", "email", "emails", "sms", "dm", "whatsapp", "slack", "gmail");
+    const asksToControlHardware =
+      hasAnyToken("control", "connect", "pair", "configure", "calibrate", "access") &&
+      hasAnyToken("hardware", "peripheral", "peripherals", "sensor", "sensors", "usb", "bluetooth", "gpio", "serial");
+    if (asksToMessage || asksToControlHardware) {
+      return {
+        chosenModality: "user_clarification",
+        primaryCapabilityId: undefined,
+        fallbackCapabilityIds: [],
+        justification: `${ERR_NO_CAPABLE_TOOL}: No registered capability satisfies the required external action for '${obj}'.`,
+        confidenceScore: 0.25,
+      };
     }
 
-    // 11. Unsupported Tool / Protocol: ERR_NO_CAPABLE_TOOL
+    // 11. No external action was requested. A text-only answer is a capability
+    // the model already has; the absence of a matching tool is not a failure.
     return {
-      chosenModality: "user_clarification",
+      chosenModality: "direct_answer",
       primaryCapabilityId: undefined,
       fallbackCapabilityIds: [],
-      justification: `${ERR_NO_CAPABLE_TOOL}: No registered capability satisfies the task requirements for '${obj}'.`,
-      confidenceScore: 0.20,
+      justification: "No external action or capability is required; the model answers directly.",
+      confidenceScore: 0.90,
     };
   }
 }
@@ -1043,5 +1099,6 @@ export function normalizeCapabilityMatchRequest(
     requiredDataFreshness: inferredFreshness,
     targetDevice: inferredTarget,
     activeBotId: (partial.activeBotId || "").trim() || "default",
+    ...(partial.activeBotName ? { activeBotName: partial.activeBotName.trim() } : {}),
   };
 }

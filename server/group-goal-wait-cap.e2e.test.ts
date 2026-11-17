@@ -152,7 +152,7 @@ describe("goal wait cap and transient retry", () => {
     // the worker is stuck in an unrelated direct turn that never settles
     await holdBusy(hang.id, "Never finish this");
 
-    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Draft the summary", mode: "goal" })).status).toBe(202);
+    expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0001",  text: "Draft the summary", mode: "goal" })).status).toBe(202);
 
     await expect.poll(async () => {
       const { room: current, cards } = await roomState(room.id);
@@ -191,7 +191,7 @@ describe("goal wait cap and transient retry", () => {
     const room = await createRoom("Stuck lead team", lead.id, [lead.id, helper.id]);
 
     await holdBusy(lead.id, "Never finish this either");
-    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Plan the launch", mode: "goal" })).status).toBe(202);
+    expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0002",  text: "Plan the launch", mode: "goal" })).status).toBe(202);
 
     await expect.poll(async () => {
       const { cards } = await roomState(room.id);
@@ -210,7 +210,7 @@ describe("goal wait cap and transient retry", () => {
     const helper = await createBot("Spare helper", "helper");
     const room = await createRoom("Crash team", lead.id, [lead.id, helper.id]);
 
-    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Try anyway", mode: "goal" })).status).toBe(202);
+    expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0003",  text: "Try anyway", mode: "goal" })).status).toBe(202);
 
     await expect.poll(async () => {
       const { cards } = await roomState(room.id);
@@ -237,7 +237,7 @@ describe("goal wait cap and transient retry", () => {
     })).body.group;
 
     await holdBusy(stuck.id, "Never finish this chat");
-    expect((await api("POST", `/api/groups/${room.id}/messages`, { text: "Quick check-in" })).status).toBe(202);
+    expect((await api("POST", `/api/groups/${room.id}/messages`, {sendId: "test_room_send_0004",  text: "Quick check-in" })).status).toBe(202);
 
     await expect.poll(async () => {
       const { room: current } = await roomState(room.id);

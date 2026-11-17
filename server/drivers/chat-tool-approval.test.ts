@@ -59,6 +59,43 @@ describe("chat tool approval lifecycle", () => {
     expect(open).toHaveBeenCalledTimes(2);
   });
 
+  it("reports a denial to the model and never reopens the same ask", async () => {
+    const opens: Array<{ id: string; tool: string }> = [];
+    const resolved = vi.fn();
+    const gate = createChatToolApproval({
+      signal: new AbortController().signal,
+      open: (ask) => opens.push(ask),
+      resolved,
+    });
+    const answer = gate.ask("mcp__composio__GOOGLEDRIVE_UPLOAD_FILE", "Send data to Google Drive");
+    expect(opens).toHaveLength(1);
+    expect(gate.answer(opens[0].id, "deny")).toBe("rejected");
+    await expect(answer).resolves.toBe(false);
+    expect(resolved).toHaveBeenCalledExactlyOnceWith(opens[0], false, "user");
+    expect(gate.answer(opens[0].id, "allow")).toBe("unavailable");
+  });
+
+  it("will not let one request's id settle a different pending request", async () => {
+    const opens: Array<{ id: string; tool: string }> = [];
+    const resolved = vi.fn();
+    const gate = createChatToolApproval({
+      signal: new AbortController().signal,
+      open: (ask) => opens.push(ask),
+      resolved,
+    });
+    const first = gate.ask("workspace_write", "Write a.ipynb");
+    const second = gate.ask("workspace_write", "Write b.ipynb");
+
+    expect(opens).toHaveLength(2);
+    expect(opens[0].id).not.toBe(opens[1].id);
+    expect(gate.answer(opens[0].id, "deny")).toBe("rejected");
+    await expect(first).resolves.toBe(false);
+    // The second call is still waiting, and the spent id cannot answer it.
+    expect(gate.answer(opens[0].id, "allow")).toBe("unavailable");
+    expect(gate.answer(opens[1].id, "allow")).toBe("allowed-once");
+    await expect(second).resolves.toBe(true);
+  });
+
   it("registers the request before publishing it so a synchronous harness approval works", async () => {
     const resolved = vi.fn();
     const answered = vi.fn();

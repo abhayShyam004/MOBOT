@@ -1868,4 +1868,154 @@ describe("soul", () => {
       rmSync(folder, { force: true });
     }
   });
+
+  describe("Official Roadmap Phase 31: Specialization Persistence", () => {
+    it("persists specialization on bot creation and survives a fresh store reload", async () => {
+      const { checkToolPermission, ERR_SPECIALIST_BOUNDARY_OVERSTEP } = await import("./permission-policy.ts");
+      const { specializationPrompt } = await import("./system-prompt.ts");
+
+      const store = new Store(selection);
+      const researcherBot = store.createBot({
+        name: "DeepResearcher",
+        title: "Senior Research Specialist",
+        specialization: {
+          roleId: "researcher",
+          heuristics: {
+            minimumSourceCitations: 5,
+            defaultSearchDepth: "exhaustive",
+          },
+          customPromptInjections: [
+            "MANDATE 1: Prioritize primary academic sources.",
+            "MANDATE 2: Refuse uncorroborated assertions.",
+          ],
+        },
+      });
+
+      expect(researcherBot.specialization).toBeDefined();
+      expect(researcherBot.specialization?.roleId).toBe("researcher");
+      expect(researcherBot.specialization?.heuristics.minimumSourceCitations).toBe(5);
+      expect(researcherBot.specialization?.heuristics.defaultSearchDepth).toBe("exhaustive");
+      expect(researcherBot.specialization?.customPromptInjections).toEqual([
+        "MANDATE 1: Prioritize primary academic sources.",
+        "MANDATE 2: Refuse uncorroborated assertions.",
+      ]);
+
+      // Reload from disk into a completely fresh Store instance
+      const freshStore = new Store(selection);
+      const loaded = freshStore.bot(researcherBot.id);
+      expect(loaded).toBeDefined();
+      expect(loaded?.specialization?.roleId).toBe("researcher");
+      expect(loaded?.specialization?.heuristics.minimumSourceCitations).toBe(5);
+      expect(loaded?.specialization?.heuristics.defaultSearchDepth).toBe("exhaustive");
+      expect(loaded?.specialization?.customPromptInjections).toEqual([
+        "MANDATE 1: Prioritize primary academic sources.",
+        "MANDATE 2: Refuse uncorroborated assertions.",
+      ]);
+
+      // Rebuilt system prompt contains specialization directives
+      const prompt = specializationPrompt(loaded?.specialization);
+      expect(prompt).toContain("Specialization: researcher");
+      expect(prompt).toContain("Default search depth: exhaustive");
+      expect(prompt).toContain("Minimum grounded citations: 5");
+      expect(prompt).toContain("MANDATE 1: Prioritize primary academic sources.");
+      expect(prompt).toContain("MANDATE 2: Refuse uncorroborated assertions.");
+
+      // Tool enforcement holds after reload
+      const shellAttempt = checkToolPermission("bash", undefined, { command: "ls -la" }, {
+        specialization: loaded?.specialization,
+        roleId: loaded?.specialization?.roleId,
+        mountedTool: true,
+      });
+      expect(shellAttempt.allowed).toBe(false);
+      expect(shellAttempt.errorCode).toBe(ERR_SPECIALIST_BOUNDARY_OVERSTEP);
+    });
+
+    it("persists specialization updates via patchBot and patchBotProfile", () => {
+      const store = new Store(selection);
+      const bot = store.createBot({ name: "EvolvingBot" });
+      expect(bot.specialization?.roleId).toBe("generalist");
+
+      // Update via patchBot
+      store.patchBot(bot.id, {
+        specialization: {
+          roleId: "coder",
+          heuristics: {
+            requireAutomatedTestRun: true,
+            defaultSearchDepth: "shallow",
+          },
+          customPromptInjections: ["Enforce test coverage."],
+        },
+      });
+
+      const reloaded1 = new Store(selection);
+      expect(reloaded1.bot(bot.id)?.specialization?.roleId).toBe("coder");
+      expect(reloaded1.bot(bot.id)?.specialization?.heuristics.requireAutomatedTestRun).toBe(true);
+
+      // Update via patchBotProfile
+      store.patchBotProfile(bot.id, {
+        specialization: {
+          roleId: "planner",
+          heuristics: {
+            requireDependencyOrdering: true,
+            defaultSearchDepth: "shallow",
+          },
+          customPromptInjections: ["Enforce topological DAG ordering."],
+        },
+      });
+
+      const reloaded2 = new Store(selection);
+      expect(reloaded2.bot(bot.id)?.specialization?.roleId).toBe("planner");
+      expect(reloaded2.bot(bot.id)?.specialization?.heuristics.requireDependencyOrdering).toBe(true);
+      expect(reloaded2.bot(bot.id)?.specialization?.customPromptInjections).toEqual([
+        "Enforce topological DAG ordering.",
+      ]);
+    });
+
+    it("migrates legacy bot records without specialization safely to generalist", () => {
+      // Simulate an old bots.json written before Phase 31 without specialization
+      const botsFile = join(DATA_DIR, "bots.json");
+      const legacyBot = {
+        id: "legacy-bot-1",
+        threadId: "legacy-thread-1",
+        name: "LegacyBot",
+        title: "Old Bot",
+        description: "Created before Phase 31",
+        soul: "",
+        soulHash: soulHash(""),
+        notifications: true,
+        color: "blue",
+        unread: false,
+        modelSelection: selection(),
+        resumeCursors: {},
+        createdAt: 1000000,
+        tasks: [{
+          threadId: "legacy-thread-1",
+          title: "Legacy Task",
+          createdAt: 1000000,
+          resumeCursors: {},
+          modelSelection: selection(),
+          unread: false,
+          activity: "idle",
+          busy: false,
+        }],
+      };
+
+      mkdirSync(DATA_DIR, { recursive: true });
+      writeFileSync(botsFile, JSON.stringify([legacyBot], null, 2));
+
+      // Load with Store
+      const store = new Store(selection);
+      const migrated = store.bot("legacy-bot-1");
+      expect(migrated).toBeDefined();
+      expect(migrated?.specialization).toBeDefined();
+      expect(migrated?.specialization?.roleId).toBe("generalist");
+      expect(migrated?.specialization?.heuristics.defaultSearchDepth).toBe("shallow");
+      expect(migrated?.specialization?.customPromptInjections).toEqual([]);
+
+      // Verify written back to disk
+      const diskContent = JSON.parse(readFileSync(botsFile, "utf8"));
+      expect(diskContent[0].specialization).toBeDefined();
+      expect(diskContent[0].specialization.roleId).toBe("generalist");
+    });
+  });
 });

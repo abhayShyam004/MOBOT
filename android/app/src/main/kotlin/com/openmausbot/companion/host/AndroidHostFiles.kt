@@ -70,4 +70,21 @@ class AndroidHostFiles(private val context: Context) : HarnessHost.Files {
             android.provider.Settings.Global.getString(context.contentResolver, "omb_crash_point")
         }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
     }
+
+    /**
+     * Provider test envelope, read **only** in a preview build.
+     *
+     *     adb shell settings put global omb_provider_test '{"responsesUrl":…}'
+     *
+     * Same reasoning as the crash switch: a global setting is written by adb,
+     * not by this app, so a bot's shell — which shares this UID, and could
+     * write any file under `files/` — cannot redirect its own model traffic.
+     * The server validates the value again and refuses a non-private host.
+     */
+    override fun providerTestEnvelope(): String? {
+        if (!context.packageName.endsWith(".preview")) return null
+        return runCatching {
+            android.provider.Settings.Global.getString(context.contentResolver, "omb_provider_test")
+        }.getOrNull()?.trim()?.takeIf { it.isNotEmpty() }
+    }
 }

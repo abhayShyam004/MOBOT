@@ -11,9 +11,11 @@ import {
   failureTranscriptLine,
   summarizeRuntimeFailure,
   summarizeStopReason,
+  turnFallbackText,
   classifyFailure,
   decideReplan,
 } from "./runtime-failure.ts";
+import { ProviderTimeoutError } from "./provider-deadline.ts";
 
 const OPENROUTER_429 = 'upstream HTTP 429: {"error":{"message":"Provider returned error","type":"rate_limit_exceeded","code":429}}';
 
@@ -32,6 +34,68 @@ describe("runtime failure summaries", () => {
     expect(failureKindFor("the task was blocked by the provider's safety systems")).toBe("safety");
     expect(failureKindFor("400 malformed request")).toBe("invalid_request");
     expect(failureKindFor("something odd happened")).toBe("unknown");
+    // Seen on a real Android turn: the response stream ended at the model's
+    // output ceiling, so the turn stopped with an unfinished answer. It used
+    // to classify as "unknown" and tell the person nothing actionable.
+    expect(failureKindFor("The ChatGPT backend ended the response early (max_output_tokens).")).toBe("output_limit");
+  });
+
+  it("every provider deadline reads as a timeout card, not as an unknown stop", () => {
+    // The wording is what carries the kind: a deadline message without the
+    // word "timeout" would fall through to "unknown" and tell the person
+    // nothing. Built from the error the deadline actually throws, so the two
+    // modules cannot drift apart.
+    const phases = [
+      new ProviderTimeoutError("connect", 30_000),
+      new ProviderTimeoutError("first_token", 75_000),
+      new ProviderTimeoutError("idle", 30_000),
+      new ProviderTimeoutError("call_total", 300_000),
+    ];
+    for (const error of phases) {
+      expect(failureKindFor(error.message)).toBe("timeout");
+      expect(summarizeRuntimeFailure({ message: error.message, terminal: true }).kind).toBe("timeout");
+      expect(error.message).not.toMatch(/\b0s\b/);
+    }
+    // The driver's own stop reason reaches the same card.
+    expect(summarizeStopReason("timeout").kind).toBe("timeout");
+  });
+
+  it("says which deadline ran out, and still never repeats provider prose", () => {
+    // The card's collapsed body is the shortest true sentence about what
+    // happened. "The provider timed out" cannot tell a person whether a dead
+    // network, a slow first token, or a stalled stream stopped the turn.
+    const expected: Array<["connect" | "first_token" | "idle" | "call_total", RegExp]> = [
+      ["connect", /did not answer/],
+      ["first_token", /took too long to begin/],
+      ["idle", /connection stalled/],
+      ["call_total", /exceeded its deadline/],
+    ];
+    for (const [phase, sentence] of expected) {
+      const card = summarizeRuntimeFailure({ message: new ProviderTimeoutError(phase, 4_000).message, terminal: true });
+      expect(card.kind).toBe("timeout");
+      expect(card.detail).toMatch(sentence);
+      // The budget is in the sentence so the person can tell a 4s test
+      // endpoint from a shipped 30s one.
+      expect(card.detail).toContain("4s");
+    }
+    // A provider that writes its own "timeout" sentence does not get to put
+    // its bytes on the card; only the harness's own shapes are passed through.
+    const foreign = summarizeRuntimeFailure({ message: "upstream timeout: {\"error\":\"gateway timeout\"}", terminal: true });
+    expect(foreign.kind).toBe("timeout");
+    expect(foreign.detail).not.toContain("gateway timeout");
+    expect(foreign.detail).not.toContain("{");
+  });
+
+  it("tells a cut-off reply apart from an outage, and says to ask for less", () => {
+    const card = summarizeRuntimeFailure({
+      message: "The ChatGPT backend ended the response early (max_output_tokens).",
+      terminal: true,
+    });
+    expect(card.kind).toBe("output_limit");
+    expect(card.title).toBe("The reply was cut off");
+    expect(card.advice.toLowerCase()).toContain("smaller");
+    // The provider's own wording is not repeated to the person.
+    expect(JSON.stringify(card)).not.toContain("max_output_tokens");
   });
 
   it("reads the status out of a status line and never out of a payload", () => {
@@ -78,10 +142,59 @@ describe("runtime failure summaries", () => {
     expect(summarizeStopReason("quota_exhausted").kind).toBe("quota");
     expect(summarizeStopReason("rate_limit").kind).toBe("rate_limit");
     expect(summarizeStopReason("unknown_model").kind).toBe("model_unavailable");
+    expect(summarizeStopReason("timeout").kind).toBe("timeout");
+    expect(summarizeStopReason("timed_out").kind).toBe("timeout");
+    expect(summarizeStopReason("output_limit").kind).toBe("output_limit");
+    expect(summarizeStopReason("tool_error").kind).toBe("tooling");
     // A stop reason that merely mentions a model is not a missing model.
     expect(summarizeStopReason("model_call_limit_reached").kind).toBe("unknown");
     expect(summarizeStopReason("exit_before_result").kind).toBe("unknown");
     expect(summarizeStopReason(null).kind).toBe("unknown");
+  });
+
+  it("the turn's last line never points at a card that may not be there", () => {
+    // The Android build that dropped the failure row still ended the turn with
+    // "The error above explains why" — so the person was sent to look at
+    // nothing. The line now stands alone either way.
+    const explained = turnFallbackText({
+      ok: false,
+      stopReason: "error",
+      failureExplained: true,
+      failureRowStored: true,
+    });
+    expect(explained).toBe("This turn stopped before it finished. Retry when you are ready.");
+    expect(explained).not.toMatch(/above/i);
+
+    // The card was reported but is not in the store: the classified kind is
+    // the fallback, because that is the closest thing to the truth.
+    const missingRow = turnFallbackText({
+      ok: false,
+      stopReason: "error",
+      failureExplained: true,
+      failureRowStored: false,
+    });
+    expect(missingRow).toContain("This turn stopped before it finished:");
+    expect(missingRow).not.toMatch(/above/i);
+    // The raw stop reason is a code, not a sentence: it never reaches the
+    // person on its own.
+    expect(missingRow).not.toBe("This turn stopped before it finished: error.");
+
+    // A deadline's own sentence is what an unexplained timeout ends with, so
+    // even the fallback names the budget that ran out.
+    const deadline = turnFallbackText({
+      ok: false,
+      stopReason: new ProviderTimeoutError("first_token", 5_000).message,
+      failureExplained: false,
+      failureRowStored: false,
+    });
+    expect(deadline).toBe("This turn stopped before it finished: The provider stopped responding.");
+
+    // A stop the person asked for is not a failure, and a clean turn is not
+    // given a failure line at all.
+    expect(turnFallbackText({ ok: false, stopReason: "interrupted", failureExplained: false, failureRowStored: false }))
+      .toBe("The request was interrupted.");
+    expect(turnFallbackText({ ok: true, stopReason: null, failureExplained: false, failureRowStored: false }))
+      .toBe("Action completed.");
   });
 
   it("never puts the provider's own report in front of a person", () => {
