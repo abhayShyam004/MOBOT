@@ -196,6 +196,10 @@ class ChatMcpClient implements ChatClient {
     void this.close().catch(() => {});
   }
 
+  isAlive(): boolean {
+    return !this.closed && this.child.exitCode === null && !this.child.killed;
+  }
+
   close(): Promise<void> {
     if (this.closing) return this.closing;
     this.closed = true;
@@ -372,6 +376,8 @@ class RemoteChatMcpClient implements ChatClient {
   }
 }
 
+const persistentStdioClients = new Map<string, { client: ChatMcpClient; tools: unknown[] }>();
+
 export async function mountChatTools(
   integrations: SendTurnInput["integrations"],
   signal: AbortSignal,
@@ -394,7 +400,16 @@ export async function mountChatTools(
     if (closing) return closing;
     closed = true;
     signal.removeEventListener("abort", cancel);
-    closing = Promise.allSettled(clients.map((client) => client.close())).then((results) => {
+    closing = Promise.allSettled(
+      clients
+        .filter((client) => {
+          for (const pooled of persistentStdioClients.values()) {
+            if (pooled.client === client) return false;
+          }
+          return true;
+        })
+        .map((client) => client.close())
+    ).then((results) => {
       if (results.some((result) => result.status === "rejected")) throw new ChatToolSessionError("MCP server shutdown could not be confirmed; execution outcome may be uncertain");
     });
     return closing;
@@ -433,6 +448,12 @@ export async function mountChatTools(
       let client: ChatClient | undefined;
       try {
         if (signal.aborted || closed) throw aborted();
+        const pooled = persistentStdioClients.get(server);
+        if (pooled && pooled.client.isAlive() && "command" in descriptor) {
+          const durationMs = Date.now() - startedAt;
+          logHopTiming("MCP_MOUNT_SERVER", durationMs, { server, ok: true, toolCount: pooled.tools.length, pooled: true });
+          return { ok: true as const, server, client: pooled.client, tools: pooled.tools, startedAt };
+        }
         // "command" marks a local stdio server; a url-bearing entry is remote.
         client = "command" in descriptor
           ? new ChatMcpClient(descriptor)
@@ -440,6 +461,15 @@ export async function mountChatTools(
         clients.push(client);
         const tools = await client.tools(signal, (next) => { stage = next; });
         if (signal.aborted || closed) throw aborted();
+        if (server === "phone" && client instanceof ChatMcpClient) {
+          const entry = { client, tools };
+          persistentStdioClients.set(server, entry);
+          (client as any).child.on("exit", () => {
+            if (persistentStdioClients.get(server) === entry) {
+              persistentStdioClients.delete(server);
+            }
+          });
+        }
         const durationMs = Date.now() - startedAt;
         logHopTiming("MCP_MOUNT_SERVER", durationMs, { server, ok: true, toolCount: tools.length });
         return { ok: true as const, server, client, tools, startedAt };
